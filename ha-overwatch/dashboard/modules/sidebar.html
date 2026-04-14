@@ -1,0 +1,50 @@
+<!-- SIDEBAR — collapsible, position set by JS -->
+<div class="sidebar right" id="sidebarEl">
+
+  <!-- Collapse -->
+  <button class="collapse-btn" id="collapseBtn" title="Collapse sidebar" aria-label="Collapse sidebar">
+    <svg class="icon" width="26" height="26" viewBox="0 0 24 24" fill="none">
+      <path d="M9 6l6 6-6 6" stroke="rgba(255,255,255,0.9)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+  </button>
+
+  <!-- Search -->
+  <button class="icon-plate" id="searchBtn" title="Search zones & entities" aria-label="Search">
+    <svg class="icon" width="26" height="26" viewBox="0 0 24 24" fill="none">
+      <circle cx="11" cy="11" r="6.5" stroke="rgba(255,255,255,0.9)" stroke-width="2"/>
+      <path d="M16.5 16.5L21 21" stroke="rgba(255,255,255,0.9)" stroke-width="2" stroke-linecap="round"/>
+    </svg>
+  </button>
+
+  <!-- Zones editor -->
+  <button class="icon-plate" id="zonesBtn" title="Edit zones" aria-label="Edit zones">
+    <svg class="icon" width="26" height="26" viewBox="0 0 24 24" fill="none">
+      <polygon points="3,14 9,4 15,10 21,5 21,20 3,20" stroke="rgba(255,255,255,0.9)" stroke-width="1.8" stroke-linejoin="round" fill="rgba(255,255,255,0.08)"/>
+    </svg>
+  </button>
+
+  <!-- Connection Log -->
+  <button class="icon-plate" id="logBtn" title="Connection log" aria-label="Connection log">
+    <svg class="icon" width="26" height="26" viewBox="0 0 24 24" fill="none">
+      <rect x="4" y="3" width="16" height="18" rx="2" stroke="rgba(255,255,255,0.9)" stroke-width="2"/>
+      <path d="M8 8h8M8 12h8M8 16h5" stroke="rgba(255,255,255,0.9)" stroke-width="2" stroke-linecap="round"/>
+    </svg>
+  </button>
+
+  <!-- Settings -->
+  <button class="icon-plate" id="settingsBtn" title="Settings & HA connection" aria-label="Settings">
+    <svg class="icon" width="26" height="26" viewBox="0 0 24 24" fill="none">
+      <circle cx="12" cy="12" r="3" stroke="rgba(255,255,255,0.9)" stroke-width="2"/>
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" stroke="rgba(255,255,255,0.9)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+  </button>
+
+  <!-- Spacer + HA badge -->
+  <div style="flex:1;"></div>
+  <div class="ha-status-badge disconnected" id="haStatusBadge" title="Home Assistant connection">
+    <div class="ha-dot"></div>
+    <span id="haStatusText">HA</span>
+  </div>
+  <div style="height:14px;"></div>
+
+</div>

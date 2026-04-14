@@ -1,0 +1,1496 @@
+:root {
+  --sidebar-width: 72px;
+  --sidebar-icon-size: 26px;
+  --sidebar-icon-padding: 13px;
+  --map-icon-size: 24px;
+
+  --color-bg: #111;
+  --color-sidebar: transparent;
+  --color-text: #fff;
+  --color-icon-plate: rgba(40, 40, 40, 0.92);
+  --color-icon-plate-border: rgba(255, 255, 255, 0.12);
+
+  --zone-fill: rgba(0, 150, 255, 0.25);
+  --zone-stroke: #00aaff;
+  --zone-selected-stroke: #ffcc00;
+  --zone-handle-fill: #ffcc00;
+  --zone-handle-stroke: #000;
+
+  --search-panel-width: 340px;
+  --search-accent: #ffcc00;
+
+  /* HA entity state colours — overridable via ui.yaml */
+  --color-triggered-person: #ff3b30;
+  --color-triggered-motion: #ff9500;
+  --color-triggered-door: #ff6b35;
+  --color-triggered-window: #ff9f0a;
+  --color-triggered-smoke: #ff2d55;
+  --color-triggered-co: #bf5af2;
+  --color-triggered-default: #ff3b30;
+
+  --color-zone-normal: rgba(0, 150, 255, 0.18);
+  --color-zone-triggered: rgba(255, 59, 48, 0.45);
+  --color-zone-fault: rgba(255, 149, 0, 0.45);
+  --color-zone-bypassed: rgba(100, 100, 100, 0.35);
+  --color-zone-armed: rgba(0, 200, 100, 0.25);
+
+  --color-alarm-disarmed: #32d74b;
+  --color-alarm-armed-home: #ff9500;
+  --color-alarm-armed-away: #ff3b30;
+  --color-alarm-triggered: #ff2d55;
+  --color-alarm-pending: #ff9f0a;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: Arial, sans-serif;
+  overflow: hidden;
+}
+
+/* MAIN CONTENT */
+.main {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+}
+
+/* FLOORPLAN */
+.floorplan-wrapper {
+  position: absolute;
+  top: 0;
+  left: 0;
+  /* Size matches the image at natural resolution; JS sets this after image loads */
+  transform-origin: top left;
+  touch-action: none;
+}
+
+.floorplan-wrapper img {
+  display: block;
+  user-select: none;
+  pointer-events: none;
+  max-width: none; /* allow natural size */
+}
+
+/* ZONES — sits on top of the image, same size */
+.zones-svg {
+  position: absolute;
+  top: 0;
+  left: 0;
+  /* width/height set by JS to match image natural size */
+  overflow: visible;
+  pointer-events: none;
+}
+
+/* Outer clip container — prevents transformed content overflowing viewport */
+.main {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+}
+
+/* ============================================================
+ * SIDEBAR
+ * ============================================================ */
+.sidebar {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  width: 72px;
+  background: transparent;
+display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding-top: 16px;
+  border-left: none;
+  z-index: 200;
+  right: 0;
+  transition: transform 0.25s ease;
+}
+
+.sidebar.left { left: 0; right: auto; border-left: none; border-right: none; }
+.sidebar.right { right: 0; left: auto; }
+
+.sidebar.collapsed { transform: translateX(100%); }
+.sidebar.left.collapsed { transform: translateX(-100%); }
+
+/* Sidebar buttons (all same size incl collapse) */
+.icon-plate,
+.collapse-btn {
+  background: var(--color-icon-plate);
+  border: 1px solid var(--color-icon-plate-border);
+  border-radius: 12px;
+  cursor: pointer;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+
+  width: 52px;
+  height: 52px;
+
+  margin-bottom: 10px;
+
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+
+  box-shadow: 0 4px 14px rgba(0,0,0,0.35);
+  transition: border-color 0.15s, background 0.15s, transform 0.1s;
+}
+
+.icon-plate:hover,
+.collapse-btn:hover {
+  border-color: rgba(255, 255, 255, 0.28);
+  background: rgba(60, 60, 60, 0.95);
+}
+
+.icon-plate:active,
+.collapse-btn:active {
+  transform: translateY(1px);
+}
+
+.icon-plate.active {
+  border-color: rgba(255, 204, 0, 0.6);
+  background: rgba(255, 204, 0, 0.12);
+}
+
+.icon {
+  width: 26px;
+  height: 26px;
+  display: block;
+  opacity: 0.85;
+  transition: opacity 0.15s;
+  flex-shrink: 0;
+}
+
+.icon-plate:hover .icon,
+.collapse-btn:hover .icon {
+  opacity: 1;
+}
+
+/* ============================================================
+ * EXPAND BUTTON (persistent, shown when sidebar collapsed)
+ * ============================================================ */
+.expand-btn {
+  position: fixed;
+  top: 16px;
+  right: 10px; /* default; JS overrides to left:10px when sidebar is left */
+  z-index: 260;
+
+  background: var(--color-icon-plate);
+  border: 1px solid var(--color-icon-plate-border);
+  border-radius: 12px;
+  width: 52px;
+  height: 52px;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(0,0,0,0.35);
+  -webkit-tap-highlight-color: transparent;
+  transition: border-color 0.15s, background 0.15s, opacity 0.25s, transform 0.1s;
+
+  opacity: 0;
+  pointer-events: none;
+}
+
+.expand-btn.visible {
+  opacity: 1;
+  pointer-events: all;
+}
+
+.expand-btn:hover {
+  border-color: rgba(255, 255, 255, 0.28);
+  background: rgba(60, 60, 60, 0.95);
+}
+
+.expand-btn:active {
+  transform: translateY(1px);
+}
+
+/* ============================================================
+ * ZOOM CONTROLS
+ * ============================================================ */
+.zoom-controls {
+  position: fixed;
+  bottom: 18px;
+  right: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  z-index: 350;
+}
+
+.zoom-btn {
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  border: 1px solid rgba(255,255,255,0.14);
+  background: rgba(30,30,30,0.88);
+  color: #fff;
+  cursor: pointer;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  box-shadow: 0 10px 18px rgba(0,0,0,0.28);
+  -webkit-tap-highlight-color: transparent;
+  transition: border-color 0.15s, transform 0.1s;
+}
+
+.zoom-btn:hover { border-color: rgba(255,255,255,0.28); }
+.zoom-btn:active { transform: translateY(1px); }
+
+.zoom-icon {
+  width: 22px;
+  height: 22px;
+  display: block;
+}
+
+/* ============================================================
+ * STATUS BAR
+ * ============================================================ */
+.status-bar {
+  position: fixed;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(14,14,14,0.88);
+  border: 1px solid var(--color-icon-plate-border);
+  padding: 6px 16px;
+  border-radius: 10px;
+  z-index: 600; /* above sidebar (200), panels (190-500), everything */
+  user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: default;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #32d74b;
+  flex-shrink: 0;
+  transition: background 0.3s;
+}
+
+.status-dot.triggered { background: var(--color-alarm-triggered); animation: pulse-dot 0.8s infinite; }
+.status-dot.armed-away { background: var(--color-alarm-armed-away); }
+.status-dot.armed-home { background: var(--color-alarm-armed-home); }
+.status-dot.pending { background: var(--color-alarm-pending); animation: pulse-dot 1s infinite; }
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+/* ============================================================
+ * ZONES EDITOR PANEL — draggable, non-conflicting
+ * ============================================================ */
+.zones-editor {
+  position: fixed;
+  top: 70px;
+  left: 20px;
+  width: 280px;
+  max-height: calc(100vh - 90px);
+  background: rgba(14, 14, 14, 0.97);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 14px;
+  padding: 0;
+  z-index: 170;
+  display: flex;
+  flex-direction: column;
+  font-size: 13px;
+  box-shadow: 0 20px 50px rgba(0,0,0,0.6);
+  overflow: hidden;
+  /* Will be repositioned by drag JS */
+}
+
+.zones-editor-titlebar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 12px 10px 14px;
+  background: rgba(30,30,30,0.9);
+  border-bottom: 1px solid rgba(255,255,255,0.07);
+  cursor: grab;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.zones-editor-titlebar:active {
+  cursor: grabbing;
+}
+
+.zones-editor-titlebar h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: #eee;
+}
+
+.zones-editor-body {
+  padding: 10px 12px 12px 12px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1;
+}
+
+.zones-editor-close {
+  background: transparent;
+  border: 1px solid rgba(255,255,255,0.12);
+  color: #aaa;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  line-height: 1;
+  transition: border-color 0.15s, color 0.15s;
+}
+.zones-editor-close:hover { border-color: rgba(255,255,255,0.3); color: #fff; }
+
+.zones-editor button,
+.zones-editor select,
+.zones-editor input,
+.zones-editor textarea {
+  font-size: 13px;
+}
+
+.zones-editor-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 2px;
+}
+
+.zones-editor-row label {
+  flex: 0 0 58px;
+  color: #aaa;
+  font-size: 12px;
+}
+
+.zones-editor-row input[type="text"],
+.zones-editor-row input[type="color"] {
+  flex: 1;
+}
+
+.zones-editor-row input[type="text"],
+.zones-editor textarea {
+  background: #0f0f0f;
+  border: 1px solid #2a2a2a;
+  border-radius: 8px;
+  color: #fff;
+  padding: 6px 8px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.zones-editor-row input[type="text"]:focus,
+.zones-editor textarea:focus {
+  border-color: rgba(255,204,0,0.5);
+}
+
+.zones-editor-row input[type="color"] {
+  height: 30px;
+  border-radius: 8px;
+  border: 1px solid #2a2a2a;
+  background: #0f0f0f;
+  cursor: pointer;
+  padding: 2px;
+}
+
+.zones-list {
+  max-height: 150px;
+  overflow-y: auto;
+  border: 1px solid #222;
+  border-radius: 10px;
+  padding: 4px;
+  margin-bottom: 4px;
+}
+
+.zones-list-item {
+  padding: 6px 8px;
+  border-radius: 8px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  transition: background 0.12s;
+}
+
+.zones-list-item:hover { background: #1e1e1e; }
+.zones-list-item.selected { background: #232323; }
+
+.zone-list-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: #0096ff;
+}
+
+.zones-editor-footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  margin-top: 4px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255,255,255,0.06);
+}
+
+.zones-editor textarea {
+  width: 100%;
+  min-height: 62px;
+  resize: vertical;
+  box-sizing: border-box;
+  font-family: monospace;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.zone-mode-hint {
+  font-size: 11px;
+  color: #ffcc00;
+  background: rgba(255,204,0,0.08);
+  border: 1px solid rgba(255,204,0,0.2);
+  border-radius: 8px;
+  padding: 6px 8px;
+  line-height: 1.4;
+}
+
+/* Editor Buttons */
+.zones-editor button {
+  background: rgba(50,50,50,0.8);
+  border: 1px solid rgba(255,255,255,0.1);
+  color: #ddd;
+  border-radius: 8px;
+  padding: 6px 10px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.zones-editor button:hover:not(:disabled) {
+  background: rgba(70,70,70,0.9);
+  border-color: rgba(255,255,255,0.2);
+}
+.zones-editor button:disabled { opacity: 0.35; cursor: default; }
+.zones-editor button.danger { border-color: rgba(255,59,48,0.4); color: #ff6b6b; }
+.zones-editor button.danger:hover:not(:disabled) { background: rgba(255,59,48,0.15); }
+.zones-editor button.accent { border-color: rgba(255,204,0,0.4); color: #ffcc00; }
+
+/* HA entities section */
+.ha-section {
+  margin-top: 4px;
+}
+
+.ha-section-label {
+  font-size: 11px;
+  color: #888;
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.ha-entity-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.ha-entity-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: #0f0f0f;
+  border: 1px solid #222;
+  border-radius: 8px;
+  padding: 5px 8px;
+  font-size: 11px;
+  font-family: monospace;
+}
+
+.ha-entity-state {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: #444;
+}
+
+.ha-entity-state.on { background: var(--color-triggered-default); }
+.ha-entity-state.off { background: #32d74b; }
+.ha-entity-state.unavailable { background: #555; }
+
+.ha-entity-id {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #ccc;
+}
+
+.ha-entity-type {
+  color: #666;
+  font-size: 10px;
+}
+
+/* ============================================================
+ * ZONE SVG STYLES
+ * ============================================================ */
+.zone-polygon {
+  fill: var(--zone-fill);
+  stroke: var(--zone-stroke);
+  stroke-width: 2;
+  transition: fill 0.3s, stroke 0.3s;
+}
+
+.zone-polygon.selected {
+  stroke: var(--zone-selected-stroke);
+  stroke-width: 3;
+}
+
+.zone-handle {
+  fill: var(--zone-handle-fill);
+  stroke: var(--zone-handle-stroke);
+  stroke-width: 2;
+  cursor: pointer;
+}
+
+/* Temporary highlight */
+.zone-highlight {
+  fill: rgba(255, 204, 0, 0.18) !important;
+  stroke: var(--search-accent) !important;
+  stroke-width: 3 !important;
+}
+
+/* Zone live states */
+.zone-polygon.state-triggered {
+  fill: var(--color-zone-triggered) !important;
+  stroke: var(--color-alarm-triggered) !important;
+  stroke-width: 2.5 !important;
+}
+
+.zone-polygon.state-armed {
+  fill: var(--color-zone-armed) !important;
+  stroke: #00c864 !important;
+}
+
+.zone-polygon.state-fault {
+  fill: var(--color-zone-fault) !important;
+  stroke: #ff9500 !important;
+}
+
+.zone-polygon.state-bypassed {
+  fill: var(--color-zone-bypassed) !important;
+  stroke: #666 !important;
+}
+
+@keyframes zone-flash {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.2; }
+}
+
+.zone-polygon.flashing {
+  animation: zone-flash 0.7s ease-in-out infinite;
+}
+
+/* ============================================================
+ * SEARCH PANEL
+ * ============================================================ */
+.search-panel {
+  position: fixed;
+  top: 16px;
+  right: 86px; /* sidebar width + gap, overridden by makeDraggable after first drag */
+  width: var(--search-panel-width);
+  max-height: calc(100vh - 32px);
+  background: rgba(14,14,14,0.97);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 14px;
+  padding: 10px 10px 12px 10px;
+  z-index: 190;
+  display: none;
+  box-shadow: 0 20px 50px rgba(0,0,0,0.55);
+}
+
+.search-panel.open { display: block; }
+
+.search-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+  cursor: grab;
+  user-select: none;
+}
+
+.search-title {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #eee;
+}
+
+.search-close {
+  background: transparent;
+  border: 1px solid #333;
+  color: #aaa;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: border-color 0.15s, color 0.15s;
+}
+.search-close:hover { border-color: rgba(255,255,255,0.3); color: #fff; }
+
+.search-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 9px 10px;
+  border-radius: 10px;
+  border: 1px solid #2a2a2a;
+  background: #0a0a0a;
+  color: #fff;
+  outline: none;
+  font-size: 13px;
+  transition: border-color 0.15s;
+}
+
+.search-input:focus { border-color: rgba(255,204,0,0.5); }
+
+.search-results {
+  margin-top: 8px;
+  border: 1px solid #1e1e1e;
+  border-radius: 10px;
+  overflow: hidden;
+  max-height: 55vh;
+  overflow-y: auto;
+}
+
+.search-result {
+  padding: 9px 10px;
+  border-bottom: 1px solid #1a1a1a;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  transition: background 0.12s;
+}
+
+.search-result:hover { background: #1e1e1e; }
+
+.search-result-title {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.search-result-sub {
+  font-size: 11px;
+  color: #888;
+  word-break: break-all;
+}
+
+.search-hint {
+  margin-top: 8px;
+  font-size: 11px;
+  color: #666;
+}
+
+/* ============================================================
+ * HA CONNECTION STATUS BADGE
+ * ============================================================ */
+.ha-status-badge {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  color: #666;
+  padding: 4px 10px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  transition: all 0.3s;
+}
+
+.ha-status-badge.connected {
+  color: #32d74b;
+  border-color: rgba(50, 215, 75, 0.2);
+  background: rgba(50, 215, 75, 0.06);
+}
+
+.ha-status-badge.disconnected {
+  color: #666;
+  border-color: rgba(255,255,255,0.06);
+}
+
+.ha-status-badge.error {
+  color: #ff3b30;
+  border-color: rgba(255,59,48,0.2);
+  background: rgba(255,59,48,0.06);
+}
+
+.ha-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.ha-status-badge.connected .ha-dot {
+  animation: pulse-dot 2s infinite;
+}
+
+/* ============================================================
+ * SETTINGS PANEL
+ * ============================================================ */
+.settings-panel {
+  position: fixed;
+  top: 16px;
+  right: 86px; /* overridden by makeDraggable after first drag */
+  width: 340px;
+  max-height: calc(100vh - 32px);
+  background: rgba(14,14,14,0.97);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 14px;
+  padding: 0;
+  z-index: 190;
+  display: none;
+  box-shadow: 0 20px 50px rgba(0,0,0,0.55);
+  overflow: hidden;
+}
+
+.settings-panel.open { display: flex; flex-direction: column; }
+
+.settings-titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  background: rgba(25,25,25,0.95);
+  border-bottom: 1px solid rgba(255,255,255,0.07);
+  cursor: grab;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.settings-title {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.settings-body {
+  padding: 14px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.settings-section-title {
+  font-size: 11px;
+  color: #888;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+
+.settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.settings-field label {
+  font-size: 12px;
+  color: #bbb;
+}
+
+.settings-field input[type="text"],
+.settings-field input[type="password"],
+.settings-field input[type="number"] {
+  background: #0a0a0a;
+  border: 1px solid #2a2a2a;
+  border-radius: 8px;
+  color: #fff;
+  padding: 8px 10px;
+  font-size: 13px;
+  outline: none;
+  transition: border-color 0.15s;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.settings-field input:focus { border-color: rgba(255,204,0,0.5); }
+
+.settings-field input[type="color"] {
+  height: 36px;
+  border-radius: 8px;
+  border: 1px solid #2a2a2a;
+  background: #0a0a0a;
+  cursor: pointer;
+  padding: 2px 4px;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.settings-color-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.settings-color-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.settings-color-item label {
+  font-size: 11px;
+  color: #888;
+}
+
+.settings-btn {
+  background: rgba(255,204,0,0.1);
+  border: 1px solid rgba(255,204,0,0.3);
+  color: #ffcc00;
+  border-radius: 8px;
+  padding: 8px 14px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  transition: background 0.15s;
+  width: 100%;
+}
+
+.settings-btn:hover { background: rgba(255,204,0,0.18); }
+
+.settings-btn.secondary {
+  background: rgba(50,50,50,0.8);
+  border-color: rgba(255,255,255,0.1);
+  color: #ccc;
+}
+.settings-btn.secondary:hover { background: rgba(70,70,70,0.9); }
+
+/* ============================================================
+ * SETTINGS TOGGLES & UPLOAD BUTTON
+ * ============================================================ */
+.settings-toggle-row {
+  display: flex;
+  gap: 6px;
+}
+
+.settings-toggle {
+  flex: 1;
+  background: rgba(30,30,30,0.8);
+  border: 1px solid rgba(255,255,255,0.1);
+  color: #888;
+  border-radius: 8px;
+  padding: 7px 10px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  transition: all 0.15s;
+}
+
+.settings-toggle.active {
+  background: rgba(255,204,0,0.12);
+  border-color: rgba(255,204,0,0.4);
+  color: #ffcc00;
+}
+
+.settings-toggle:hover:not(.active) {
+  background: rgba(50,50,50,0.9);
+  color: #ccc;
+}
+
+.settings-floorplan-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.settings-floorplan-row input {
+  flex: 1;
+}
+
+.settings-upload-btn {
+  background: rgba(50,50,50,0.9);
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 8px;
+  color: #ccc;
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font-size: 16px;
+  transition: border-color 0.15s, background 0.15s;
+  flex-shrink: 0;
+}
+
+.settings-upload-btn:hover {
+  background: rgba(70,70,70,0.9);
+  border-color: rgba(255,255,255,0.25);
+}
+
+/* ============================================================
+ * ENTITY SEARCH (inside zone editor)
+ * ============================================================ */
+.entity-search-wrap {
+  position: relative;
+  margin-bottom: 6px;
+}
+
+.entity-search-input {
+  width: 100%;
+  box-sizing: border-box;
+  background: #0a0a0a;
+  border: 1px solid #2a2a2a;
+  border-radius: 8px;
+  color: #fff;
+  padding: 7px 10px;
+  font-size: 12px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.entity-search-input:focus {
+  border-color: rgba(255,204,0,0.5);
+}
+
+.entity-search-results {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  background: rgba(14,14,14,0.98);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 8px;
+  z-index: 400;
+  max-height: 180px;
+  overflow-y: auto;
+  box-shadow: 0 12px 30px rgba(0,0,0,0.6);
+}
+
+.entity-search-result {
+  padding: 7px 10px;
+  cursor: pointer;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  transition: background 0.1s;
+}
+
+.entity-search-result:hover { background: rgba(255,255,255,0.06); }
+.entity-search-result:last-child { border-bottom: none; }
+
+.entity-search-id {
+  font-size: 11px;
+  font-family: monospace;
+  color: #ddd;
+  word-break: break-all;
+}
+
+.entity-search-state {
+  font-size: 10px;
+  color: #666;
+}
+
+.entity-search-friendly {
+  font-size: 10px;
+  color: #888;
+  font-style: italic;
+}
+
+.ha-entity-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.ha-entity-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: #0a0a0a;
+  border: 1px solid #1e1e1e;
+  border-radius: 7px;
+  padding: 5px 8px;
+  font-size: 11px;
+  font-family: monospace;
+}
+
+.ha-entity-state {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: #444;
+  transition: background 0.3s;
+}
+
+.ha-entity-state.on  { background: var(--color-triggered-default); }
+.ha-entity-state.off { background: #32d74b; }
+.ha-entity-state.unavailable { background: #555; }
+
+.ha-entity-id {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #bbb;
+}
+
+.ha-entity-type {
+  color: #555;
+  font-size: 10px;
+}
+
+.ha-entity-remove {
+  background: transparent;
+  border: none;
+  color: #444;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0 2px;
+  line-height: 1;
+  transition: color 0.15s;
+  flex-shrink: 0;
+}
+
+.ha-entity-remove:hover { color: #ff3b30; }
+
+/* ============================================================
+ * CONNECTION LOG PANEL — floating, draggable
+ * ============================================================ */
+.log-panel.open {
+  display: flex;
+}
+
+.log-titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 14px;
+  background: rgba(20,20,20,0.95);
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+  flex-shrink: 0;
+}
+
+.log-title {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #aaa;
+}
+
+.log-clear-btn {
+  background: transparent;
+  border: 1px solid rgba(255,255,255,0.1);
+  color: #666;
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.log-clear-btn:hover {
+  border-color: rgba(255,255,255,0.25);
+  color: #bbb;
+}
+
+.log-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px 0;
+  font-family: monospace;
+  font-size: 11px;
+}
+
+.log-empty {
+  padding: 12px 14px;
+  color: #444;
+  font-style: italic;
+}
+
+.log-entry {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 3px 14px;
+  border-bottom: 1px solid rgba(255,255,255,0.03);
+  line-height: 1.5;
+}
+
+.log-entry:hover { background: rgba(255,255,255,0.02); }
+
+.log-ts {
+  color: #444;
+  flex-shrink: 0;
+  min-width: 68px;
+}
+
+.log-icon {
+  flex-shrink: 0;
+  width: 12px;
+  text-align: center;
+}
+
+.log-msg {
+  color: #999;
+  word-break: break-word;
+}
+
+.log-entry.log-ok    .log-msg { color: #32d74b; }
+.log-entry.log-warn  .log-msg { color: #ff9500; }
+.log-entry.log-error .log-msg { color: #ff3b30; }
+
+/* Log button badge — shows error dot when there are errors */
+.log-error-dot {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #ff3b30;
+  animation: pulse-dot 1.5s infinite;
+}
+
+/* icon-plate wrapper needs relative for the badge */
+.icon-plate { position: relative; }
+/* ============================================================
+ * LOG CONTROLS — search + filter tabs
+ * ============================================================ */
+.log-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 12px;
+  background: rgba(18,18,18,0.98);
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+  flex-shrink: 0;
+}
+
+.log-search-input {
+  width: 100%;
+  box-sizing: border-box;
+  background: #0a0a0a;
+  border: 1px solid #2a2a2a;
+  border-radius: 7px;
+  color: #fff;
+  padding: 6px 10px;
+  font-size: 12px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.log-search-input:focus { border-color: rgba(255,204,0,0.4); }
+
+.log-filter-tabs {
+  display: flex;
+  gap: 4px;
+}
+
+.log-filter-tab {
+  background: rgba(30,30,30,0.8);
+  border: 1px solid rgba(255,255,255,0.08);
+  color: #666;
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.log-filter-tab.active {
+  background: rgba(255,204,0,0.12);
+  border-color: rgba(255,204,0,0.35);
+  color: #ffcc00;
+}
+.log-filter-tab:hover:not(.active) { color: #ccc; border-color: rgba(255,255,255,0.15); }
+
+/* Zone name in log entry */
+.log-zone-name {
+  font-weight: 600;
+  margin-right: 2px;
+}
+
+/* Entity tag in log entry */
+.log-entity-tag {
+  font-family: monospace;
+  font-size: 10px;
+  color: #666;
+  background: rgba(255,255,255,0.04);
+  border-radius: 4px;
+  padding: 1px 4px;
+  margin-left: 4px;
+}
+
+/* Category-coloured left border */
+.log-cat-zone   { border-left: 2px solid rgba(255,204,0,0.4); }
+.log-cat-entity { border-left: 2px solid rgba(90,200,250,0.4); }
+.log-cat-ha     { border-left: 2px solid rgba(50,215,75,0.4); }
+.log-cat-system { border-left: 2px solid rgba(150,150,150,0.3); }
+
+/* ============================================================
+ * LOG PANEL RESIZE HANDLE — bottom-right corner (issue 24)
+ * ============================================================ */
+.log-resize-handle {
+  position: absolute;
+  bottom: 0;
+  right: 0;
+  width: 20px;
+  height: 20px;
+  cursor: nwse-resize;
+  z-index: 20;
+  border-radius: 0 0 14px 0;   /* match panel corner */
+  overflow: hidden;
+}
+
+/* Two diagonal lines — classic resize grip */
+.log-resize-handle::before,
+.log-resize-handle::after {
+  content: "";
+  position: absolute;
+  background: rgba(255,255,255,0.18);
+  border-radius: 1px;
+  transition: background 0.15s;
+}
+
+/* First diagonal line */
+.log-resize-handle::before {
+  width: 10px;
+  height: 1.5px;
+  bottom: 6px;
+  right: 2px;
+  transform: rotate(-45deg);
+  transform-origin: right center;
+}
+
+/* Second diagonal line */
+.log-resize-handle::after {
+  width: 6px;
+  height: 1.5px;
+  bottom: 3px;
+  right: 2px;
+  transform: rotate(-45deg);
+  transform-origin: right center;
+}
+
+.log-resize-handle:hover::before,
+.log-resize-handle:hover::after {
+  background: rgba(255,255,255,0.45);
+}
+
+/* Make log-panel position:relative so handle can be position:absolute */
+.log-panel {
+  position: fixed;
+  bottom: 80px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 600px;
+  max-width: calc(100vw - 20px);
+  height: 260px;
+  background: rgba(10,10,10,0.97);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 14px;
+  z-index: 500;
+  display: none;
+  flex-direction: column;
+  box-shadow: 0 20px 50px rgba(0,0,0,0.6);
+  overflow: hidden;   /* clips content to rounded corners; handle uses absolute inside */
+}
+
+/* Once dragged, makeDraggable sets left/top/right:unset/bottom:unset */
+.log-panel[style*="top"] {
+  transform: none;
+}
+
+.log-panel-inner {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  overflow: hidden;
+  border-radius: 14px;
+}
+
+/* ============================================================
+ * ZONE TOGGLE SWITCH (issues 17, 20)
+ * ============================================================ */
+.zone-toggle-switch {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  width: 34px;
+  height: 20px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.zone-toggle-switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+  position: absolute;
+}
+.zone-toggle-track {
+  position: absolute;
+  inset: 0;
+  background: #333;
+  border-radius: 20px;
+  transition: background 0.2s;
+}
+.zone-toggle-track::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 3px;
+  width: 14px;
+  height: 14px;
+  background: #888;
+  border-radius: 50%;
+  transition: transform 0.2s, background 0.2s;
+}
+.zone-toggle-switch input:checked + .zone-toggle-track {
+  background: rgba(50,215,75,0.25);
+}
+.zone-toggle-switch input:checked + .zone-toggle-track::after {
+  background: #32d74b;
+  transform: translateX(14px);
+}
+.zone-toggle-switch input:disabled + .zone-toggle-track {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* ============================================================
+ * DEVICE TABS IN ZONE EDITOR (issue 16)
+ * ============================================================ */
+.ha-device-tabs {
+  display: flex;
+  gap: 3px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+.ha-device-tab {
+  background: rgba(30,30,30,0.8);
+  border: 1px solid rgba(255,255,255,0.08);
+  color: #555;
+  border-radius: 6px;
+  padding: 3px 9px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.ha-device-tab.active {
+  background: rgba(0,150,255,0.12);
+  border-color: rgba(0,150,255,0.35);
+  color: #5ac8fa;
+}
+.ha-device-tab:hover:not(.active) { color: #aaa; border-color: rgba(255,255,255,0.15); }
+.ha-tab-panel { display: block; }
+
+/* ============================================================
+ * STATUS BAR DROPDOWN (issue 20)
+ * ============================================================ */
+.status-dropdown {
+  position: fixed;
+  top: 50px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 601;
+  background: rgba(14,14,14,0.97);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 12px;
+  box-shadow: 0 16px 40px rgba(0,0,0,0.6);
+  min-width: 280px;
+  max-width: calc(100vw - 40px);
+  overflow: hidden;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+.status-dd-header {
+  padding: 10px 14px 8px;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+}
+.status-dd-master {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #aaa;
+  cursor: pointer;
+  width: 100%;
+}
+.status-dd-zones {
+  padding: 6px 0;
+  max-height: 280px;
+  overflow-y: auto;
+}
+.status-dd-empty {
+  padding: 12px 14px;
+  color: #444;
+  font-size: 12px;
+  font-style: italic;
+}
+.status-dd-zone {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  transition: background 0.1s;
+}
+.status-dd-zone:hover { background: rgba(255,255,255,0.04); }
+.status-dd-zname {
+  font-size: 12px;
+  color: #ccc;
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.status-dd-state {
+  font-size: 10px;
+  font-family: monospace;
+  opacity: 0.8;
+  flex-shrink: 0;
+}
+
+/* Once dragged the status dropdown follows */
+.status-dropdown[style*="left:"] {
+  transform: none;
+}

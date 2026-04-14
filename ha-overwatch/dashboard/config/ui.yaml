@@ -1,0 +1,53 @@
+# ============================================================
+# HA-Overwatch — UI Configuration
+# ============================================================
+
+ui:
+
+  # ── Floorplan ─────────────────────────────────────────────
+  floorplan: "img/floorplan.png"
+
+  # ── Sidebar ───────────────────────────────────────────────
+  sidebar_position: "right"        # "right" or "left"
+  sidebar_collapsed: false
+
+  # ── Status bar text (shown when no alarm panel entity) ────
+  status: "HA-Overwatch"
+
+  # ── Data refresh ──────────────────────────────────────────
+  polling_interval: 5              # seconds
+
+  # ── Home Assistant ─────────────────────────────────────────
+  ha_url: ""                       # e.g. http://192.168.1.100:8123
+  ha_token: ""                     # Long-Lived Access Token
+  alarm_entity: ""                 # e.g. alarm_control_panel.home_alarm
+  alarm_entity_inverted: false     # true = entity OFF means armed, ON means disarmed
+  alarm_label_armed: "Armed"       # Status bar label when alarm is on/armed
+  alarm_label_disarmed: "Disarmed" # Status bar label when alarm is off/disarmed
+
+  # ── Zone fade-out after trigger clears ────────────────────
+  zone_fade_duration: 3            # seconds to fade out after sensor clears
+
+  # ── Zone colours — Alarm ARMED ────────────────────────────
+  # Used when the alarm system is in armed/triggered/pending state
+  color_on_person:  "#ff3b30"
+  color_on_motion:  "#ff9500"
+  color_on_door:    "#ff6b35"
+  color_on_window:  "#ff9f0a"
+  color_on_animal:  "#ff6b00"
+  color_on_vehicle: "#ff3b80"
+  color_on_smoke:   "#ff2d55"
+  color_on_co:      "#bf5af2"
+  color_on_default: "#ff3b30"
+
+  # ── Zone colours — Alarm DISARMED ─────────────────────────
+  # Used when the alarm is disarmed but a sensor is still active
+  color_off_person:  "#4cd964"
+  color_off_motion:  "#5ac8fa"
+  color_off_door:    "#ffcc00"
+  color_off_window:  "#ffcc00"
+  color_off_animal:  "#aad400"
+  color_off_vehicle: "#00c7be"
+  color_off_smoke:   "#ff6b6b"
+  color_off_co:      "#cc73f8"
+  color_off_default: "#4cd964"
