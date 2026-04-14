@@ -437,8 +437,8 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => {
-  console.log(`[HA-Overwatch] Server running at http://localhost:${PORT}`);
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(`[HA-Overwatch] Server running at http://0.0.0.0:${PORT}`);
   console.log(`[HA-Overwatch] App directory:  ${APP_DIR}`);
   console.log(`[HA-Overwatch] Data directory: ${DATA_DIR}`);
 });
