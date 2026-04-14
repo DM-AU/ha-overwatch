@@ -470,6 +470,7 @@ function zoneToYaml(z) {
   out += `name: "${(z.name || "").replace(/"/g, '\\"')}"\n`;
   out += `color: "${z.colorHex || "#0096ff"}"\n`;
   out += `enabled: ${z.enabled !== false}\n`;
+  out += `hidden: ${z.hidden === true}\n`;
   out += `points:\n`;
   (z.points || []).forEach(p => { out += ` - [${Math.round(p.x)}, ${Math.round(p.y)}]\n`; });
   out += `sensors:\n`;
@@ -484,7 +485,7 @@ function zoneToYaml(z) {
 }
 
 function parseZoneYaml(text) {
-  const z = { points: [], sensors: [], cameras: [], lights: [], sirens: [], enabled: true };
+  const z = { points: [], sensors: [], cameras: [], lights: [], sirens: [], enabled: true, hidden: false };
   let section = "";
 
   for (const raw of text.split("\n")) {
@@ -517,6 +518,7 @@ function parseZoneYaml(text) {
       if (key === "id")      z.id = val;
       else if (key === "name")    z.name = val;
       else if (key === "enabled") z.enabled = val !== "false";
+      else if (key === "hidden")  z.hidden  = val === "true";
       else if (key === "color")   { z.colorHex = val; z.color = hexToRgba(val, 0.25); }
     }
   }
@@ -692,6 +694,22 @@ function setZoneEnabled(zoneId, val) {
     { zoneName: zone.name || zone.id, zoneColour: zone.colorHex || "#0096ff" }
   );
   syncZoneToHA(zone, zone.enabled ? "normal" : "disabled");
+}
+
+// Issue 30: hide/show a zone visually — no HA entity, no alarm impact
+function setZoneHidden(zoneId, hidden) {
+  const zone = zones.find(z => z.id === zoneId);
+  if (!zone) return;
+  zone.hidden = !!hidden;
+  saveZone(zone);
+  renderStatusDropdown();
+  renderZones();
+  logEvent(
+    "info",
+    hidden ? `Zone hidden: ${zone.name || zone.id}` : `Zone visible: ${zone.name || zone.id}`,
+    "zone",
+    { zoneName: zone.name || zone.id, zoneColour: zone.colorHex || "#0096ff" }
+  );
 }
 
 /* ─── HA ENTITY SYNC (issue 17 Phase 1) ──────────────────── */
@@ -875,12 +893,15 @@ function renderZones() {
     const isHighlight  = showHighlight && zone.id === highlightedZoneId;
     const zoneState    = getZoneState(zone);
     const isDisabled   = zoneState === "disabled";
+    const isHidden     = zone.hidden === true;
     const isTriggered  = haConnected && zoneState === "triggered";
     const isFault      = haConnected && zoneState === "fault";
     const fadeAlpha    = getZoneFadeAlpha(zone.id);
     const isFading     = fadeAlpha > 0;
     const showInLive   = isHighlight || isTriggered || isFault || isFading;
 
+    // Hidden zones: never show in live mode, show faded outline in editor only
+    if (isHidden && !editorMode) return;
     if (!editorMode && !showInLive) return;
 
     const pointsStr = pts.map(p => `${p.x},${p.y}`).join(" ");
@@ -899,6 +920,13 @@ function renderZones() {
       poly.style.fill        = "rgba(255,204,0,0.22)";
       poly.style.stroke      = "rgba(255,204,0,0.5)";
       poly.style.strokeWidth = String(1.5 / zoom.scale);
+
+    } else if (isHidden && editorMode) {
+      // Hidden zone in editor: very faint dotted outline so user knows it exists
+      poly.style.fill             = "rgba(80,80,80,0.06)";
+      poly.style.stroke           = "rgba(80,80,80,0.20)";
+      poly.style.strokeWidth      = String(1 / zoom.scale);
+      poly.style.strokeDasharray  = String(4 / zoom.scale) + " " + String(6 / zoom.scale);
 
     } else if (isDisabled && editorMode) {
       // Disabled zone in editor: grey dashed outline
@@ -1130,7 +1158,8 @@ function renderZonesEditor() {
             const dotColour = isOff ? "#444" :
                               state === "triggered" ? resolveColour(entityTypeColour(detectEntityType((z.sensors||[])[0]||""))) :
                               state === "fault" ? "#ff9500" : (z.colorHex || "#0096ff");
-            const badge = isOff ? `<span style="font-size:9px;color:#555;margin-left:auto;">off</span>` :
+            const badge = isOff ? `<span style="font-size:9px;color:#555;margin-left:auto;">disarmed</span>` :
+                          z.hidden ? `<span style="font-size:9px;color:#555;margin-left:auto;">👁 hidden</span>` :
                           state === "triggered" ? `<span style="font-size:9px;color:#ff3b30;margin-left:auto;">⚠</span>` :
                           state === "fault"     ? `<span style="font-size:9px;color:#ff9500;margin-left:auto;">!</span>` :
                           `<span style="font-size:9px;color:#555;margin-left:auto;">${(z.points||[]).length}pt</span>`;
@@ -1163,11 +1192,16 @@ function renderZonesEditor() {
         </div>
 
         <div class="zones-editor-row" style="align-items:center;gap:8px;">
-          <label style="flex:0 0 auto;">Zone enabled</label>
+          <label style="flex:0 0 auto;">Zone armed</label>
           <label class="zone-toggle-switch">
             <input type="checkbox" id="zoneEnabledToggle" ${selectedZone ? "" : "disabled"} ${(selectedZone?.enabled !== false) ? "checked" : ""}>
             <span class="zone-toggle-track"></span>
           </label>
+          <span style="flex:1;"></span>
+          <label style="flex:0 0 auto;font-size:11px;color:#666;" title="Hide this zone from the map (alarm still active)">Visible</label>
+          <button id="zoneHiddenToggle" title="${selectedZone?.hidden ? 'Zone hidden — click to show' : 'Zone visible — click to hide'}"
+            style="background:none;border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:4px 7px;cursor:pointer;font-size:15px;line-height:1;color:${selectedZone?.hidden ? '#555' : 'rgba(255,255,255,0.7)'};${selectedZone ? '' : 'opacity:0.3;pointer-events:none;'}"
+          >${selectedZone?.hidden ? '🙈' : '👁'}</button>
         </div>
 
         ${selectedZone ? `
@@ -1326,6 +1360,15 @@ function renderZonesEditor() {
   if (enabledToggle && selectedZone) {
     enabledToggle.onchange = () => {
       setZoneEnabled(selectedZone.id, enabledToggle.checked);
+      renderZonesEditor();
+    };
+  }
+
+  // Eyeball hidden toggle (issue 30)
+  const hiddenToggle = document.getElementById("zoneHiddenToggle");
+  if (hiddenToggle && selectedZone) {
+    hiddenToggle.onclick = () => {
+      setZoneHidden(selectedZone.id, !selectedZone.hidden);
       renderZonesEditor();
     };
   }
@@ -3031,7 +3074,7 @@ function renderStatusDropdown() {
 
   body.innerHTML = `
     <div class="status-dd-header">
-      <label class="status-dd-master" title="Master alarm toggle">
+      <label class="status-dd-master" title="Master arm toggle — arms/disarms all zones">
         <span>Master</span>
         <label class="zone-toggle-switch" style="margin-left:auto;">
           <input type="checkbox" id="masterToggleChk" ${masterEnabled ? "checked" : ""}>
@@ -3051,14 +3094,18 @@ function renderStatusDropdown() {
                          : (z.colorHex || "#0096ff");
             const stateLabel = state === "triggered" ? "triggered"
                              : state === "fault"     ? "fault"
-                             : isOff                 ? "disabled"
-                             : "clear";
+                             : isOff                 ? "disarmed"
+                             : "armed";
             return `
               <div class="status-dd-zone">
                 <div class="zone-list-dot" style="background:${colour};flex-shrink:0;opacity:${isOff?0.4:1};"></div>
-                <span class="status-dd-zname" style="opacity:${isOff?0.5:1}">${escapeHtml(z.name || z.id)}</span>
+                <span class="status-dd-zname" style="opacity:${isOff?0.5:1};opacity:${z.hidden?0.4:isOff?0.5:1}">${escapeHtml(z.name || z.id)}</span>
                 <span class="status-dd-state" style="color:${colour}">${stateLabel}</span>
-                <label class="zone-toggle-switch" style="margin-left:6px;flex-shrink:0;">
+                <button class="zone-eye-btn" data-zone-id="${z.id}"
+                  title="${z.hidden ? 'Hidden from map — click to show' : 'Visible — click to hide'}"
+                  style="background:none;border:none;padding:0 4px;cursor:pointer;font-size:13px;opacity:${z.hidden ? 0.35 : 0.7};line-height:1;flex-shrink:0;"
+                >${z.hidden ? '🙈' : '👁'}</button>
+                <label class="zone-toggle-switch" style="margin-left:2px;flex-shrink:0;" title="Arm/disarm this zone">
                   <input type="checkbox" class="zone-enabled-chk" data-zone-id="${z.id}" ${z.enabled !== false ? "checked" : ""} ${!masterEnabled ? "disabled" : ""}>
                   <span class="zone-toggle-track"></span>
                 </label>
@@ -3069,6 +3116,14 @@ function renderStatusDropdown() {
 
   document.getElementById("masterToggleChk")?.addEventListener("change", e => {
     setMasterEnabled(e.target.checked);
+  });
+
+  body.querySelectorAll(".zone-eye-btn").forEach(btn => {
+    btn.addEventListener("click", e => {
+      e.stopPropagation();
+      const zone = zones.find(z => z.id === btn.dataset.zoneId);
+      if (zone) setZoneHidden(btn.dataset.zoneId, !zone.hidden);
+    });
   });
 
   body.querySelectorAll(".zone-enabled-chk").forEach(chk => {
