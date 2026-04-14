@@ -546,11 +546,12 @@ server.on("upgrade", (req, socket, head) => {
           haToken = parsed.access_token;
           console.log("[HA-Overwatch] WS proxy: obtained HA auth token from supervisor");
         } else {
-          console.log("[HA-Overwatch] WS proxy: supervisor auth endpoint returned:", authData.slice(0, 200));
+          console.log("[HA-Overwatch] WS proxy: supervisor auth response:", JSON.stringify(parsed).slice(0, 300));
           console.log("[HA-Overwatch] WS proxy: falling back to supervisor token");
         }
-      } catch {
-        console.log("[HA-Overwatch] WS proxy: could not parse auth response, using supervisor token");
+      } catch (e) {
+        console.log("[HA-Overwatch] WS proxy: auth response parse error:", e.message);
+        console.log("[HA-Overwatch] WS proxy: raw response:", authData.slice(0, 300));
       }
       openWSProxy(socket, haToken, supervisorToken);
     });
@@ -598,30 +599,43 @@ function openWSProxy(socket, haToken, supervisorToken) {
   haReq.on("upgrade", (haRes, haSocket, haHead) => {
     console.log("[HA-Overwatch] WS proxy: HA upgrade successful");
 
-    let authDone = false;
-    let buf      = haHead.length > 0 ? Buffer.from(haHead) : Buffer.alloc(0);
+    let authState = "waiting"; // waiting → sent → done
+    let buf       = haHead.length > 0 ? Buffer.from(haHead) : Buffer.alloc(0);
 
     function processHAData(chunk) {
-      if (authDone) { try { socket.write(chunk); } catch {} return; }
+      if (authState === "done") { try { socket.write(chunk); } catch {} return; }
       buf = Buffer.concat([buf, chunk]);
       const payload = extractWsPayload(buf);
-      if (payload === null) return; // incomplete frame, wait for more data
+      if (payload === null) return; // incomplete frame
 
       try {
         const msg = JSON.parse(payload);
-        if (msg.type === "auth_required") {
-          console.log("[HA-Overwatch] WS proxy: intercepting auth_required, injecting token");
-          sendWsFrame(haSocket, JSON.stringify({ type: "auth", access_token: haToken }));
-          authDone = true;
-          buf = Buffer.alloc(0);
-          return; // Don't forward auth_required to browser
-        }
-      } catch {}
+        console.log("[HA-Overwatch] WS proxy HA msg:", msg.type);
 
-      // Not auth_required — forward and mark done
+        if (authState === "waiting" && msg.type === "auth_required") {
+          // Intercept: inject supervisor token, don't forward to browser
+          sendWsFrame(haSocket, JSON.stringify({ type: "auth", access_token: haToken }));
+          authState = "sent";
+          buf = Buffer.alloc(0);
+          return;
+        }
+
+        if (authState === "sent") {
+          // This is auth_ok or auth_invalid — forward to browser then open pipe
+          console.log("[HA-Overwatch] WS proxy: auth result from HA:", msg.type);
+          try { socket.write(buf); } catch {}
+          buf = Buffer.alloc(0);
+          authState = "done";
+          return;
+        }
+      } catch (e) {
+        console.log("[HA-Overwatch] WS proxy: frame parse error:", e.message);
+      }
+
+      // Fallback — forward whatever we have
       try { socket.write(buf); } catch {}
       buf = Buffer.alloc(0);
-      authDone = true;
+      authState = "done";
     }
 
     if (buf.length > 0) processHAData(Buffer.alloc(0));
