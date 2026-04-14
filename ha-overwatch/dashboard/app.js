@@ -2055,21 +2055,34 @@ function buildLogBody(panel) {
 let serverWasReachable = true;
 let serverApiAvailable = null;   // null=unknown, true=server.js up, false=local-only
 let serverCheckTimer   = null;
+let isAddonMode        = false;  // true when running as HA add-on
 
 async function checkServerHealth() {
   try {
-    // Any HTTP response from /api/health means server.js is listening on this port
-    const res = await fetch("/api/health", { method: "GET", cache: "no-store" });
+    const res  = await fetch("/api/health", { method: "GET", cache: "no-store" });
+    const data = await res.json().catch(() => ({}));
     const wasDown = serverApiAvailable === false || !serverWasReachable;
-    serverWasReachable  = true;
-    serverApiAvailable  = true;
+    serverWasReachable = true;
+    serverApiAvailable = true;
+
+    // Detect add-on mode from health response
+    if (data.isAddon && !isAddonMode) {
+      isAddonMode = true;
+      logEvent("ok", "Running as HA Add-on — HA connection is automatic.", "system");
+      // Auto-connect to HA using the internal supervisor WebSocket
+      // The add-on supervisor proxies /api/websocket internally
+      if (!haConnected) {
+        uiConfig.ha_url   = window.location.origin;
+        uiConfig.ha_token = "";   // add-on uses supervisor token server-side; WS auth still needed
+        connectHA();
+      }
+    }
+
     if (wasDown) logEvent("ok", "server.js is reachable again.", "system");
   } catch {
-    // /api/health threw — server.js is not running. Try static files to confirm network is up.
     serverWasReachable = false;
     try {
       await fetch("config/ui.yaml?v=" + Date.now(), { cache: "no-store" });
-      // Static file server is responding but server.js is not running
       if (serverApiAvailable !== false) {
         serverApiAvailable = false;
         logEvent("warn",
@@ -2077,7 +2090,6 @@ async function checkServerHealth() {
           "system");
       }
     } catch {
-      // Nothing is reachable at all
       if (serverApiAvailable !== "offline") {
         serverApiAvailable = "offline";
         logEvent("error", "Dashboard is completely offline — no server or network reachable.", "system");
@@ -2087,7 +2099,6 @@ async function checkServerHealth() {
 }
 
 function startServerHealthCheck() {
-  // Run immediately so the first check fires before any HA connection attempt
   checkServerHealth();
   serverCheckTimer = setInterval(checkServerHealth, 20000);
 }
@@ -2120,7 +2131,23 @@ function setHAStatus(status) {
 }
 
 function connectHA() {
-  if (!uiConfig.ha_url || !uiConfig.ha_token) return;
+  // In add-on mode: HA WebSocket is reachable at the same host as the dashboard
+  // (HA ingress proxies the connection, or direct port access works via host network)
+  if (isAddonMode && !uiConfig.ha_url) {
+    // Derive HA URL from current page origin — works for both ingress and direct port access
+    const proto = window.location.protocol === "https:" ? "https:" : "http:";
+    // HA internal API is always on port 8123 from the host perspective
+    uiConfig.ha_url = `${proto}//${window.location.hostname}:8123`;
+  }
+
+  if (!uiConfig.ha_url || !uiConfig.ha_token) {
+    if (isAddonMode) {
+      // In add-on mode with no token yet — wait for user to set alarm entity in settings
+      // The WebSocket still needs a token even in add-on mode (browser connects directly to HA)
+      logEvent("info", "Add-on mode: set your HA Long-Lived Token in Settings to enable live zone updates.", "ha");
+    }
+    return;
+  }
   if (haSocket && (haSocket.readyState === WebSocket.OPEN || haSocket.readyState === WebSocket.CONNECTING)) return;
   if (haReconnectTimer) clearTimeout(haReconnectTimer);
 
@@ -2399,10 +2426,21 @@ function renderSettingsPanel() {
 
       <div class="settings-section">
         <div class="settings-section-title">Home Assistant</div>
+        ${isAddonMode ? `
+        <div style="background:rgba(50,215,75,0.08);border:1px solid rgba(50,215,75,0.2);border-radius:8px;padding:10px 12px;margin-bottom:10px;">
+          <div style="color:#32d74b;font-size:12px;font-weight:600;margin-bottom:3px;">✓ Running as HA Add-on</div>
+          <div style="color:#777;font-size:11px;">HA connection is automatic — no URL or token needed.</div>
+        </div>
+        ` : `
         <div class="settings-field">
           <label>HA URL (e.g. http://192.168.1.x:8123)</label>
           <input type="text" id="cfgHaUrl" value="${escapeHtml(uiConfig.ha_url || "")}" placeholder="http://homeassistant.local:8123">
         </div>
+        <div class="settings-field">
+          <label>Long-Lived Access Token</label>
+          <input type="password" id="cfgHaToken" value="${escapeHtml(uiConfig.ha_token || "")}" placeholder="eyJ…">
+        </div>
+        `}
         <div class="settings-field">
           <label>Alarm Panel Entity</label>
           <div class="entity-search-wrap" style="position:relative;">
@@ -2430,11 +2468,7 @@ function renderSettingsPanel() {
           <input type="text" id="cfgLabelDisarmed" value="${escapeHtml(uiConfig.alarm_label_disarmed || "Disarmed")}"
             placeholder="Disarmed" style="max-width:160px;">
         </div>
-        <div class="settings-field">
-          <label>Long-Lived Access Token</label>
-          <input type="password" id="cfgHaToken" value="${escapeHtml(uiConfig.ha_token || "")}" placeholder="eyJ…">
-        </div>
-        <button class="settings-btn" id="settingsSaveHaBtn">Connect to Home Assistant</button>
+        <button class="settings-btn" id="settingsSaveHaBtn">${isAddonMode ? "Apply HA Settings" : "Connect to Home Assistant"}</button>
       </div>
 
       <div class="settings-section">
@@ -2636,12 +2670,14 @@ function renderSettingsPanel() {
   panel.querySelectorAll("input").forEach(el => el.addEventListener("input", updateYamlSnippet));
 
   document.getElementById("settingsSaveHaBtn").onclick = () => {
-    uiConfig.ha_url               = document.getElementById("cfgHaUrl").value.trim();
-    uiConfig.ha_token             = document.getElementById("cfgHaToken").value.trim();
-    uiConfig.alarm_entity         = document.getElementById("cfgAlarmEntity").value.trim();
+    if (!isAddonMode) {
+      uiConfig.ha_url   = document.getElementById("cfgHaUrl")?.value.trim()   || "";
+      uiConfig.ha_token = document.getElementById("cfgHaToken")?.value.trim() || "";
+    }
+    uiConfig.alarm_entity          = document.getElementById("cfgAlarmEntity").value.trim();
     uiConfig.alarm_entity_inverted = document.getElementById("cfgAlarmInverted")?.checked ?? false;
-    uiConfig.alarm_label_armed    = document.getElementById("cfgLabelArmed")?.value.trim()    || "Armed";
-    uiConfig.alarm_label_disarmed = document.getElementById("cfgLabelDisarmed")?.value.trim() || "Disarmed";
+    uiConfig.alarm_label_armed     = document.getElementById("cfgLabelArmed")?.value.trim()    || "Armed";
+    uiConfig.alarm_label_disarmed  = document.getElementById("cfgLabelDisarmed")?.value.trim() || "Disarmed";
     if (haSocket) { haSocket.onclose = null; haSocket.close(); haSocket = null; haConnected = false; }
     connectHA();
     panel.classList.remove("open");
