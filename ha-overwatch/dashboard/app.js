@@ -2429,18 +2429,21 @@ function renderSettingsPanel() {
         ${isAddonMode ? `
         <div style="background:rgba(50,215,75,0.08);border:1px solid rgba(50,215,75,0.2);border-radius:8px;padding:10px 12px;margin-bottom:10px;">
           <div style="color:#32d74b;font-size:12px;font-weight:600;margin-bottom:3px;">✓ Running as HA Add-on</div>
-          <div style="color:#777;font-size:11px;">HA connection is automatic — no URL or token needed.</div>
+          <div style="color:#777;font-size:11px;">URL is automatic. Enter your Long-Lived Access Token below to enable live entity updates.</div>
         </div>
         ` : `
         <div class="settings-field">
           <label>HA URL (e.g. http://192.168.1.x:8123)</label>
           <input type="text" id="cfgHaUrl" value="${escapeHtml(uiConfig.ha_url || "")}" placeholder="http://homeassistant.local:8123">
         </div>
+        `}
         <div class="settings-field">
           <label>Long-Lived Access Token</label>
           <input type="password" id="cfgHaToken" value="${escapeHtml(uiConfig.ha_token || "")}" placeholder="eyJ…">
+          <div style="font-size:11px;color:#777;margin-top:3px;">
+            Create one in HA: Profile → Long-Lived Access Tokens → Create Token
+          </div>
         </div>
-        `}
         <div class="settings-field">
           <label>Alarm Panel Entity</label>
           <div class="entity-search-wrap" style="position:relative;">
@@ -2456,7 +2459,7 @@ function renderSettingsPanel() {
               style="width:16px;height:16px;cursor:pointer;accent-color:#ffcc00;">
             <span>Invert alarm entity</span>
           </label>
-          <div style="font-size:11px;color:#777;margin-top:3px;">When checked: entity OFF = Armed, ON = Disarmed (for switches and input_booleans wired in reverse)</div>
+          <div style="font-size:11px;color:#777;margin-top:3px;">When checked: entity OFF = Armed, ON = Disarmed</div>
         </div>
         <div class="settings-field">
           <label>Label when armed</label>
@@ -2468,7 +2471,7 @@ function renderSettingsPanel() {
           <input type="text" id="cfgLabelDisarmed" value="${escapeHtml(uiConfig.alarm_label_disarmed || "Disarmed")}"
             placeholder="Disarmed" style="max-width:160px;">
         </div>
-        <button class="settings-btn" id="settingsSaveHaBtn">${isAddonMode ? "Apply HA Settings" : "Connect to Home Assistant"}</button>
+        <button class="settings-btn" id="settingsSaveHaBtn">${isAddonMode ? "Connect to Home Assistant" : "Connect to Home Assistant"}</button>
       </div>
 
       <div class="settings-section">
@@ -2631,35 +2634,38 @@ function renderSettingsPanel() {
   function buildYamlContent() {
     const g = id => document.getElementById(id)?.value || "";
     const inverted = document.getElementById("cfgAlarmInverted")?.checked ?? false;
+    // Use actual current values for ha_url and ha_token (from uiConfig, not fields that may be hidden)
+    const haUrl   = isAddonMode ? (uiConfig.ha_url || "") : (g("cfgHaUrl") || uiConfig.ha_url || "");
+    const haToken = g("cfgHaToken") || uiConfig.ha_token || "";
     return (
       `ui:\n` +
-      `  ha_url: "${g("cfgHaUrl")}"\n` +
-      `  ha_token: "YOUR_TOKEN_HERE"\n` +
-      `  alarm_entity: "${g("cfgAlarmEntity")}"\n` +
+      `  ha_url: "${haUrl}"\n` +
+      `  ha_token: "${haToken}"\n` +
+      `  alarm_entity: "${g("cfgAlarmEntity") || uiConfig.alarm_entity || ""}"\n` +
       `  alarm_entity_inverted: ${inverted}\n` +
-      `  alarm_label_armed: "${g("cfgLabelArmed") || "Armed"}"\n` +
-      `  alarm_label_disarmed: "${g("cfgLabelDisarmed") || "Disarmed"}"\n` +
+      `  alarm_label_armed: "${g("cfgLabelArmed") || uiConfig.alarm_label_armed || "Armed"}"\n` +
+      `  alarm_label_disarmed: "${g("cfgLabelDisarmed") || uiConfig.alarm_label_disarmed || "Disarmed"}"\n` +
       `  sidebar_position: "${uiConfig.sidebar_position}"\n` +
-      `  floorplan: "${g("cfgFloorplan")}"\n` +
+      `  floorplan: "${g("cfgFloorplan") || uiConfig.floorplan || "img/floorplan.png"}"\n` +
       `  zone_fade_duration: ${document.getElementById("cfgFadeDuration")?.value ?? uiConfig.zone_fade_duration ?? 3}\n` +
       `  # Alarm armed colours\n` +
-      `  color_on_person: "${g("cfgColOnPerson")}"\n` +
-      `  color_on_motion: "${g("cfgColOnMotion")}"\n` +
-      `  color_on_door: "${g("cfgColOnDoor")}"\n` +
-      `  color_on_window: "${g("cfgColOnWindow")}"\n` +
-      `  color_on_animal: "${g("cfgColOnAnimal")}"\n` +
-      `  color_on_vehicle: "${g("cfgColOnVehicle")}"\n` +
-      `  color_on_smoke: "${g("cfgColOnSmoke")}"\n` +
-      `  color_on_co: "${g("cfgColOnCo")}"\n` +
+      `  color_on_person: "${g("cfgColOnPerson") || uiConfig.color_on_person}"\n` +
+      `  color_on_motion: "${g("cfgColOnMotion") || uiConfig.color_on_motion}"\n` +
+      `  color_on_door: "${g("cfgColOnDoor") || uiConfig.color_on_door}"\n` +
+      `  color_on_window: "${g("cfgColOnWindow") || uiConfig.color_on_window}"\n` +
+      `  color_on_animal: "${g("cfgColOnAnimal") || uiConfig.color_on_animal}"\n` +
+      `  color_on_vehicle: "${g("cfgColOnVehicle") || uiConfig.color_on_vehicle}"\n` +
+      `  color_on_smoke: "${g("cfgColOnSmoke") || uiConfig.color_on_smoke}"\n` +
+      `  color_on_co: "${g("cfgColOnCo") || uiConfig.color_on_co}"\n` +
       `  # Alarm disarmed colours\n` +
-      `  color_off_person: "${g("cfgColOffPerson")}"\n` +
-      `  color_off_motion: "${g("cfgColOffMotion")}"\n` +
-      `  color_off_door: "${g("cfgColOffDoor")}"\n` +
-      `  color_off_window: "${g("cfgColOffWindow")}"\n` +
-      `  color_off_animal: "${g("cfgColOffAnimal")}"\n` +
-      `  color_off_vehicle: "${g("cfgColOffVehicle")}"\n` +
-      `  color_off_smoke: "${g("cfgColOffSmoke")}"\n` +
-      `  color_off_co: "${g("cfgColOffCo")}"\n`
+      `  color_off_person: "${g("cfgColOffPerson") || uiConfig.color_off_person}"\n` +
+      `  color_off_motion: "${g("cfgColOffMotion") || uiConfig.color_off_motion}"\n` +
+      `  color_off_door: "${g("cfgColOffDoor") || uiConfig.color_off_door}"\n` +
+      `  color_off_window: "${g("cfgColOffWindow") || uiConfig.color_off_window}"\n` +
+      `  color_off_animal: "${g("cfgColOffAnimal") || uiConfig.color_off_animal}"\n` +
+      `  color_off_vehicle: "${g("cfgColOffVehicle") || uiConfig.color_off_vehicle}"\n` +
+      `  color_off_smoke: "${g("cfgColOffSmoke") || uiConfig.color_off_smoke}"\n` +
+      `  color_off_co: "${g("cfgColOffCo") || uiConfig.color_off_co}"\n`
     );
   }
 
@@ -2671,13 +2677,13 @@ function renderSettingsPanel() {
 
   document.getElementById("settingsSaveHaBtn").onclick = () => {
     if (!isAddonMode) {
-      uiConfig.ha_url   = document.getElementById("cfgHaUrl")?.value.trim()   || "";
-      uiConfig.ha_token = document.getElementById("cfgHaToken")?.value.trim() || "";
+      uiConfig.ha_url = document.getElementById("cfgHaUrl")?.value.trim() || "";
     }
-    uiConfig.alarm_entity          = document.getElementById("cfgAlarmEntity").value.trim();
+    uiConfig.ha_token             = document.getElementById("cfgHaToken")?.value.trim() || "";
+    uiConfig.alarm_entity         = document.getElementById("cfgAlarmEntity").value.trim();
     uiConfig.alarm_entity_inverted = document.getElementById("cfgAlarmInverted")?.checked ?? false;
-    uiConfig.alarm_label_armed     = document.getElementById("cfgLabelArmed")?.value.trim()    || "Armed";
-    uiConfig.alarm_label_disarmed  = document.getElementById("cfgLabelDisarmed")?.value.trim() || "Disarmed";
+    uiConfig.alarm_label_armed    = document.getElementById("cfgLabelArmed")?.value.trim()    || "Armed";
+    uiConfig.alarm_label_disarmed = document.getElementById("cfgLabelDisarmed")?.value.trim() || "Disarmed";
     if (haSocket) { haSocket.onclose = null; haSocket.close(); haSocket = null; haConnected = false; }
     connectHA();
     panel.classList.remove("open");
