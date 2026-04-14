@@ -163,7 +163,7 @@ let lastConfigHash = "";
 
 async function loadConfig() {
   try {
-    const res = await fetch("config/ui.yaml?v=" + Date.now());
+    const res = await fetch(apiPath("config/ui.yaml") + "?v=" + Date.now());
     if (!res.ok) return;
     const text = await res.text();
     // Simple hash to detect changes
@@ -543,7 +543,7 @@ async function loadZones() {
 async function saveZone(zone) {
   const filename = zoneFilename(zone.id);
   try {
-    const res = await fetch("ow/save-zone", {
+    const res = await fetch(apiPath("ow/save-zone"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ filename, content: zoneToYaml(zone) })
@@ -557,7 +557,7 @@ async function saveZone(zone) {
 async function deleteZoneFile(zoneId) {
   const filename = zoneFilename(zoneId);
   try {
-    const res = await fetch("ow/delete-zone", {
+    const res = await fetch(apiPath("ow/delete-zone"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ filename })
@@ -714,7 +714,7 @@ function haZoneEntityIds(zone) {
 async function syncZoneToHA(zone, state) {
   if (!serverApiAvailable) return;  // no server.js running
   try {
-    await fetch("ow/ha-sync-zone", {
+    await fetch(apiPath("ow/ha-sync-zone"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -729,7 +729,7 @@ async function syncZoneToHA(zone, state) {
 async function syncMasterToHA(armed) {
   if (!serverApiAvailable) return;
   try {
-    await fetch("ow/ha-sync-master", {
+    await fetch(apiPath("ow/ha-sync-master"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ armed }),
@@ -1377,7 +1377,7 @@ function renderZonesEditor() {
       setupHABtn.disabled = true;
       if (haSetupStatus) { haSetupStatus.textContent = "Creating HA entities…"; haSetupStatus.style.color = "#888"; }
       try {
-        const res  = await fetch("ow/ha-setup-zones", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+        const res  = await fetch(apiPath("ow/ha-setup-zones"), { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
         const data = await res.json();
         if (data.ok) {
           const errCount = (data.errors || []).length;
@@ -2052,6 +2052,22 @@ function buildLogBody(panel) {
 }
 
 /* ─── SERVER HEALTH CHECK ────────────────────────────────── */
+// Detect the ingress base path from the <base> tag injected by server.js.
+// fetch() ignores <base> tags — we must prefix all API calls manually.
+// In standalone mode base tag is "./" so BASE_PATH becomes empty string.
+const BASE_PATH = (() => {
+  const base = document.querySelector("base");
+  if (!base) return "";
+  const href = base.getAttribute("href") || "";
+  // If it's a full ingress URL like /api/hassio_ingress/<token>/ use it as prefix
+  return href === "./" || href === "/" ? "" : href.replace(/\/$/, "");
+})();
+
+// Prefix a relative API path with the ingress base path
+function apiPath(rel) {
+  return BASE_PATH ? `${BASE_PATH}/${rel}` : rel;
+}
+
 let serverWasReachable = true;
 let serverApiAvailable = null;   // null=unknown, true=server.js up, false=local-only
 let serverCheckTimer   = null;
@@ -2059,7 +2075,7 @@ let isAddonMode        = false;  // true when running as HA add-on
 
 async function checkServerHealth() {
   try {
-    const res  = await fetch("ow/health", { method: "GET", cache: "no-store" });
+    const res  = await fetch(apiPath("ow/health"), { method: "GET", cache: "no-store" });
     const data = await res.json().catch(() => ({}));
     const wasDown = serverApiAvailable === false || !serverWasReachable;
     serverWasReachable = true;
@@ -2082,7 +2098,7 @@ async function checkServerHealth() {
   } catch {
     serverWasReachable = false;
     try {
-      await fetch("config/ui.yaml?v=" + Date.now(), { cache: "no-store" });
+      await fetch(apiPath("config/ui.yaml") + "?v=" + Date.now(), { cache: "no-store" });
       if (serverApiAvailable !== false) {
         serverApiAvailable = false;
         logEvent("warn",
@@ -2598,7 +2614,7 @@ function renderSettingsPanel() {
       try {
         const form = new FormData();
         form.append("file", file);
-        const res = await fetch("ow/upload-floorplan", { method: "POST", body: form });
+        const res = await fetch(apiPath("ow/upload-floorplan"), { method: "POST", body: form });
         if (res.ok) {
           const data = await res.json().catch(() => ({}));
           const path = data.path || ("img/" + file.name);
@@ -2725,7 +2741,7 @@ function renderSettingsPanel() {
       yamlSaveStatus.textContent = "Saving…";
       yamlSaveStatus.style.color = "#888";
       try {
-        const res = await fetch("ow/save-config", {
+        const res = await fetch(apiPath("ow/save-config"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ filename: "config/ui.yaml", content })
