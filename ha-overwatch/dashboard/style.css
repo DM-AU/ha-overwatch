@@ -1455,7 +1455,7 @@ display: flex;
   -webkit-backdrop-filter: blur(10px);
 }
 .status-dd-header {
-  border-bottom: 1px solid rgba(255,255,255,0.06);
+  display: none; /* master row is now inside the scroll container */
 }
 .status-dd-master {
   display: flex;
@@ -1468,12 +1468,15 @@ display: flex;
   width: 100%;
   padding: 7px 14px;
   box-sizing: border-box;
+  position: sticky;
+  top: 0;
+  background: rgba(18,18,18,0.98);
+  z-index: 1;
 }
 .status-dd-zones {
   padding: 6px 0;
   max-height: 280px;
   overflow-y: auto;
-  /* Reserve scrollbar space even when not scrolling so master row aligns */
   scrollbar-gutter: stable;
 }
 .status-dd-empty {

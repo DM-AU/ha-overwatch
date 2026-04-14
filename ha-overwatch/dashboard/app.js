@@ -3145,7 +3145,7 @@ function renderStatusDropdown() {
   const allHidden = zones.length > 0 && zones.every(z => z.hidden);
 
   body.innerHTML = `
-    <div class="status-dd-header">
+    <div class="status-dd-zones">
       <div class="status-dd-master">
         <div style="width:8px;height:8px;flex-shrink:0;"></div>
         <span style="flex:1;">Master</span>
@@ -3159,8 +3159,7 @@ function renderStatusDropdown() {
           <span class="zone-toggle-track"></span>
         </label>
       </div>
-    </div>
-    <div class="status-dd-zones">
+      <div style="height:1px;background:rgba(255,255,255,0.06);margin:0 14px;"></div>
       ${zones.length === 0
         ? `<div class="status-dd-empty">No zones configured</div>`
         : zones.map(z => {
