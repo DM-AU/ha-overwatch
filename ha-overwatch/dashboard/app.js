@@ -2417,10 +2417,9 @@ function updateStatusFromAlarm(entityId, newState) {
   if (rawState !== lastLoggedAlarmState) {
     lastLoggedAlarmState = rawState;
 
-    // Pick log level: triggered = error, armed = warn, disarmed/ok = ok
+    // Pick log level: triggered = error, everything else = info
     let level = "info";
     if (rawState === "triggered") level = "error";
-    else if (effectiveArmed)      level = "warn";
     else if (rawState === "disarmed" || rawState === "off") level = "ok";
 
     logEvent(level, `Alarm: ${label} (${entityId})`, "ha");
