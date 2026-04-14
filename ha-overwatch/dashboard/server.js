@@ -277,7 +277,14 @@ const server = http.createServer(async (req, res) => {
   /* ── /api/health ─────────────────────────────────────────── */
   if (pathname === "/api/health") {
     const isAddon = !!process.env.SUPERVISOR_TOKEN;
-    json(res, { ok: true, app: "ha-overwatch", version: "1.0.4", isAddon });
+    json(res, {
+      ok: true,
+      app: "ha-overwatch",
+      version: "1.0.5",
+      isAddon,
+      appDir:  APP_DIR,
+      dataDir: DATA_DIR,
+    });
     return;
   }
 
@@ -286,10 +293,15 @@ const server = http.createServer(async (req, res) => {
     try {
       const body     = await readBody(req);
       const filePath = safeDataPath(body.filename);
+      console.log(`[HA-Overwatch] save-config → ${filePath}`);
       fs.mkdirSync(path.dirname(filePath), { recursive: true });
       fs.writeFileSync(filePath, body.content, "utf8");
+      console.log(`[HA-Overwatch] save-config ✓ saved ${filePath}`);
       json(res, { ok: true });
-    } catch (e) { err(res, e.message); }
+    } catch (e) {
+      console.error(`[HA-Overwatch] save-config ✗ ${e.message}`);
+      err(res, e.message);
+    }
     return;
   }
 
