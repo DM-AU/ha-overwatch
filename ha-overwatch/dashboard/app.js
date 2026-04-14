@@ -887,14 +887,20 @@ setInterval(() => {
         const zone = zones.find(z => z.id === dot.dataset.zoneId);
         if (!zone) return;
         const st = getZoneState(zone);
-        const isTriggered = st === "triggered";
         const isOff = zone.enabled === false || !masterEnabled;
-        dot.classList.toggle("flashing", isTriggered);
+        const sensors = zone.sensors || [];
+        const anyActive = sensors.some(isEntityTriggered);
+        const isDisarmedActive = isOff && anyActive;
+        const isTriggered = st === "triggered";
+        dot.classList.toggle("flashing", isTriggered || isDisarmedActive);
         dot.style.background = isTriggered
-          ? (isOff ? (zone.colorHex || "#0096ff") : "#ff3b30")
+          ? "#ff3b30"
+          : isDisarmedActive
+          ? resolveColour(entityTypeColourOff(detectEntityType(sensors.find(isEntityTriggered) || "")))
           : st === "fault" ? "#ff9500"
-          : isOff ? "#444"
+          : isOff ? "#555"
           : (zone.colorHex || "#0096ff");
+        dot.style.opacity = (isOff && !isDisarmedActive) ? "0.3" : "1";
       });
     }
     // Update status bar dot based on any zone triggered
@@ -1002,16 +1008,16 @@ function renderZones() {
         poly.style.strokeWidth = String(1 / zoom.scale);
       }
     } else {
-      // Live mode — only render if a sensor is active on a disarmed zone
-      // Armed+clear and disarmed+clear are 100% transparent (don't add polygon)
+      // Live mode — transparent unless a sensor is active
       const sensors = zone.sensors || [];
       const anyActive = sensors.some(isEntityTriggered);
       if (anyActive && isDisabled) {
-        // Disarmed zone with active sensor — show off-colour so user knows it's active
+        // Disarmed zone with active sensor — flash in off-colour (same flash rhythm as armed)
         const type = detectEntityType(sensors.find(isEntityTriggered) || "");
         const hex  = resolveColour(entityTypeColourOff(type));
-        poly.style.fill        = hexToRgba(hex, 0.35);
-        poly.style.stroke      = hexToRgba(hex, 0.6);
+        const fillAlpha = flashPhase ? 0.15 : 0.45;
+        poly.style.fill        = hexToRgba(hex, fillAlpha);
+        poly.style.stroke      = hexToRgba(hex, fillAlpha * 0.8);
         poly.style.strokeWidth = String(1 / zoom.scale);
       } else {
         // Clear zone (armed or disarmed, no active sensor) — completely transparent
@@ -3161,22 +3167,35 @@ function renderStatusDropdown() {
             const state  = getZoneState(z);
             const isOff  = z.enabled === false || !masterEnabled;
             const isTriggeredZone = state === "triggered";
-            // Dot colour: triggered uses alarm-on colour (red if armed, zone-colour if disarmed)
+            // Check raw sensor activity even when disarmed
+            const sensors = z.sensors || [];
+            const anyActive = haConnected && sensors.some(isEntityTriggered);
+            const isDisarmedActive = isOff && anyActive;
+            // Dot colour:
+            // - Triggered (armed) → red flash
+            // - Active while disarmed → off-colour flash
+            // - Fault → amber
+            // - Disarmed clear → grey dim
+            // - Armed clear → zone colour
             const dotColour = isTriggeredZone
-              ? (isOff ? (z.colorHex || "#0096ff") : "#ff3b30")
+              ? "#ff3b30"
+              : isDisarmedActive
+              ? resolveColour(entityTypeColourOff(detectEntityType(sensors.find(isEntityTriggered) || "")))
               : state === "fault" ? "#ff9500"
-              : isOff ? "#444"
+              : isOff ? "#555"
               : (z.colorHex || "#0096ff");
-            const colour = dotColour; // state label uses same colour
+            const dotFlashing = isTriggeredZone || isDisarmedActive;
+            const dotOpacity  = (isOff && !isDisarmedActive) ? 0.3 : 1;
+            const colour = dotColour;
             const stateLabel = isTriggeredZone ? "triggered"
                              : state === "fault"     ? "fault"
                              : isOff                 ? "disarmed"
                              : "armed";
             return `
               <div class="status-dd-zone">
-                <div class="zone-list-dot${isTriggeredZone ? ' flashing' : ''}" data-zone-id="${z.id}" style="background:${dotColour};flex-shrink:0;opacity:${isOff?0.5:1};"></div>
-                <span class="status-dd-zname" style="opacity:${z.hidden ? 0.35 : isOff ? 0.5 : 1}">${escapeHtml(z.name || z.id)}</span>
-                <span class="status-dd-state" style="color:${colour}">${stateLabel}</span>
+                <div class="zone-list-dot${dotFlashing ? ' flashing' : ''}" data-zone-id="${z.id}" style="background:${dotColour};flex-shrink:0;opacity:${dotOpacity};"></div>
+                <span class="status-dd-zname" style="opacity:${z.hidden ? 0.35 : isOff && !isDisarmedActive ? 0.5 : 1}">${escapeHtml(z.name || z.id)}</span>
+                <span class="status-dd-state" style="color:${colour};opacity:${isOff && !isDisarmedActive ? 0.4 : 0.8}">${stateLabel}</span>
                 <button class="zone-eye-btn" data-zone-id="${z.id}"
                   title="${z.hidden ? 'Hidden — click to show' : 'Visible — click to hide'}"
                   style="background:none;border:none;padding:0 2px;cursor:pointer;color:${z.hidden ? 'rgba(255,255,255,0.25)' : 'rgba(255,255,255,0.65)'};line-height:0;flex-shrink:0;"

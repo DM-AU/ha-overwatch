@@ -1502,6 +1502,8 @@ display: flex;
   font-family: monospace;
   opacity: 0.8;
   flex-shrink: 0;
+  min-width: 52px;  /* wide enough for "triggered" */
+  text-align: right;
 }
 
 /* Once dragged the status dropdown follows */
