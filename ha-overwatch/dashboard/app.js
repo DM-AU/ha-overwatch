@@ -1002,30 +1002,20 @@ function renderZones() {
         poly.style.strokeWidth = String(1 / zoom.scale);
       }
     } else {
-      // Live mode — normal or disarmed zone
-      // Check if any sensor is active (triggered while disarmed = show off-colour)
+      // Live mode — only render if a sensor is active on a disarmed zone
+      // Armed+clear and disarmed+clear are 100% transparent (don't add polygon)
       const sensors = zone.sensors || [];
       const anyActive = sensors.some(isEntityTriggered);
-      if (anyActive && !isDisabled) {
-        // Armed zone with active sensor but not yet "triggered" state — shouldn't happen, but fallback
-        const type = detectEntityType(sensors.find(isEntityTriggered) || "");
-        const hex  = resolveColour(entityTypeColour(type));
-        poly.style.fill        = hexToRgba(hex, 0.12);
-        poly.style.stroke      = hexToRgba(hex, 0.25);
-        poly.style.strokeWidth = String(1 / zoom.scale);
-      } else if (anyActive && isDisabled) {
-        // Disarmed zone with active sensor — use off-colour palette
+      if (anyActive && isDisabled) {
+        // Disarmed zone with active sensor — show off-colour so user knows it's active
         const type = detectEntityType(sensors.find(isEntityTriggered) || "");
         const hex  = resolveColour(entityTypeColourOff(type));
-        poly.style.fill        = hexToRgba(hex, 0.22);
-        poly.style.stroke      = hexToRgba(hex, 0.45);
+        poly.style.fill        = hexToRgba(hex, 0.35);
+        poly.style.stroke      = hexToRgba(hex, 0.6);
         poly.style.strokeWidth = String(1 / zoom.scale);
       } else {
-        // Clear zone (armed or disarmed, no sensor active) — very subtle presence
-        const hex = zone.colorHex || "#0096ff";
-        poly.style.fill        = hexToRgba(hex, 0.04);
-        poly.style.stroke      = hexToRgba(hex, 0.12);
-        poly.style.strokeWidth = String(0.75 / zoom.scale);
+        // Clear zone (armed or disarmed, no active sensor) — completely transparent
+        return;
       }
     }
 
