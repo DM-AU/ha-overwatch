@@ -271,12 +271,20 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  const url = new URL(req.url, `http://localhost:${PORT}`);
-  // Normalise: ensure leading slash, strip any ingress prefix that leaked through
-  let pathname = url.pathname;
+  // Safely parse the request URL — ingress sends malformed URLs like '//' for health probes
+  let pathname;
+  try {
+    const url = new URL(req.url, `http://localhost:${PORT}`);
+    pathname = url.pathname;
+  } catch {
+    // Malformed URL (e.g. ingress health probe) — return 200 OK so ingress marks us healthy
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    res.end("ok");
+    return;
+  }
   if (!pathname.startsWith("/")) pathname = "/" + pathname;
 
-  // Log every request so we can see what's arriving (remove after debugging)
+  // Log every request for debugging
   console.log(`[HA-Overwatch] ${req.method} ${pathname}`);
 
   /* ── /ow/health ──────────────────────────────────────────── */
@@ -285,7 +293,7 @@ const server = http.createServer(async (req, res) => {
     json(res, {
       ok: true,
       app: "ha-overwatch",
-      version: "1.0.7",
+      version: "1.0.8",
       isAddon,
       appDir:  APP_DIR,
       dataDir: DATA_DIR,
