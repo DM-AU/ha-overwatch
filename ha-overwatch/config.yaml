@@ -20,6 +20,7 @@ ports:
   8099/tcp: 8099
 ports_description:
   8099/tcp: HA-Overwatch web dashboard
+host_network: false
 options:
   port: 8099
 schema:
