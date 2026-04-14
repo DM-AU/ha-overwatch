@@ -21,6 +21,7 @@ const http    = require("http");
 const fs      = require("fs");
 const path    = require("path");
 const https   = require("https");
+const net     = require("net");
 const { URL } = require("url");
 
 const PORT     = parseInt(process.argv[2] || process.env.PORT || "8099", 10);
@@ -451,6 +452,8 @@ const server = http.createServer(async (req, res) => {
   /* ── Static file serving ─────────────────────────────────── */
   let reqPath = pathname === "/" ? "/index.html" : pathname;
   reqPath = reqPath.replace(/\.\./g, "");
+  // Decode URL encoding so filenames with spaces work (e.g. Arial%20Image.png)
+  try { reqPath = decodeURIComponent(reqPath); } catch { /* keep as-is */ }
 
   // Resolve file path — try DATA_DIR first for data paths, then APP_DIR
   let filePath;
@@ -459,12 +462,8 @@ const server = http.createServer(async (req, res) => {
   if (isDataPath) {
     const dataCandidate = path.join(DATA_DIR, reqPath);
     if (!dataCandidate.startsWith(path.resolve(DATA_DIR))) { err(res, "Forbidden", 403); return; }
-    // Try DATA_DIR first, fall back to APP_DIR (for placeholder floorplan etc.)
-    if (fs.existsSync(dataCandidate)) {
-      filePath = dataCandidate;
-    } else {
-      filePath = path.join(APP_DIR, reqPath);
-    }
+    // Try DATA_DIR first, fall back to APP_DIR (e.g. placeholder floorplan)
+    filePath = fs.existsSync(dataCandidate) ? dataCandidate : path.join(APP_DIR, reqPath);
   } else {
     filePath = path.join(APP_DIR, reqPath);
     if (!filePath.startsWith(path.resolve(APP_DIR))) { err(res, "Forbidden", 403); return; }
@@ -506,6 +505,52 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log(`[HA-Overwatch] Server running at http://0.0.0.0:${PORT}`);
   console.log(`[HA-Overwatch] App directory:  ${APP_DIR}`);
   console.log(`[HA-Overwatch] Data directory: ${DATA_DIR}`);
+});
+
+// WebSocket proxy — only active in add-on mode (SUPERVISOR_TOKEN present).
+// Browser connects to ws://our-server/ws/api/websocket
+// We forward to ws://supervisor/core/api/websocket with the supervisor token.
+// This means the browser never needs a Long-Lived Token.
+server.on("upgrade", (req, socket, head) => {
+  const supervisorToken = process.env.SUPERVISOR_TOKEN;
+  if (!supervisorToken) {
+    // Standalone mode — no proxy, browser must authenticate directly with HA
+    socket.destroy();
+    return;
+  }
+
+  // Only proxy our dedicated path to avoid intercepting other upgrades
+  const url = req.url || "";
+  if (!url.includes("/ws/api/websocket") && !url.endsWith("/websocket")) {
+    socket.destroy();
+    return;
+  }
+
+  console.log("[HA-Overwatch] WebSocket upgrade → proxying to supervisor");
+
+  // Connect to HA supervisor WebSocket
+  const haSocket = net.createConnection({ host: "supervisor", port: 80 }, () => {
+    // Forward the upgrade request with auth header injected
+    const headers = [
+      `GET /core/api/websocket HTTP/1.1`,
+      `Host: supervisor`,
+      `Upgrade: websocket`,
+      `Connection: Upgrade`,
+      `Sec-WebSocket-Key: ${req.headers["sec-websocket-key"]}`,
+      `Sec-WebSocket-Version: ${req.headers["sec-websocket-version"] || "13"}`,
+      `Authorization: Bearer ${supervisorToken}`,
+      ``,
+      ``,
+    ].join("\r\n");
+    haSocket.write(headers);
+  });
+
+  haSocket.on("data", d => { try { socket.write(d); } catch {} });
+  haSocket.on("end",  ()  => { try { socket.end(); } catch {} });
+  haSocket.on("error", e  => { console.error("[HA-Overwatch] WS proxy error:", e.message); socket.destroy(); });
+  socket.on("data", d => { try { haSocket.write(d); } catch {} });
+  socket.on("end",  ()  => { try { haSocket.end(); } catch {} });
+  socket.on("error", () => { haSocket.destroy(); });
 });
 
 server.on("error", e => {
