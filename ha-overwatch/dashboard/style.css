@@ -1453,8 +1453,10 @@ display: flex;
   font-size: 12px;
   font-weight: 600;
   color: #aaa;
-  cursor: pointer;
+  cursor: default;
   width: 100%;
+  /* 10px dot + 8px gap = 18px spacer so "Master" label aligns with zone names */
+  padding-left: 18px;
 }
 .status-dd-zones {
   padding: 6px 0;

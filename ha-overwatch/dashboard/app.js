@@ -922,11 +922,12 @@ function renderZones() {
       poly.style.strokeWidth = String(1.5 / zoom.scale);
 
     } else if (isHidden && editorMode) {
-      // Hidden zone in editor: very faint dotted outline so user knows it exists
+      // Hidden zone in editor: very faint dotted outline, not interactive
       poly.style.fill             = "rgba(80,80,80,0.06)";
       poly.style.stroke           = "rgba(80,80,80,0.20)";
       poly.style.strokeWidth      = String(1 / zoom.scale);
       poly.style.strokeDasharray  = String(4 / zoom.scale) + " " + String(6 / zoom.scale);
+      poly.style.pointerEvents    = "none";
 
     } else if (isDisabled && editorMode) {
       // Disabled zone in editor: grey dashed outline
@@ -1200,8 +1201,11 @@ function renderZonesEditor() {
           <span style="flex:1;"></span>
           <label style="flex:0 0 auto;font-size:11px;color:#666;" title="Hide this zone from the map (alarm still active)">Visible</label>
           <button id="zoneHiddenToggle" title="${selectedZone?.hidden ? 'Zone hidden — click to show' : 'Zone visible — click to hide'}"
-            style="background:none;border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:4px 7px;cursor:pointer;font-size:15px;line-height:1;color:${selectedZone?.hidden ? '#555' : 'rgba(255,255,255,0.7)'};${selectedZone ? '' : 'opacity:0.3;pointer-events:none;'}"
-          >${selectedZone?.hidden ? '🙈' : '👁'}</button>
+            style="background:none;border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:5px 8px;cursor:pointer;line-height:0;color:${selectedZone?.hidden ? 'rgba(255,255,255,0.25)' : 'rgba(255,255,255,0.7)'};${selectedZone ? '' : 'opacity:0.3;pointer-events:none;'}"
+          >${selectedZone?.hidden
+            ? `<svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M1 12C1 12 5 5 12 5s11 7 11 7-4 7-11 7S1 12 1 12z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M3 3l18 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>`
+            : `<svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M1 12C1 12 5 5 12 5s11 7 11 7-4 7-11 7S1 12 1 12z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2"/></svg>`
+          }</button>
         </div>
 
         ${selectedZone ? `
@@ -1739,11 +1743,13 @@ function bindZonesSvgEvents() {
     }
 
     // 3) Clicking a polygon — select it (and prepare to drag whole zone), block pan
+    // Hidden zones cannot be selected by clicking their polygon on the map
     if (target.classList.contains("zone-polygon")) {
       const zoneId = target.dataset.zoneId;
+      const zone   = zones.find(z => z.id === zoneId);
+      if (zone?.hidden) { e.stopPropagation(); return; } // not selectable when hidden
       selectedZoneId = zoneId;
       if (!isEditingPoints) {
-        const zone = zones.find(z => z.id === zoneId);
         if (zone) {
           draggingZone = { zoneId, startPoints: zone.points.map(p => ({ ...p })) };
           dragStart = { x: sx, y: sy };
@@ -2187,7 +2193,7 @@ function setHAStatus(status) {
   if (!badge) return;
   badge.classList.remove("connected", "disconnected", "error");
   badge.classList.add(status);
-  if (text) text.textContent = status === "connected" ? "HA ✓" : status === "error" ? "HA ✗" : "HA";
+  if (text) text.textContent = "HA";
 }
 
 function connectHA() {
@@ -2495,7 +2501,7 @@ function renderSettingsPanel() {
             : 'background:rgba(255,59,48,0.07);border-color:rgba(255,59,48,0.2);'}">
           <div style="font-size:12px;font-weight:600;margin-bottom:4px;
             color:${haConnected ? '#32d74b' : '#ff453a'};">
-            ${haConnected ? '✓ Connected to Home Assistant' : '✗ Not connected to Home Assistant'}
+            ${haConnected ? 'Connected to Home Assistant' : 'Not connected to Home Assistant'}
           </div>
           ${isAddonMode
             ? `<div style="color:#777;font-size:11px;line-height:1.5;">
@@ -3072,15 +3078,32 @@ function renderStatusDropdown() {
 
   const armed = isAlarmArmed();
 
+  // SVG eye icons — consistent style for open and closed
+  const eyeOpen   = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path d="M1 12C1 12 5 5 12 5s11 7 11 7-4 7-11 7S1 12 1 12z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2"/>
+  </svg>`;
+  const eyeClosed = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path d="M1 12C1 12 5 5 12 5s11 7 11 7-4 7-11 7S1 12 1 12z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M3 3l18 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+  </svg>`;
+
+  // Master hide — hides ALL zones at once
+  const allHidden = zones.length > 0 && zones.every(z => z.hidden);
+
   body.innerHTML = `
     <div class="status-dd-header">
-      <label class="status-dd-master" title="Master arm toggle — arms/disarms all zones">
+      <div class="status-dd-master">
         <span>Master</span>
-        <label class="zone-toggle-switch" style="margin-left:auto;">
+        <button class="zone-eye-btn" id="masterEyeBtn"
+          title="${allHidden ? 'All zones hidden — click to show all' : 'Show — click to hide all'}"
+          style="background:none;border:none;padding:0 2px;cursor:pointer;color:${allHidden ? 'rgba(255,255,255,0.25)' : 'rgba(255,255,255,0.65)'};line-height:0;flex-shrink:0;"
+        >${allHidden ? eyeClosed : eyeOpen}</button>
+        <label class="zone-toggle-switch" style="margin-left:auto;" title="Arm/disarm all zones">
           <input type="checkbox" id="masterToggleChk" ${masterEnabled ? "checked" : ""}>
           <span class="zone-toggle-track"></span>
         </label>
-      </label>
+      </div>
     </div>
     <div class="status-dd-zones">
       ${zones.length === 0
@@ -3099,13 +3122,13 @@ function renderStatusDropdown() {
             return `
               <div class="status-dd-zone">
                 <div class="zone-list-dot" style="background:${colour};flex-shrink:0;opacity:${isOff?0.4:1};"></div>
-                <span class="status-dd-zname" style="opacity:${isOff?0.5:1};opacity:${z.hidden?0.4:isOff?0.5:1}">${escapeHtml(z.name || z.id)}</span>
+                <span class="status-dd-zname" style="opacity:${z.hidden ? 0.35 : isOff ? 0.5 : 1}">${escapeHtml(z.name || z.id)}</span>
                 <span class="status-dd-state" style="color:${colour}">${stateLabel}</span>
                 <button class="zone-eye-btn" data-zone-id="${z.id}"
-                  title="${z.hidden ? 'Hidden from map — click to show' : 'Visible — click to hide'}"
-                  style="background:none;border:none;padding:0 4px;cursor:pointer;font-size:13px;opacity:${z.hidden ? 0.35 : 0.7};line-height:1;flex-shrink:0;"
-                >${z.hidden ? '🙈' : '👁'}</button>
-                <label class="zone-toggle-switch" style="margin-left:2px;flex-shrink:0;" title="Arm/disarm this zone">
+                  title="${z.hidden ? 'Hidden — click to show' : 'Visible — click to hide'}"
+                  style="background:none;border:none;padding:0 2px;cursor:pointer;color:${z.hidden ? 'rgba(255,255,255,0.25)' : 'rgba(255,255,255,0.65)'};line-height:0;flex-shrink:0;"
+                >${z.hidden ? eyeClosed : eyeOpen}</button>
+                <label class="zone-toggle-switch" style="flex-shrink:0;" title="Arm/disarm this zone">
                   <input type="checkbox" class="zone-enabled-chk" data-zone-id="${z.id}" ${z.enabled !== false ? "checked" : ""} ${!masterEnabled ? "disabled" : ""}>
                   <span class="zone-toggle-track"></span>
                 </label>
@@ -3116,6 +3139,13 @@ function renderStatusDropdown() {
 
   document.getElementById("masterToggleChk")?.addEventListener("change", e => {
     setMasterEnabled(e.target.checked);
+  });
+
+  // Master eye — toggle visibility of all zones at once
+  document.getElementById("masterEyeBtn")?.addEventListener("click", e => {
+    e.stopPropagation();
+    const anyVisible = zones.some(z => !z.hidden);
+    zones.forEach(z => setZoneHidden(z.id, anyVisible));
   });
 
   body.querySelectorAll(".zone-eye-btn").forEach(btn => {
