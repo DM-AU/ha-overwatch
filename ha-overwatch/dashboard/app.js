@@ -2147,29 +2147,29 @@ function setHAStatus(status) {
 }
 
 function connectHA() {
-  // In add-on mode: HA WebSocket is reachable at the same host as the dashboard
-  // (HA ingress proxies the connection, or direct port access works via host network)
-  if (isAddonMode && !uiConfig.ha_url) {
-    // Derive HA URL from current page origin — works for both ingress and direct port access
-    const proto = window.location.protocol === "https:" ? "https:" : "http:";
-    // HA internal API is always on port 8123 from the host perspective
-    uiConfig.ha_url = `${proto}//${window.location.hostname}:8123`;
-  }
-
-  if (!uiConfig.ha_url || !uiConfig.ha_token) {
-    if (isAddonMode) {
-      // In add-on mode with no token yet — wait for user to set alarm entity in settings
-      // The WebSocket still needs a token even in add-on mode (browser connects directly to HA)
-      logEvent("info", "Add-on mode: set your HA Long-Lived Token in Settings to enable live zone updates.", "ha");
-    }
-    return;
-  }
   if (haSocket && (haSocket.readyState === WebSocket.OPEN || haSocket.readyState === WebSocket.CONNECTING)) return;
   if (haReconnectTimer) clearTimeout(haReconnectTimer);
 
-  logEvent("info", `Connecting to HA at ${uiConfig.ha_url}…`, "ha");
+  let wsUrl;
 
-  let wsUrl = uiConfig.ha_url.replace(/^http/, "ws").replace(/\/$/, "") + "/api/websocket";
+  if (isAddonMode) {
+    // In add-on mode: connect to our own server's WebSocket proxy.
+    // The server forwards to HA using the supervisor token — no user token needed.
+    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const host  = window.location.host;
+    wsUrl = `${proto}//${host}${BASE_PATH}/ws/api/websocket`;
+    logEvent("info", "Connecting to HA via add-on WebSocket proxy…", "ha");
+  } else {
+    // Standalone mode: connect directly to HA, token required
+    if (!uiConfig.ha_url) return;
+    if (!uiConfig.ha_token) {
+      logEvent("warn", "HA token required in standalone mode. Enter it in Settings.", "ha");
+      return;
+    }
+    wsUrl = uiConfig.ha_url.replace(/^http/, "ws").replace(/\/$/, "") + "/api/websocket";
+    logEvent("info", `Connecting to HA at ${uiConfig.ha_url}…`, "ha");
+  }
+
   try {
     haSocket = new WebSocket(wsUrl);
   } catch (e) {
@@ -2188,7 +2188,13 @@ function connectHA() {
     try { msg = JSON.parse(e.data); } catch { return; }
 
     if (msg.type === "auth_required") {
-      haSocket.send(JSON.stringify({ type: "auth", access_token: uiConfig.ha_token }));
+      if (isAddonMode) {
+        // Proxy handles auth via supervisor token — send a dummy token
+        // The server-side proxy injects the real supervisor token
+        haSocket.send(JSON.stringify({ type: "auth", access_token: "proxy" }));
+      } else {
+        haSocket.send(JSON.stringify({ type: "auth", access_token: uiConfig.ha_token }));
+      }
     }
 
     if (msg.type === "auth_ok") {
@@ -2445,14 +2451,13 @@ function renderSettingsPanel() {
         ${isAddonMode ? `
         <div style="background:rgba(50,215,75,0.08);border:1px solid rgba(50,215,75,0.2);border-radius:8px;padding:10px 12px;margin-bottom:10px;">
           <div style="color:#32d74b;font-size:12px;font-weight:600;margin-bottom:3px;">✓ Running as HA Add-on</div>
-          <div style="color:#777;font-size:11px;">URL is automatic. Enter your Long-Lived Access Token below to enable live entity updates.</div>
+          <div style="color:#777;font-size:11px;">HA connection is fully automatic — no URL or token required.</div>
         </div>
         ` : `
         <div class="settings-field">
           <label>HA URL (e.g. http://192.168.1.x:8123)</label>
           <input type="text" id="cfgHaUrl" value="${escapeHtml(uiConfig.ha_url || "")}" placeholder="http://homeassistant.local:8123">
         </div>
-        `}
         <div class="settings-field">
           <label>Long-Lived Access Token</label>
           <input type="password" id="cfgHaToken" value="${escapeHtml(uiConfig.ha_token || "")}" placeholder="eyJ…">
@@ -2460,6 +2465,7 @@ function renderSettingsPanel() {
             Create one in HA: Profile → Long-Lived Access Tokens → Create Token
           </div>
         </div>
+        `}
         <div class="settings-field">
           <label>Alarm Panel Entity</label>
           <div class="entity-search-wrap" style="position:relative;">
@@ -2691,7 +2697,7 @@ function renderSettingsPanel() {
   updateYamlSnippet();
   panel.querySelectorAll("input").forEach(el => el.addEventListener("input", updateYamlSnippet));
 
-  document.getElementById("settingsSaveHaBtn").onclick = () => {
+  document.getElementById("settingsSaveHaBtn").onclick = async () => {
     if (!isAddonMode) {
       uiConfig.ha_url = document.getElementById("cfgHaUrl")?.value.trim() || "";
     }
@@ -2700,6 +2706,19 @@ function renderSettingsPanel() {
     uiConfig.alarm_entity_inverted = document.getElementById("cfgAlarmInverted")?.checked ?? false;
     uiConfig.alarm_label_armed    = document.getElementById("cfgLabelArmed")?.value.trim()    || "Armed";
     uiConfig.alarm_label_disarmed = document.getElementById("cfgLabelDisarmed")?.value.trim() || "Disarmed";
+
+    // Auto-save to ui.yaml so settings persist across browsers and reloads
+    try {
+      await fetch(apiPath("ow/save-config"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename: "config/ui.yaml", content: buildYamlContent() })
+      });
+      logEvent("ok", "Settings saved to ui.yaml.", "system");
+    } catch (e) {
+      logEvent("warn", "Settings saved in memory but could not write to ui.yaml: " + e.message, "system");
+    }
+
     if (haSocket) { haSocket.onclose = null; haSocket.close(); haSocket = null; haConnected = false; }
     connectHA();
     panel.classList.remove("open");
