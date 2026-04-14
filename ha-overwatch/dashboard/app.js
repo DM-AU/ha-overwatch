@@ -2453,21 +2453,21 @@ function renderSettingsPanel() {
         ${isAddonMode ? `
         <div style="background:rgba(50,215,75,0.08);border:1px solid rgba(50,215,75,0.2);border-radius:8px;padding:10px 12px;margin-bottom:10px;">
           <div style="color:#32d74b;font-size:12px;font-weight:600;margin-bottom:3px;">✓ Running as HA Add-on</div>
-          <div style="color:#777;font-size:11px;">HA connection is fully automatic — no URL or token required.</div>
+          <div style="color:#777;font-size:11px;">Enter your Long-Lived Token once below — it's stored securely in ui.yaml and used server-side. You won't need to enter it again.</div>
         </div>
         ` : `
         <div class="settings-field">
           <label>HA URL (e.g. http://192.168.1.x:8123)</label>
           <input type="text" id="cfgHaUrl" value="${escapeHtml(uiConfig.ha_url || "")}" placeholder="http://homeassistant.local:8123">
         </div>
+        `}
         <div class="settings-field">
           <label>Long-Lived Access Token</label>
           <input type="password" id="cfgHaToken" value="${escapeHtml(uiConfig.ha_token || "")}" placeholder="eyJ…">
           <div style="font-size:11px;color:#777;margin-top:3px;">
-            Create one in HA: Profile → Long-Lived Access Tokens → Create Token
+            HA → Profile (bottom left) → Security → Long-Lived Access Tokens → Create Token
           </div>
         </div>
-        `}
         <div class="settings-field">
           <label>Alarm Panel Entity</label>
           <div class="entity-search-wrap" style="position:relative;">

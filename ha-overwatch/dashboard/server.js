@@ -508,8 +508,8 @@ server.listen(PORT, "0.0.0.0", () => {
 });
 
 // WebSocket proxy — only active in add-on mode (SUPERVISOR_TOKEN present).
-// Flow: browser → our proxy → HA Core WebSocket
-// Auth: we get a short-lived token from supervisor, use it for WS auth
+// Uses the ha_token stored in ui.yaml (entered once by user in Settings).
+// This is the only reliable way to authenticate with HA Core WebSocket from an add-on.
 server.on("upgrade", (req, socket, head) => {
   const supervisorToken = process.env.SUPERVISOR_TOKEN;
   if (!supervisorToken) { socket.destroy(); return; }
@@ -517,58 +517,30 @@ server.on("upgrade", (req, socket, head) => {
   const url = req.url || "";
   if (!url.includes("websocket")) { socket.destroy(); return; }
 
-  console.log("[HA-Overwatch] WebSocket → proxying to HA supervisor");
+  console.log("[HA-Overwatch] WebSocket → proxying to HA");
 
-  // Cache the browser's WebSocket key before the async auth call
+  // Cache browser WS key before async operations
   socket._cachedKey = req.headers["sec-websocket-key"] || "";
 
-  // Step 1: Get a short-lived auth token from the supervisor API
-  // POST http://supervisor/core/auth/token with supervisor token
-  const authBody = JSON.stringify({ grant_type: "client_credentials" });
-  const authReq  = http.request({
-    hostname: "supervisor",
-    port:     80,
-    path:     "/core/auth/token",
-    method:   "POST",
-    headers: {
-      "Authorization": `Bearer ${supervisorToken}`,
-      "Content-Type":  "application/json",
-      "Content-Length": Buffer.byteLength(authBody),
-    },
-  }, (authRes) => {
-    let authData = "";
-    authRes.on("data", d => authData += d);
-    authRes.on("end", () => {
-      let haToken = supervisorToken; // fallback
-      try {
-        const parsed = JSON.parse(authData);
-        if (parsed.access_token) {
-          haToken = parsed.access_token;
-          console.log("[HA-Overwatch] WS proxy: obtained HA auth token from supervisor");
-        } else {
-          console.log("[HA-Overwatch] WS proxy: supervisor auth response:", JSON.stringify(parsed).slice(0, 300));
-          console.log("[HA-Overwatch] WS proxy: falling back to supervisor token");
-        }
-      } catch (e) {
-        console.log("[HA-Overwatch] WS proxy: auth response parse error:", e.message);
-        console.log("[HA-Overwatch] WS proxy: raw response:", authData.slice(0, 300));
-      }
-      openWSProxy(socket, haToken, supervisorToken);
-    });
-  });
-  authReq.on("error", (e) => {
-    console.log("[HA-Overwatch] WS proxy: auth token request failed:", e.message, "— using supervisor token");
-    openWSProxy(socket, supervisorToken, supervisorToken);
-  });
-  authReq.write(authBody);
-  authReq.end();
+  // Load ha_token from ui.yaml — the user enters this once in Settings
+  const cfg      = loadConfig();
+  const haToken  = cfg.ha_token || "";
+
+  if (!haToken) {
+    console.log("[HA-Overwatch] WS proxy: no ha_token in ui.yaml — browser must connect directly");
+    // Don't proxy — let browser handle it (will fail without token, shows message to user)
+    socket.destroy();
+    return;
+  }
+
+  openWSProxy(socket, haToken);
 });
 
-function openWSProxy(socket, haToken, supervisorToken) {
-  const crypto    = require("crypto");
+function openWSProxy(socket, haToken) {
+  const crypto     = require("crypto");
   const browserKey = socket._cachedKey || "";
 
-  // Complete the browser handshake
+  // Complete the browser WebSocket handshake
   const acceptKey = crypto.createHash("sha1")
     .update(browserKey + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")
     .digest("base64");
@@ -581,18 +553,17 @@ function openWSProxy(socket, haToken, supervisorToken) {
     "\r\n"
   );
 
-  // Open WebSocket to HA Core
+  // Connect to HA Core WebSocket — use internal hostname 'homeassistant' on port 8123
   const haReq = http.request({
-    hostname: "supervisor",
-    port:     80,
-    path:     "/core/api/websocket",
+    hostname: "homeassistant",
+    port:     8123,
+    path:     "/api/websocket",
     headers: {
-      "Host":                  "supervisor",
+      "Host":                  "homeassistant",
       "Upgrade":               "websocket",
       "Connection":            "Upgrade",
       "Sec-WebSocket-Key":     crypto.randomBytes(16).toString("base64"),
       "Sec-WebSocket-Version": "13",
-      "Authorization":         `Bearer ${supervisorToken}`,
     },
   });
 
