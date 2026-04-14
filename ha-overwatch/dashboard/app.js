@@ -2191,9 +2191,9 @@ function connectHA() {
 
     if (msg.type === "auth_required") {
       if (isAddonMode) {
-        // Server-side proxy injects the supervisor token — browser does nothing here.
-        // The proxy intercepts auth_required, sends the real token to HA,
-        // then forwards auth_ok back to us. We just wait.
+        // Proxy will intercept this and replace with the real stored token server-side.
+        // We send a placeholder so the browser participates in the auth flow normally.
+        haSocket.send(JSON.stringify({ type: "auth", access_token: "addon-proxy" }));
       } else {
         haSocket.send(JSON.stringify({ type: "auth", access_token: uiConfig.ha_token }));
       }

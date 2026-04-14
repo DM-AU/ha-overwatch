@@ -570,51 +570,76 @@ function openWSProxy(socket, haToken) {
   haReq.on("upgrade", (haRes, haSocket, haHead) => {
     console.log("[HA-Overwatch] WS proxy: HA upgrade successful");
 
-    let authState = "waiting"; // waiting → sent → done
-    let buf       = haHead.length > 0 ? Buffer.from(haHead) : Buffer.alloc(0);
+    let authState = "waiting_for_ha"; // waiting_for_ha → forwarded_to_browser → done
+    let haBuf     = haHead.length > 0 ? Buffer.from(haHead) : Buffer.alloc(0);
+    let broBuf    = Buffer.alloc(0); // browser data buffer during auth
 
+    // HA → Browser
     function processHAData(chunk) {
       if (authState === "done") { try { socket.write(chunk); } catch {} return; }
-      buf = Buffer.concat([buf, chunk]);
-      const payload = extractWsPayload(buf);
-      if (payload === null) return; // incomplete frame
+      haBuf = Buffer.concat([haBuf, chunk]);
+      const payload = extractWsPayload(haBuf);
+      if (payload === null) return;
 
       try {
         const msg = JSON.parse(payload);
         console.log("[HA-Overwatch] WS proxy HA msg:", msg.type);
 
-        if (authState === "waiting" && msg.type === "auth_required") {
-          // Intercept: inject supervisor token, don't forward to browser
-          sendWsFrame(haSocket, JSON.stringify({ type: "auth", access_token: haToken }));
-          authState = "sent";
-          buf = Buffer.alloc(0);
+        if (authState === "waiting_for_ha" && msg.type === "auth_required") {
+          // Forward auth_required to browser so it knows to send auth
+          try { socket.write(haBuf); } catch {}
+          haBuf = Buffer.alloc(0);
+          authState = "forwarded_to_browser";
           return;
         }
 
-        if (authState === "sent") {
-          // This is auth_ok or auth_invalid — forward to browser then open pipe
+        if (msg.type === "auth_ok" || msg.type === "auth_invalid") {
           console.log("[HA-Overwatch] WS proxy: auth result from HA:", msg.type);
-          try { socket.write(buf); } catch {}
-          buf = Buffer.alloc(0);
+          try { socket.write(haBuf); } catch {}
+          haBuf = Buffer.alloc(0);
           authState = "done";
+          // Flush any buffered browser data
+          if (broBuf.length > 0) { try { haSocket.write(broBuf); } catch {} broBuf = Buffer.alloc(0); }
           return;
         }
-      } catch (e) {
-        console.log("[HA-Overwatch] WS proxy: frame parse error:", e.message);
-      }
+      } catch {}
 
-      // Fallback — forward whatever we have
-      try { socket.write(buf); } catch {}
-      buf = Buffer.alloc(0);
+      try { socket.write(haBuf); } catch {}
+      haBuf = Buffer.alloc(0);
       authState = "done";
     }
 
-    if (buf.length > 0) processHAData(Buffer.alloc(0));
+    // Browser → HA: intercept auth message and replace token
+    function processBrowserData(chunk) {
+      if (authState === "done") { try { haSocket.write(chunk); } catch {} return; }
+
+      // Buffer browser data during auth exchange
+      broBuf = Buffer.concat([broBuf, chunk]);
+      const payload = extractWsPayload(broBuf);
+      if (payload === null) return;
+
+      try {
+        const msg = JSON.parse(payload);
+        if (msg.type === "auth") {
+          // Replace whatever token browser sent with our real token
+          console.log("[HA-Overwatch] WS proxy: replacing browser auth token with stored token");
+          sendWsFrame(haSocket, JSON.stringify({ type: "auth", access_token: haToken }));
+          broBuf = Buffer.alloc(0);
+          return;
+        }
+      } catch {}
+
+      // Not an auth message — forward as-is
+      try { haSocket.write(broBuf); } catch {}
+      broBuf = Buffer.alloc(0);
+    }
+
+    if (haBuf.length > 0) processHAData(Buffer.alloc(0));
     haSocket.on("data",  processHAData);
     haSocket.on("end",   () => { try { socket.end();     } catch {} });
     haSocket.on("error", e  => { console.error("[HA-Overwatch] WS HA error:", e.message); socket.destroy(); });
 
-    socket.on("data",  d => { try { haSocket.write(d); } catch {} });
+    socket.on("data",  processBrowserData);
     socket.on("end",   () => { try { haSocket.end();    } catch {} });
     socket.on("error", () => { haSocket.destroy(); });
   });
