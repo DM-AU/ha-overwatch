@@ -1466,13 +1466,15 @@ display: flex;
   color: #aaa;
   cursor: default;
   width: 100%;
-  padding: 7px 18px 7px 14px; /* extra 4px right = scrollbar compensation */
+  padding: 7px 14px;
   box-sizing: border-box;
 }
 .status-dd-zones {
   padding: 6px 0;
   max-height: 280px;
   overflow-y: auto;
+  /* Reserve scrollbar space even when not scrolling so master row aligns */
+  scrollbar-gutter: stable;
 }
 .status-dd-empty {
   padding: 12px 14px;
