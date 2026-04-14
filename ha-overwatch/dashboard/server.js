@@ -271,16 +271,21 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  const url      = new URL(req.url, `http://localhost:${PORT}`);
-  const pathname = url.pathname;
+  const url = new URL(req.url, `http://localhost:${PORT}`);
+  // Normalise: ensure leading slash, strip any ingress prefix that leaked through
+  let pathname = url.pathname;
+  if (!pathname.startsWith("/")) pathname = "/" + pathname;
 
-  /* ── /api/health ─────────────────────────────────────────── */
-  if (pathname === "/ow/health") {
+  // Log every request so we can see what's arriving (remove after debugging)
+  console.log(`[HA-Overwatch] ${req.method} ${pathname}`);
+
+  /* ── /ow/health ──────────────────────────────────────────── */
+  if (pathname === "/ow/health" || pathname === "ow/health") {
     const isAddon = !!process.env.SUPERVISOR_TOKEN;
     json(res, {
       ok: true,
       app: "ha-overwatch",
-      version: "1.0.6",
+      version: "1.0.7",
       isAddon,
       appDir:  APP_DIR,
       dataDir: DATA_DIR,
