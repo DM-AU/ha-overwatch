@@ -275,12 +275,12 @@ const server = http.createServer(async (req, res) => {
   const pathname = url.pathname;
 
   /* ── /api/health ─────────────────────────────────────────── */
-  if (pathname === "/api/health") {
+  if (pathname === "/ow/health") {
     const isAddon = !!process.env.SUPERVISOR_TOKEN;
     json(res, {
       ok: true,
       app: "ha-overwatch",
-      version: "1.0.5",
+      version: "1.0.6",
       isAddon,
       appDir:  APP_DIR,
       dataDir: DATA_DIR,
@@ -289,7 +289,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   /* ── /api/save-config ────────────────────────────────────── */
-  if (pathname === "/api/save-config" && req.method === "POST") {
+  if (pathname === "/ow/save-config" && req.method === "POST") {
     try {
       const body     = await readBody(req);
       const filePath = safeDataPath(body.filename);
@@ -306,7 +306,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   /* ── /api/save-zone ──────────────────────────────────────── */
-  if (pathname === "/api/save-zone" && req.method === "POST") {
+  if (pathname === "/ow/save-zone" && req.method === "POST") {
     try {
       const body     = await readBody(req);
       const fname    = path.basename(body.filename);
@@ -328,7 +328,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   /* ── /api/delete-zone ────────────────────────────────────── */
-  if (pathname === "/api/delete-zone" && req.method === "POST") {
+  if (pathname === "/ow/delete-zone" && req.method === "POST") {
     try {
       const body  = await readBody(req);
       const fname = path.basename(body.filename);
@@ -345,7 +345,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   /* ── /api/upload-floorplan ───────────────────────────────── */
-  if (pathname === "/api/upload-floorplan" && req.method === "POST") {
+  if (pathname === "/ow/upload-floorplan" && req.method === "POST") {
     const imgDir = safeDataPath("img");
     fs.mkdirSync(imgDir, { recursive: true });
 
@@ -385,7 +385,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   /* ── /api/ha-setup-zones ─────────────────────────────────── */
-  if (pathname === "/api/ha-setup-zones" && req.method === "POST") {
+  if (pathname === "/ow/ha-setup-zones" && req.method === "POST") {
     try {
       const cfg   = getHAConfig(loadConfig());
       const zones = loadZones();
@@ -407,7 +407,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   /* ── /api/ha-sync-zone ───────────────────────────────────── */
-  if (pathname === "/api/ha-sync-zone" && req.method === "POST") {
+  if (pathname === "/ow/ha-sync-zone" && req.method === "POST") {
     try {
       const body = await readBody(req);
       const cfg  = getHAConfig(loadConfig());
@@ -422,7 +422,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   /* ── /api/ha-sync-master ─────────────────────────────────── */
-  if (pathname === "/api/ha-sync-master" && req.method === "POST") {
+  if (pathname === "/ow/ha-sync-master" && req.method === "POST") {
     try {
       const body = await readBody(req);
       const cfg  = getHAConfig(loadConfig());
