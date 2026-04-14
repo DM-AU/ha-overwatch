@@ -452,11 +452,19 @@ const server = http.createServer(async (req, res) => {
   let reqPath = pathname === "/" ? "/index.html" : pathname;
   reqPath = reqPath.replace(/\.\./g, "");
 
-  // Data paths served from DATA_DIR; everything else from APP_DIR
+  // Resolve file path — try DATA_DIR first for data paths, then APP_DIR
   let filePath;
-  if (reqPath.startsWith("/config/") || reqPath.startsWith("/img/")) {
-    filePath = path.join(DATA_DIR, reqPath);
-    if (!filePath.startsWith(path.resolve(DATA_DIR))) { err(res, "Forbidden", 403); return; }
+  const isDataPath = reqPath.startsWith("/config/") || reqPath.startsWith("/img/");
+
+  if (isDataPath) {
+    const dataCandidate = path.join(DATA_DIR, reqPath);
+    if (!dataCandidate.startsWith(path.resolve(DATA_DIR))) { err(res, "Forbidden", 403); return; }
+    // Try DATA_DIR first, fall back to APP_DIR (for placeholder floorplan etc.)
+    if (fs.existsSync(dataCandidate)) {
+      filePath = dataCandidate;
+    } else {
+      filePath = path.join(APP_DIR, reqPath);
+    }
   } else {
     filePath = path.join(APP_DIR, reqPath);
     if (!filePath.startsWith(path.resolve(APP_DIR))) { err(res, "Forbidden", 403); return; }
@@ -469,16 +477,12 @@ const server = http.createServer(async (req, res) => {
     const ext  = path.extname(filePath).toLowerCase();
     const mime = MIME[ext] || "application/octet-stream";
 
-    // For index.html: inject a <base> tag so relative URLs resolve through ingress correctly
+    // For index.html: inject <base> tag so relative URLs resolve through ingress correctly
     if (filePath.endsWith("index.html")) {
       let html = fs.readFileSync(filePath, "utf8");
-      // Detect ingress base path from X-Ingress-Path header (set by HA supervisor)
       const ingressPath = req.headers["x-ingress-path"] || "";
       const base = ingressPath ? ingressPath.replace(/\/?$/, "/") : "./";
-      html = html.replace(
-        "<head>",
-        `<head>\n    <base href="${base}" />`
-      );
+      html = html.replace("<head>", `<head>\n    <base href="${base}" />`);
       res.writeHead(200, { "Content-Type": "text/html", "Cache-Control": "no-cache" });
       res.end(html);
       return;
@@ -492,6 +496,7 @@ const server = http.createServer(async (req, res) => {
     });
     res.end(content);
   } catch {
+    console.log(`[HA-Overwatch] 404 ${pathname} (tried: ${filePath})`);
     res.writeHead(404, { "Content-Type": "text/plain" });
     res.end("404 Not Found: " + pathname);
   }
