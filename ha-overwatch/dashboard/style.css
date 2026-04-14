@@ -217,13 +217,8 @@ display: flex;
  * ZOOM CONTROLS
  * ============================================================ */
 .zoom-controls {
-  position: fixed;
-  bottom: 18px;
-  right: 18px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  z-index: 350;
+  /* Zoom buttons are now inside the sidebar — this class is kept for legacy compatibility */
+  display: none;
 }
 
 .zoom-btn {
@@ -725,13 +720,17 @@ display: flex;
 .ha-status-badge {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 5px;
-  font-size: 10px;
-  color: #666;
-  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #555;
+  padding: 6px 4px;
   border-radius: 8px;
   border: 1px solid transparent;
+  margin: 2px 6px;
   transition: all 0.3s;
+  cursor: default;
 }
 
 .ha-status-badge.connected {
@@ -752,10 +751,11 @@ display: flex;
 }
 
 .ha-dot {
-  width: 6px;
-  height: 6px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
   background: currentColor;
+  flex-shrink: 0;
 }
 
 .ha-status-badge.connected .ha-dot {

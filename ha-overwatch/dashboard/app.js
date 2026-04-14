@@ -3214,7 +3214,6 @@ async function init() {
   }
 
   await loadModule("expandBtnContainer", "expand-btn.html");
-  await loadModule("zoomContainer", "zoom-controls.html");
   await loadModule("statusContainer", "status.html");
   await loadModule("zonesEditorContainer", "zones-editor.html");
 

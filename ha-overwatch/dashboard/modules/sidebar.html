@@ -39,12 +39,40 @@
     </svg>
   </button>
 
-  <!-- Spacer + HA badge -->
+  <!-- Spacer pushes zoom + HA badge to bottom -->
   <div style="flex:1;"></div>
-  <div class="ha-status-badge disconnected" id="haStatusBadge" title="Home Assistant connection">
+
+  <!-- Zoom In -->
+  <button class="icon-plate" id="zoomIn" title="Zoom in" aria-label="Zoom in">
+    <svg class="icon" width="26" height="26" viewBox="0 0 24 24" fill="none">
+      <circle cx="11" cy="11" r="6.5" stroke="rgba(255,255,255,0.9)" stroke-width="2"/>
+      <path d="M16.5 16.5L21 21" stroke="rgba(255,255,255,0.9)" stroke-width="2" stroke-linecap="round"/>
+      <path d="M8 11h6M11 8v6" stroke="rgba(255,255,255,0.9)" stroke-width="2" stroke-linecap="round"/>
+    </svg>
+  </button>
+
+  <!-- Zoom Out -->
+  <button class="icon-plate" id="zoomOut" title="Zoom out" aria-label="Zoom out">
+    <svg class="icon" width="26" height="26" viewBox="0 0 24 24" fill="none">
+      <circle cx="11" cy="11" r="6.5" stroke="rgba(255,255,255,0.9)" stroke-width="2"/>
+      <path d="M16.5 16.5L21 21" stroke="rgba(255,255,255,0.9)" stroke-width="2" stroke-linecap="round"/>
+      <path d="M8 11h6" stroke="rgba(255,255,255,0.9)" stroke-width="2" stroke-linecap="round"/>
+    </svg>
+  </button>
+
+  <!-- Zoom Reset -->
+  <button class="icon-plate" id="zoomReset" title="Reset zoom" aria-label="Reset zoom">
+    <svg class="icon" width="26" height="26" viewBox="0 0 24 24" fill="none">
+      <path d="M3.51 9a9 9 0 1 1-.5 4" stroke="rgba(255,255,255,0.9)" stroke-width="2" stroke-linecap="round"/>
+      <path d="M3 3v6h6" stroke="rgba(255,255,255,0.9)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+  </button>
+
+  <!-- HA status badge — below zoom reset -->
+  <div class="ha-status-badge disconnected" id="haStatusBadge" title="Home Assistant connection status">
     <div class="ha-dot"></div>
     <span id="haStatusText">HA</span>
   </div>
-  <div style="height:170px;"></div>
+  <div style="height:12px;"></div>
 
 </div>
