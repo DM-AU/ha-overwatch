@@ -208,13 +208,15 @@ function applyConfig() {
 
   const fp = document.getElementById("floorplanImage");
   if (fp && uiConfig.floorplan) {
-    const newBase = new URL(uiConfig.floorplan, window.location.href).href.split("?")[0];
-    const curBase = fp.src.split("?")[0];
-    if (curBase !== newBase) {
-      fp.src = uiConfig.floorplan + "?v=" + Date.now();
-      fp.onload = initFloorplan;
-    } else if (!fp.dataset.loaded) {
+    const fpPath   = apiPath(uiConfig.floorplan);
+    const newBase  = fpPath.split("?")[0];
+    const curBase  = fp.src.split("?")[0].replace(window.location.origin, "").replace(/^\/api\/hassio_ingress\/[^/]+/, "");
+    if (!fp.dataset.loaded || !fp.src.includes(encodeURIComponent(uiConfig.floorplan).replace(/%20/g, " ").split("/").pop().split("?")[0])) {
+      fp.src = fpPath + "?v=" + Date.now();
       fp.dataset.loaded = "1";
+      fp.onload = initFloorplan;
+    } else if (!fp.dataset.initialized) {
+      fp.dataset.initialized = "1";
       initFloorplan();
     }
   }
@@ -2189,9 +2191,9 @@ function connectHA() {
 
     if (msg.type === "auth_required") {
       if (isAddonMode) {
-        // Proxy handles auth via supervisor token — send a dummy token
-        // The server-side proxy injects the real supervisor token
-        haSocket.send(JSON.stringify({ type: "auth", access_token: "proxy" }));
+        // Server-side proxy injects the supervisor token — browser does nothing here.
+        // The proxy intercepts auth_required, sends the real token to HA,
+        // then forwards auth_ok back to us. We just wait.
       } else {
         haSocket.send(JSON.stringify({ type: "auth", access_token: uiConfig.ha_token }));
       }
@@ -2627,9 +2629,21 @@ function renderSettingsPanel() {
           document.getElementById("cfgFloorplan").value = path;
           uiConfig.floorplan = path;
           const fp = document.getElementById("floorplanImage");
-          if (fp) fp.src = path + "?v=" + Date.now();
+          if (fp) {
+            fp.src = apiPath(path) + "?v=" + Date.now();
+            fp.dataset.loaded = "1";
+            fp.onload = initFloorplan;
+          }
           uploadStatus.textContent = "✓ Uploaded: " + path;
           uploadStatus.style.color = "#32d74b";
+          // Auto-save so other browsers pick up the new floorplan
+          try {
+            await fetch(apiPath("ow/save-config"), {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ filename: "config/ui.yaml", content: buildYamlContent() })
+            });
+          } catch { /* non-fatal */ }
         } else {
           uploadStatus.textContent = "✗ Upload failed (server returned " + res.status + ")";
           uploadStatus.style.color = "#ff3b30";
@@ -2648,7 +2662,11 @@ function renderSettingsPanel() {
     cfgFloorplanInput.onblur = () => {
       uiConfig.floorplan = cfgFloorplanInput.value.trim();
       const fp = document.getElementById("floorplanImage");
-      if (fp && uiConfig.floorplan) fp.src = uiConfig.floorplan + "?v=" + Date.now();
+      if (fp && uiConfig.floorplan) {
+        fp.src = apiPath(uiConfig.floorplan) + "?v=" + Date.now();
+        fp.dataset.loaded = "1";
+        fp.onload = initFloorplan;
+      }
     };
   }
 
