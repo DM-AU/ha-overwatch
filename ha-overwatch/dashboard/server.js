@@ -509,134 +509,128 @@ server.listen(PORT, "0.0.0.0", () => {
 
 // WebSocket proxy — only active in add-on mode (SUPERVISOR_TOKEN present).
 // Browser connects to ws://our-server/ws/api/websocket
-// We forward to ws://supervisor/core/api/websocket, handling auth transparently.
+// We do a proper HTTP upgrade to supervisor and pipe the authenticated stream.
 server.on("upgrade", (req, socket, head) => {
   const supervisorToken = process.env.SUPERVISOR_TOKEN;
   if (!supervisorToken) { socket.destroy(); return; }
 
   const url = req.url || "";
-  if (!url.includes("/ws/api/websocket") && !url.endsWith("/websocket")) {
-    socket.destroy();
-    return;
-  }
+  if (!url.includes("websocket")) { socket.destroy(); return; }
 
-  console.log("[HA-Overwatch] WebSocket upgrade → proxying to HA supervisor");
+  console.log("[HA-Overwatch] WebSocket → proxying to HA supervisor");
 
-  // We need to speak the WebSocket protocol properly.
-  // Use a second HTTP request to upgrade with HA, then pipe frames.
-  // Step 1: open a raw TCP connection to supervisor and perform a WebSocket upgrade.
-  const haConn = net.createConnection({ host: "supervisor", port: 80 });
-
-  haConn.on("connect", () => {
-    // Send WebSocket upgrade request to HA with supervisor token auth header
-    const key = req.headers["sec-websocket-key"] || Buffer.from(Date.now().toString()).toString("base64");
-    const upgradeReq = [
-      "GET /core/api/websocket HTTP/1.1",
-      "Host: supervisor",
-      "Upgrade: websocket",
-      "Connection: Upgrade",
-      `Sec-WebSocket-Key: ${key}`,
-      "Sec-WebSocket-Version: 13",
-      "",
-      "",
-    ].join("\r\n");
-    haConn.write(upgradeReq);
-  });
-
-  let haHandshakeDone = false;
-  let browserHandshakeDone = false;
-  let authInjected = false;
-  let haBuffer = Buffer.alloc(0);
-
-  // Complete the browser's WebSocket handshake
-  const browserKey = req.headers["sec-websocket-key"];
-  const crypto = require("crypto");
-  const acceptKey = crypto
-    .createHash("sha1")
+  // Complete the browser handshake first
+  const crypto      = require("crypto");
+  const browserKey  = req.headers["sec-websocket-key"] || "";
+  const acceptKey   = crypto.createHash("sha1")
     .update(browserKey + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")
     .digest("base64");
 
-  const browserHandshake = [
-    "HTTP/1.1 101 Switching Protocols",
-    "Upgrade: websocket",
-    "Connection: Upgrade",
-    `Sec-WebSocket-Accept: ${acceptKey}`,
-    "",
-    "",
-  ].join("\r\n");
+  socket.write(
+    "HTTP/1.1 101 Switching Protocols\r\n" +
+    "Upgrade: websocket\r\n" +
+    "Connection: Upgrade\r\n" +
+    `Sec-WebSocket-Accept: ${acceptKey}\r\n` +
+    "\r\n"
+  );
 
-  haConn.on("data", (chunk) => {
-    if (!haHandshakeDone) {
-      haBuffer = Buffer.concat([haBuffer, chunk]);
-      const headerEnd = haBuffer.indexOf("\r\n\r\n");
-      if (headerEnd === -1) return; // still reading headers
-
-      haHandshakeDone = true;
-      const remaining = haBuffer.slice(headerEnd + 4);
-      haBuffer = Buffer.alloc(0);
-
-      // Complete handshake with browser now
-      socket.write(browserHandshake);
-      browserHandshakeDone = true;
-
-      // Forward any remaining data (first HA message) to browser
-      if (remaining.length > 0) {
-        handleHAFrame(remaining);
-      }
-    } else {
-      handleHAFrame(chunk);
-    }
+  // Now open an authenticated connection to HA via supervisor
+  const haReq = http.request({
+    hostname: "supervisor",
+    port:     80,
+    path:     "/core/api/websocket",
+    headers: {
+      "Host":                  "supervisor",
+      "Upgrade":               "websocket",
+      "Connection":            "Upgrade",
+      "Sec-WebSocket-Key":     crypto.randomBytes(16).toString("base64"),
+      "Sec-WebSocket-Version": "13",
+      "Authorization":         `Bearer ${supervisorToken}`,
+    },
   });
 
-  // Parse HA WebSocket frames and intercept auth_required to inject supervisor token
-  function handleHAFrame(data) {
-    if (!authInjected) {
-      // Try to detect auth_required JSON message in the frame payload
-      try {
-        const payload = extractWsPayload(data);
-        if (payload) {
-          const msg = JSON.parse(payload);
-          if (msg.type === "auth_required") {
-            // Send auth_required to browser so it knows connection is live
-            socket.write(data);
-            // Immediately respond with supervisor token auth (browser doesn't need to)
-            sendWsFrame(haConn, JSON.stringify({ type: "auth", access_token: supervisorToken }));
-            authInjected = true;
-            return;
-          }
-          if (msg.type === "auth_ok" || msg.type === "auth_invalid") {
-            authInjected = true;
-          }
+  haReq.on("upgrade", (haRes, haSocket, haHead) => {
+    console.log("[HA-Overwatch] WS proxy: HA upgrade successful");
+
+    // Intercept auth_required and respond with supervisor token transparently
+    let authDone = false;
+    let buf = haHead.length > 0 ? haHead : Buffer.alloc(0);
+
+    function processHAData(chunk) {
+      buf = Buffer.concat([buf, chunk]);
+
+      if (!authDone) {
+        // Try to extract and parse the first frame
+        const payload = extractWsPayload(buf);
+        if (payload !== null) {
+          try {
+            const msg = JSON.parse(payload);
+            if (msg.type === "auth_required") {
+              console.log("[HA-Overwatch] WS proxy: intercepting auth_required, injecting supervisor token");
+              // Don't forward auth_required to browser — handle silently
+              // Send auth with supervisor token to HA
+              sendWsFrame(haSocket, JSON.stringify({ type: "auth", access_token: supervisorToken }));
+              authDone = true;
+              buf = Buffer.alloc(0);
+              return; // Don't forward this frame to browser
+            }
+          } catch {}
         }
-      } catch { authInjected = true; }
-    }
-    try { socket.write(data); } catch {}
-  }
+        // If we can't parse yet, pass through
+        if (buf.length > 0) {
+          try { socket.write(buf); } catch {}
+          buf = Buffer.alloc(0);
+        }
+        authDone = true;
+        return;
+      }
 
-  // Pipe browser frames straight through to HA (after handshake)
-  socket.on("data", (data) => {
-    if (!browserHandshakeDone) return;
-    try { haConn.write(data); } catch {}
+      // Auth done — pipe all subsequent frames straight to browser
+      try { socket.write(chunk); } catch {}
+    }
+
+    if (buf.length > 0) processHAData(Buffer.alloc(0)); // process haHead
+    haSocket.on("data", processHAData);
+    haSocket.on("end",  () => { try { socket.end();     } catch {} });
+    haSocket.on("error", e => {
+      console.error("[HA-Overwatch] WS proxy HA socket error:", e.message);
+      socket.destroy();
+    });
+
+    // Browser → HA: pipe directly
+    socket.on("data", d => { try { haSocket.write(d); } catch {} });
+    socket.on("end",  () => { try { haSocket.end();    } catch {} });
+    socket.on("error", () => { haSocket.destroy(); });
   });
 
-  haConn.on("end",   () => { try { socket.end(); } catch {} });
-  haConn.on("error", e  => { console.error("[HA-Overwatch] WS proxy error:", e.message); socket.destroy(); });
-  socket.on("end",   () => { try { haConn.end(); } catch {} });
-  socket.on("error", () => { haConn.destroy(); });
+  haReq.on("error", e => {
+    console.error("[HA-Overwatch] WS proxy request error:", e.message);
+    socket.destroy();
+  });
+
+  haReq.end();
 });
 
-// Extract the payload string from a WebSocket frame (handles small frames only)
+// Extract payload string from a WebSocket frame (text frames only, unmasked)
 function extractWsPayload(buf) {
   if (buf.length < 2) return null;
-  const b1 = buf[1];
-  const masked = (b1 & 0x80) !== 0;
-  let len = b1 & 0x7f;
+  const firstByte  = buf[0];
+  const secondByte = buf[1];
+  const opcode     = firstByte & 0x0f;
+  if (opcode !== 1) return null; // only handle text frames
+  const masked = (secondByte & 0x80) !== 0;
+  let len    = secondByte & 0x7f;
   let offset = 2;
-  if (len === 126) { len = buf.readUInt16BE(2); offset = 4; }
-  else if (len === 127) { return null; } // too large, skip
+  if (len === 126) {
+    if (buf.length < 4) return null;
+    len = buf.readUInt16BE(2);
+    offset = 4;
+  } else if (len === 127) {
+    return null; // skip large frames
+  }
   if (masked) offset += 4;
   if (buf.length < offset + len) return null;
-  const payload = buf.slice(offset, offset + len);
+  const payload = Buffer.from(buf.slice(offset, offset + len));
   if (masked) {
     const mask = buf.slice(offset - 4, offset);
     for (let i = 0; i < payload.length; i++) payload[i] ^= mask[i % 4];
@@ -644,19 +638,15 @@ function extractWsPayload(buf) {
   return payload.toString("utf8");
 }
 
-// Write a WebSocket text frame (unmasked, server→client)
-function sendWsFrame(conn, text) {
+// Write an unmasked WebSocket text frame to a socket
+function sendWsFrame(sock, text) {
   const payload = Buffer.from(text, "utf8");
-  const len = payload.length;
-  let header;
-  if (len < 126) {
-    header = Buffer.from([0x81, len]);
-  } else if (len < 65536) {
-    header = Buffer.from([0x81, 126, (len >> 8) & 0xff, len & 0xff]);
-  } else {
-    return; // too large
-  }
-  try { conn.write(Buffer.concat([header, payload])); } catch {}
+  const len     = payload.length;
+  let   header;
+  if      (len < 126)   header = Buffer.from([0x81, len]);
+  else if (len < 65536) header = Buffer.from([0x81, 126, (len >> 8) & 0xff, len & 0xff]);
+  else return;
+  try { sock.write(Buffer.concat([header, payload])); } catch {}
 }
 
 server.on("error", e => {
