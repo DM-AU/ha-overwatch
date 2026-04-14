@@ -236,8 +236,8 @@ function applyConfig() {
 
   restartPolling();
 
-  // Re-connect HA if credentials changed
-  if (uiConfig.ha_url && uiConfig.ha_token) {
+  // Re-connect HA if credentials changed — skip if already connected or add-on mode handling it
+  if (!haConnected && !isAddonMode && uiConfig.ha_url && uiConfig.ha_token) {
     connectHA();
   }
 
@@ -2153,23 +2153,30 @@ function connectHA() {
   if (haReconnectTimer) clearTimeout(haReconnectTimer);
 
   let wsUrl;
+  const pageIsHttps = window.location.protocol === "https:";
 
   if (isAddonMode) {
     // In add-on mode: connect to our own server's WebSocket proxy.
-    // The server forwards to HA using the supervisor token — no user token needed.
-    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+    // The proxy handles auth server-side — browser sends dummy token which gets replaced.
+    const proto = pageIsHttps ? "wss:" : "ws:";
     const host  = window.location.host;
     wsUrl = `${proto}//${host}${BASE_PATH}/ws/api/websocket`;
     logEvent("info", "Connecting to HA via add-on WebSocket proxy…", "ha");
   } else {
-    // Standalone mode: connect directly to HA, token required
+    // Standalone mode: connect directly to HA WebSocket
     if (!uiConfig.ha_url) return;
     if (!uiConfig.ha_token) {
       logEvent("warn", "HA token required in standalone mode. Enter it in Settings.", "ha");
       return;
     }
-    wsUrl = uiConfig.ha_url.replace(/^http/, "ws").replace(/\/$/, "") + "/api/websocket";
-    logEvent("info", `Connecting to HA at ${uiConfig.ha_url}…`, "ha");
+    // Upgrade ws:// → wss:// if page is served over HTTPS (mixed content block)
+    let haUrl = uiConfig.ha_url.replace(/\/$/, "");
+    if (pageIsHttps && haUrl.startsWith("http://")) {
+      haUrl = haUrl.replace("http://", "https://");
+      logEvent("info", "Upgrading HA connection to HTTPS to match page protocol.", "ha");
+    }
+    wsUrl = haUrl.replace(/^http/, "ws") + "/api/websocket";
+    logEvent("info", `Connecting to HA at ${haUrl}…`, "ha");
   }
 
   try {
