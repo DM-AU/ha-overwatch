@@ -2441,48 +2441,54 @@ function renderSettingsPanel() {
     </div>
     <div class="settings-body">
 
-      <div class="settings-section">
-        <div class="settings-section-title">Display</div>
-        <div class="settings-field">
-          <label>Sidebar Position</label>
-          <div class="settings-toggle-row">
-            <button class="settings-toggle ${uiConfig.sidebar_position !== "left" ? "active" : ""}" id="sidebarRight">Right</button>
-            <button class="settings-toggle ${uiConfig.sidebar_position === "left" ? "active" : ""}" id="sidebarLeft">Left</button>
-          </div>
-        </div>
-        <div class="settings-field">
-          <label>Floor Plan Image</label>
-          <div class="settings-floorplan-row">
-            <input type="text" id="cfgFloorplan" value="${escapeHtml(uiConfig.floorplan || "img/floorplan.png")}" placeholder="img/floorplan.png">
-            <label class="settings-upload-btn" title="Upload new floor plan">
-              ↑
-              <input type="file" id="cfgFloorplanUpload" accept="image/*" style="display:none;">
-            </label>
-          </div>
-          <div id="floorplanUploadStatus" style="font-size:11px;color:#888;margin-top:4px;"></div>
-        </div>
-      </div>
-
+      <!-- ══ HOME ASSISTANT ══════════════════════════════════ -->
       <div class="settings-section">
         <div class="settings-section-title">Home Assistant</div>
-        ${isAddonMode ? `
-        <div style="background:rgba(50,215,75,0.08);border:1px solid rgba(50,215,75,0.2);border-radius:8px;padding:10px 12px;margin-bottom:10px;">
-          <div style="color:#32d74b;font-size:12px;font-weight:600;margin-bottom:3px;">✓ Running as HA Add-on</div>
-          <div style="color:#777;font-size:11px;">Enter your Long-Lived Token once below — it's stored securely in ui.yaml and used server-side. You won't need to enter it again.</div>
+
+        <!-- Connection status box (traffic-light) -->
+        <div id="haConnectionStatus" style="border-radius:8px;padding:10px 12px;margin-bottom:12px;border:1px solid;
+          ${haConnected
+            ? 'background:rgba(50,215,75,0.08);border-color:rgba(50,215,75,0.25);'
+            : 'background:rgba(255,59,48,0.07);border-color:rgba(255,59,48,0.2);'}">
+          <div style="font-size:12px;font-weight:600;margin-bottom:4px;
+            color:${haConnected ? '#32d74b' : '#ff453a'};">
+            ${haConnected ? '✓ Connected to Home Assistant' : '✗ Not connected to Home Assistant'}
+          </div>
+          ${isAddonMode
+            ? `<div style="color:#777;font-size:11px;line-height:1.5;">
+                Running as HA Add-on — URL is automatic.<br>
+                Enter your Long-Lived Token below once and it will be stored securely server-side.
+               </div>`
+            : `<div style="color:#777;font-size:11px;">Enter your HA URL and token below.</div>`
+          }
         </div>
-        ` : `
+
+        ${!isAddonMode ? `
         <div class="settings-field">
-          <label>HA URL (e.g. http://192.168.1.x:8123)</label>
-          <input type="text" id="cfgHaUrl" value="${escapeHtml(uiConfig.ha_url || "")}" placeholder="http://homeassistant.local:8123">
+          <label>HA URL</label>
+          <input type="text" id="cfgHaUrl" value="${escapeHtml(uiConfig.ha_url || "")}"
+            placeholder="http://homeassistant.local:8123">
         </div>
-        `}
+        ` : ""}
+
         <div class="settings-field">
           <label>Long-Lived Access Token</label>
-          <input type="password" id="cfgHaToken" value="${escapeHtml(uiConfig.ha_token || "")}" placeholder="eyJ…">
-          <div style="font-size:11px;color:#777;margin-top:3px;">
+          <input type="password" id="cfgHaToken" placeholder="${uiConfig.ha_token ? "●●●●●●●● (saved)" : "eyJ…"}">
+          <div style="font-size:11px;color:#666;margin-top:4px;">
             HA → Profile (bottom left) → Security → Long-Lived Access Tokens → Create Token
           </div>
         </div>
+
+        <button class="settings-btn" id="settingsSaveHaBtn"
+          style="${haConnected ? 'opacity:0.5;' : ''}">
+          ${haConnected ? '✓ Connected — click to reconnect' : 'Connect to Home Assistant'}
+        </button>
+        <div id="haConnectStatus" style="font-size:11px;color:#888;margin-top:5px;min-height:14px;text-align:center;"></div>
+      </div>
+
+      <!-- ══ ALARM CONFIGURATION ═════════════════════════════ -->
+      <div class="settings-section">
+        <div class="settings-section-title">Alarm Configuration</div>
         <div class="settings-field">
           <label>Alarm Panel Entity</label>
           <div class="entity-search-wrap" style="position:relative;">
@@ -2510,9 +2516,32 @@ function renderSettingsPanel() {
           <input type="text" id="cfgLabelDisarmed" value="${escapeHtml(uiConfig.alarm_label_disarmed || "Disarmed")}"
             placeholder="Disarmed" style="max-width:160px;">
         </div>
-        <button class="settings-btn" id="settingsSaveHaBtn">${isAddonMode ? "Connect to Home Assistant" : "Connect to Home Assistant"}</button>
       </div>
 
+      <!-- ══ DISPLAY ══════════════════════════════════════════ -->
+      <div class="settings-section">
+        <div class="settings-section-title">Display</div>
+        <div class="settings-field">
+          <label>Sidebar Position</label>
+          <div class="settings-toggle-row">
+            <button class="settings-toggle ${uiConfig.sidebar_position !== "left" ? "active" : ""}" id="sidebarRight">Right</button>
+            <button class="settings-toggle ${uiConfig.sidebar_position === "left" ? "active" : ""}" id="sidebarLeft">Left</button>
+          </div>
+        </div>
+        <div class="settings-field">
+          <label>Floor Plan Image</label>
+          <div class="settings-floorplan-row">
+            <input type="text" id="cfgFloorplan" value="${escapeHtml(uiConfig.floorplan || "img/floorplan.png")}" placeholder="img/floorplan.png">
+            <label class="settings-upload-btn" title="Upload new floor plan">
+              ↑
+              <input type="file" id="cfgFloorplanUpload" accept="image/*" style="display:none;">
+            </label>
+          </div>
+          <div id="floorplanUploadStatus" style="font-size:11px;color:#888;margin-top:4px;"></div>
+        </div>
+      </div>
+
+      <!-- ══ ZONE BEHAVIOUR ═══════════════════════════════════ -->
       <div class="settings-section">
         <div class="settings-section-title">Zone Behaviour</div>
         <div class="settings-field">
@@ -2523,6 +2552,7 @@ function renderSettingsPanel() {
         </div>
       </div>
 
+      <!-- ══ ZONE COLOURS ═════════════════════════════════════ -->
       <div class="settings-section">
         <div class="settings-section-title">Zone Colours — Alarm Armed</div>
         <div style="font-size:11px;color:#888;margin-bottom:6px;">Colours when alarm system is armed/triggered</div>
@@ -2548,11 +2578,11 @@ function renderSettingsPanel() {
           <div class="settings-color-item"><label>Smoke</label><input type="color" id="cfgColOffSmoke" value="${uiConfig.color_off_smoke || "#ff6b6b"}"></div>
           <div class="settings-color-item"><label>CO / Gas</label><input type="color" id="cfgColOffCo" value="${uiConfig.color_off_co || "#cc73f8"}"></div>
         </div>
-        <button class="settings-btn" id="settingsSaveColoursBtn" style="margin-top:10px;">Apply Colours</button>
       </div>
 
+      <!-- ══ SAVE ═════════════════════════════════════════════ -->
       <div class="settings-section">
-        <button class="settings-btn" id="settingsSaveYamlBtn">Save settings to ui.yaml</button>
+        <button class="settings-btn" id="settingsSaveYamlBtn">Save Settings</button>
         <div id="yamlSaveStatus" style="font-size:11px;color:#888;margin-top:6px;text-align:center;"></div>
       </div>
 
@@ -2726,70 +2756,89 @@ function renderSettingsPanel() {
 
   // No-op stub so existing callers of updateYamlSnippet don't throw
   const updateYamlSnippet = () => {};
-
   updateYamlSnippet();
-  panel.querySelectorAll("input").forEach(el => el.addEventListener("input", updateYamlSnippet));
 
-  document.getElementById("settingsSaveHaBtn").onclick = async () => {
-    if (!isAddonMode) {
-      uiConfig.ha_url = document.getElementById("cfgHaUrl")?.value.trim() || "";
-    }
-    uiConfig.ha_token             = document.getElementById("cfgHaToken")?.value.trim() || "";
-    uiConfig.alarm_entity         = document.getElementById("cfgAlarmEntity").value.trim();
-    uiConfig.alarm_entity_inverted = document.getElementById("cfgAlarmInverted")?.checked ?? false;
-    uiConfig.alarm_label_armed    = document.getElementById("cfgLabelArmed")?.value.trim()    || "Armed";
-    uiConfig.alarm_label_disarmed = document.getElementById("cfgLabelDisarmed")?.value.trim() || "Disarmed";
+  // ── Connect to Home Assistant button ──────────────────────────
+  const connectBtn    = document.getElementById("settingsSaveHaBtn");
+  const tokenField    = document.getElementById("cfgHaToken");
+  const connectStatus = document.getElementById("haConnectStatus");
 
-    // Auto-save to ui.yaml so settings persist across browsers and reloads
-    try {
-      await fetch(apiPath("ow/save-config"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ filename: "config/ui.yaml", content: buildYamlContent() })
-      });
-      logEvent("ok", "Settings saved to ui.yaml.", "system");
-    } catch (e) {
-      logEvent("warn", "Settings saved in memory but could not write to ui.yaml: " + e.message, "system");
-    }
+  // Re-enable button when user types a new token
+  if (tokenField && connectBtn) {
+    tokenField.addEventListener("input", () => {
+      const hasInput = tokenField.value.trim().length > 0;
+      connectBtn.style.opacity = "1";
+      connectBtn.textContent = "Connect to Home Assistant";
+      if (haConnected && hasInput && connectStatus) {
+        connectStatus.textContent = "⚠ This will replace your working connection.";
+        connectStatus.style.color = "#ff9500";
+      } else if (connectStatus) {
+        connectStatus.textContent = "";
+      }
+    });
+  }
 
-    if (haSocket) { haSocket.onclose = null; haSocket.close(); haSocket = null; haConnected = false; }
-    connectHA();
-    panel.classList.remove("open");
-  };
+  if (connectBtn) {
+    connectBtn.onclick = async () => {
+      const newToken = tokenField?.value.trim() || "";
 
-  document.getElementById("settingsSaveColoursBtn").onclick = () => {
-    const g = id => document.getElementById(id)?.value;
-    // Fade duration
-    const fd = parseFloat(g("cfgFadeDuration"));
-    if (!isNaN(fd)) uiConfig.zone_fade_duration = Math.max(0, fd);
-    // Alarm-on colours
-    uiConfig.color_on_person  = g("cfgColOnPerson")  || uiConfig.color_on_person;
-    uiConfig.color_on_motion  = g("cfgColOnMotion")  || uiConfig.color_on_motion;
-    uiConfig.color_on_door    = g("cfgColOnDoor")    || uiConfig.color_on_door;
-    uiConfig.color_on_window  = g("cfgColOnWindow")  || uiConfig.color_on_window;
-    uiConfig.color_on_animal  = g("cfgColOnAnimal")  || uiConfig.color_on_animal;
-    uiConfig.color_on_vehicle = g("cfgColOnVehicle") || uiConfig.color_on_vehicle;
-    uiConfig.color_on_smoke   = g("cfgColOnSmoke")   || uiConfig.color_on_smoke;
-    uiConfig.color_on_co      = g("cfgColOnCo")      || uiConfig.color_on_co;
-    // Alarm-off colours
-    uiConfig.color_off_person  = g("cfgColOffPerson")  || uiConfig.color_off_person;
-    uiConfig.color_off_motion  = g("cfgColOffMotion")  || uiConfig.color_off_motion;
-    uiConfig.color_off_door    = g("cfgColOffDoor")    || uiConfig.color_off_door;
-    uiConfig.color_off_window  = g("cfgColOffWindow")  || uiConfig.color_off_window;
-    uiConfig.color_off_animal  = g("cfgColOffAnimal")  || uiConfig.color_off_animal;
-    uiConfig.color_off_vehicle = g("cfgColOffVehicle") || uiConfig.color_off_vehicle;
-    uiConfig.color_off_smoke   = g("cfgColOffSmoke")   || uiConfig.color_off_smoke;
-    uiConfig.color_off_co      = g("cfgColOffCo")      || uiConfig.color_off_co;
-    applyConfig();
-    renderZones();
-  };
+      // Don't overwrite a saved token with nothing
+      if (!newToken && !uiConfig.ha_token) {
+        if (connectStatus) { connectStatus.textContent = "✗ Enter a Long-Lived Access Token first."; connectStatus.style.color = "#ff3b30"; }
+        return;
+      }
+
+      if (!isAddonMode && document.getElementById("cfgHaUrl")) {
+        uiConfig.ha_url = document.getElementById("cfgHaUrl").value.trim() || uiConfig.ha_url;
+      }
+      if (newToken) uiConfig.ha_token = newToken;  // only update if new token entered
+
+      // Save token to disk immediately
+      try {
+        await fetch(apiPath("ow/save-config"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ filename: "config/ui.yaml", content: buildYamlContent() })
+        });
+        if (connectStatus) { connectStatus.textContent = "✓ Token saved — connecting…"; connectStatus.style.color = "#32d74b"; }
+      } catch (e) {
+        if (connectStatus) { connectStatus.textContent = "⚠ Token saved in memory only."; connectStatus.style.color = "#ff9500"; }
+      }
+
+      if (haSocket) { haSocket.onclose = null; haSocket.close(); haSocket = null; haConnected = false; }
+      if (connectBtn) { connectBtn.style.opacity = "0.5"; connectBtn.textContent = "Connecting…"; }
+      connectHA();
+      panel.classList.remove("open");
+    };
+  }
+
+  // ── Save Settings button (all settings except HA token/URL) ───
+  // Colours are applied live by readng fields; the Save button persists everything
 
   const saveYamlBtn    = document.getElementById("settingsSaveYamlBtn");
   const yamlSaveStatus = document.getElementById("yamlSaveStatus");
   if (saveYamlBtn) {
     saveYamlBtn.onclick = async () => {
+      const g = id => document.getElementById(id)?.value;
+
+      // Apply all non-HA settings to uiConfig
+      uiConfig.alarm_entity         = document.getElementById("cfgAlarmEntity")?.value.trim() || uiConfig.alarm_entity;
+      uiConfig.alarm_entity_inverted = document.getElementById("cfgAlarmInverted")?.checked ?? uiConfig.alarm_entity_inverted;
+      uiConfig.alarm_label_armed    = document.getElementById("cfgLabelArmed")?.value.trim()    || uiConfig.alarm_label_armed;
+      uiConfig.alarm_label_disarmed = document.getElementById("cfgLabelDisarmed")?.value.trim() || uiConfig.alarm_label_disarmed;
+      const fd = parseFloat(g("cfgFadeDuration"));
+      if (!isNaN(fd)) uiConfig.zone_fade_duration = Math.max(0, fd);
+      // Colours
+      ["person","motion","door","window","animal","vehicle","smoke","co"].forEach(t => {
+        const on  = g(`cfgColOn${t.charAt(0).toUpperCase()+t.slice(1)}`);
+        const off = g(`cfgColOff${t.charAt(0).toUpperCase()+t.slice(1)}`);
+        if (on)  uiConfig[`color_on_${t}`]  = on;
+        if (off) uiConfig[`color_off_${t}`] = off;
+      });
+      applyConfig();
+      renderZones();
+
       const content = buildYamlContent();
-      if (!content.trim()) return;
       yamlSaveStatus.textContent = "Saving…";
       yamlSaveStatus.style.color = "#888";
       try {
@@ -2799,22 +2848,17 @@ function renderSettingsPanel() {
           body: JSON.stringify({ filename: "config/ui.yaml", content })
         });
         if (res.ok) {
-          yamlSaveStatus.textContent = "✓ Saved to ui.yaml";
+          yamlSaveStatus.textContent = "✓ Settings saved";
           yamlSaveStatus.style.color = "#32d74b";
           logEvent("ok", "Settings saved to config/ui.yaml.", "system");
           lastConfigHash = "";
-          loadConfig();
         } else {
-          const msg = "✗ Save failed (HTTP " + res.status + "). Is server.js running?";
-          yamlSaveStatus.textContent = msg;
+          yamlSaveStatus.textContent = "✗ Save failed (HTTP " + res.status + ")";
           yamlSaveStatus.style.color = "#ff3b30";
-          logEvent("error", msg, "system");
         }
       } catch (err) {
-        const msg = "✗ Cannot reach server.js: " + err.message;
-        yamlSaveStatus.textContent = msg;
+        yamlSaveStatus.textContent = "✗ Cannot reach server: " + err.message;
         yamlSaveStatus.style.color = "#ff3b30";
-        logEvent("error", msg + " — ui.yaml was NOT saved.", "system");
       }
     };
   }
