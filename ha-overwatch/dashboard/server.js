@@ -98,6 +98,25 @@ function loadConfig() {
   }
 }
 
+// Returns HA connection config — prefers supervisor injection when running as add-on
+function getHAConfig(userCfg) {
+  const supervisorToken = process.env.SUPERVISOR_TOKEN;
+  if (supervisorToken) {
+    // Running as HA add-on — use internal supervisor API (no user config needed)
+    return {
+      ha_url:   "http://supervisor/core",
+      ha_token: supervisorToken,
+      isAddon:  true,
+    };
+  }
+  // Standalone mode — use values from ui.yaml
+  return {
+    ha_url:   userCfg.ha_url   || "",
+    ha_token: userCfg.ha_token || "",
+    isAddon:  false,
+  };
+}
+
 /* ─── ZONES ───────────────────────────────────────────────── */
 function loadZones() {
   try {
@@ -257,7 +276,8 @@ const server = http.createServer(async (req, res) => {
 
   /* ── /api/health ─────────────────────────────────────────── */
   if (pathname === "/api/health") {
-    json(res, { ok: true, app: "ha-overwatch", version: "1.0.0" });
+    const isAddon = !!process.env.SUPERVISOR_TOKEN;
+    json(res, { ok: true, app: "ha-overwatch", version: "1.0.4", isAddon });
     return;
   }
 
@@ -355,10 +375,10 @@ const server = http.createServer(async (req, res) => {
   /* ── /api/ha-setup-zones ─────────────────────────────────── */
   if (pathname === "/api/ha-setup-zones" && req.method === "POST") {
     try {
-      const cfg   = loadConfig();
+      const cfg   = getHAConfig(loadConfig());
       const zones = loadZones();
       if (!cfg.ha_url || !cfg.ha_token) {
-        err(res, "HA URL or token not configured in ui.yaml. Save settings first.", 400);
+        err(res, "HA URL or token not configured. Save settings first (standalone mode only).", 400);
         return;
       }
       const { results, errors } = await setupHAEntities(zones, cfg);
@@ -369,7 +389,7 @@ const server = http.createServer(async (req, res) => {
         },
         zones: zones.map(z => ({ id: z.id, name: z.name, ...zoneEntityIds(z) })),
       };
-      json(res, { ok: true, created: results.length, errors, entityMap });
+      json(res, { ok: true, created: results.length, errors, entityMap, isAddon: cfg.isAddon });
     } catch (e) { err(res, e.message, 500); }
     return;
   }
@@ -378,7 +398,7 @@ const server = http.createServer(async (req, res) => {
   if (pathname === "/api/ha-sync-zone" && req.method === "POST") {
     try {
       const body = await readBody(req);
-      const cfg  = loadConfig();
+      const cfg  = getHAConfig(loadConfig());
       if (!cfg.ha_url || !cfg.ha_token) { json(res, { ok: true, skipped: true }); return; }
       await syncZoneState(body.zoneId, body.zoneName, body.state, cfg);
       json(res, { ok: true });
@@ -393,7 +413,7 @@ const server = http.createServer(async (req, res) => {
   if (pathname === "/api/ha-sync-master" && req.method === "POST") {
     try {
       const body = await readBody(req);
-      const cfg  = loadConfig();
+      const cfg  = getHAConfig(loadConfig());
       if (!cfg.ha_url || !cfg.ha_token) { json(res, { ok: true, skipped: true }); return; }
       await haRestCall("POST", "/api/states/input_boolean.overwatch_master_armed",
         { state: body.armed ? "on" : "off",
