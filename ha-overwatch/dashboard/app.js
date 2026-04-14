@@ -543,7 +543,7 @@ async function loadZones() {
 async function saveZone(zone) {
   const filename = zoneFilename(zone.id);
   try {
-    const res = await fetch("/api/save-zone", {
+    const res = await fetch("/ow/save-zone", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ filename, content: zoneToYaml(zone) })
@@ -557,7 +557,7 @@ async function saveZone(zone) {
 async function deleteZoneFile(zoneId) {
   const filename = zoneFilename(zoneId);
   try {
-    const res = await fetch("/api/delete-zone", {
+    const res = await fetch("/ow/delete-zone", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ filename })
@@ -714,7 +714,7 @@ function haZoneEntityIds(zone) {
 async function syncZoneToHA(zone, state) {
   if (!serverApiAvailable) return;  // no server.js running
   try {
-    await fetch("/api/ha-sync-zone", {
+    await fetch("/ow/ha-sync-zone", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -729,7 +729,7 @@ async function syncZoneToHA(zone, state) {
 async function syncMasterToHA(armed) {
   if (!serverApiAvailable) return;
   try {
-    await fetch("/api/ha-sync-master", {
+    await fetch("/ow/ha-sync-master", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ armed }),
@@ -1377,7 +1377,7 @@ function renderZonesEditor() {
       setupHABtn.disabled = true;
       if (haSetupStatus) { haSetupStatus.textContent = "Creating HA entities…"; haSetupStatus.style.color = "#888"; }
       try {
-        const res  = await fetch("/api/ha-setup-zones", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+        const res  = await fetch("/ow/ha-setup-zones", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
         const data = await res.json();
         if (data.ok) {
           const errCount = (data.errors || []).length;
@@ -2059,7 +2059,7 @@ let isAddonMode        = false;  // true when running as HA add-on
 
 async function checkServerHealth() {
   try {
-    const res  = await fetch("/api/health", { method: "GET", cache: "no-store" });
+    const res  = await fetch("/ow/health", { method: "GET", cache: "no-store" });
     const data = await res.json().catch(() => ({}));
     const wasDown = serverApiAvailable === false || !serverWasReachable;
     serverWasReachable = true;
@@ -2595,7 +2595,7 @@ function renderSettingsPanel() {
       try {
         const form = new FormData();
         form.append("file", file);
-        const res = await fetch("/api/upload-floorplan", { method: "POST", body: form });
+        const res = await fetch("/ow/upload-floorplan", { method: "POST", body: form });
         if (res.ok) {
           const data = await res.json().catch(() => ({}));
           const path = data.path || ("img/" + file.name);
@@ -2719,7 +2719,7 @@ function renderSettingsPanel() {
       yamlSaveStatus.textContent = "Saving…";
       yamlSaveStatus.style.color = "#888";
       try {
-        const res = await fetch("/api/save-config", {
+        const res = await fetch("/ow/save-config", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ filename: "config/ui.yaml", content })
