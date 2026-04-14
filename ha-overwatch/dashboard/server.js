@@ -293,7 +293,7 @@ const server = http.createServer(async (req, res) => {
     json(res, {
       ok: true,
       app: "ha-overwatch",
-      version: "1.0.9",
+      version: "0.10",
       isAddon,
       appDir:  APP_DIR,
       dataDir: DATA_DIR,
@@ -449,12 +449,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   /* ── Static file serving ─────────────────────────────────── */
-  // Static app files served from APP_DIR (script directory)
-  // Data files (config/, img/) served from DATA_DIR
   let reqPath = pathname === "/" ? "/index.html" : pathname;
   reqPath = reqPath.replace(/\.\./g, "");
 
-  // Data paths: serve from DATA_DIR
+  // Data paths served from DATA_DIR; everything else from APP_DIR
   let filePath;
   if (reqPath.startsWith("/config/") || reqPath.startsWith("/img/")) {
     filePath = path.join(DATA_DIR, reqPath);
@@ -467,8 +465,25 @@ const server = http.createServer(async (req, res) => {
   try {
     const stat = fs.statSync(filePath);
     if (stat.isDirectory()) filePath = path.join(filePath, "index.html");
-    const ext     = path.extname(filePath).toLowerCase();
-    const mime    = MIME[ext] || "application/octet-stream";
+
+    const ext  = path.extname(filePath).toLowerCase();
+    const mime = MIME[ext] || "application/octet-stream";
+
+    // For index.html: inject a <base> tag so relative URLs resolve through ingress correctly
+    if (filePath.endsWith("index.html")) {
+      let html = fs.readFileSync(filePath, "utf8");
+      // Detect ingress base path from X-Ingress-Path header (set by HA supervisor)
+      const ingressPath = req.headers["x-ingress-path"] || "";
+      const base = ingressPath ? ingressPath.replace(/\/?$/, "/") : "./";
+      html = html.replace(
+        "<head>",
+        `<head>\n    <base href="${base}" />`
+      );
+      res.writeHead(200, { "Content-Type": "text/html", "Cache-Control": "no-cache" });
+      res.end(html);
+      return;
+    }
+
     const content = fs.readFileSync(filePath);
     res.writeHead(200, {
       "Content-Type":  mime,
