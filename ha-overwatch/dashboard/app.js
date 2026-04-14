@@ -877,8 +877,33 @@ function checkZoneStateChanges() {
 let flashPhase = false;
 setInterval(() => {
   flashPhase = !flashPhase;
-  // Keep rendering if HA connected OR if any zones are still fading out
   if (haConnected || Object.keys(zoneFadeState).length > 0) renderZones();
+
+  // Live-update zone dots in the dropdown if it's open (no full re-render needed)
+  if (haConnected) {
+    const dd = document.getElementById("statusDropdown");
+    if (dd && dd.style.display !== "none") {
+      dd.querySelectorAll(".zone-list-dot[data-zone-id]").forEach(dot => {
+        const zone = zones.find(z => z.id === dot.dataset.zoneId);
+        if (!zone) return;
+        const st = getZoneState(zone);
+        const isTriggered = st === "triggered";
+        const isOff = zone.enabled === false || !masterEnabled;
+        dot.classList.toggle("flashing", isTriggered);
+        dot.style.background = isTriggered
+          ? (isOff ? (zone.colorHex || "#0096ff") : "#ff3b30")
+          : st === "fault" ? "#ff9500"
+          : isOff ? "#444"
+          : (zone.colorHex || "#0096ff");
+      });
+    }
+    // Update status bar dot based on any zone triggered
+    const dotEl = document.getElementById("statusDot");
+    if (dotEl) {
+      const anyTriggered = zones.some(z => getZoneState(z) === "triggered");
+      if (anyTriggered) dotEl.classList.add("triggered");
+    }
+  }
 }, 700);
 
 function renderZones() {
@@ -2479,16 +2504,18 @@ function updateStatusFromAlarm(entityId, newState) {
 
   if (dotEl) {
     dotEl.className = "status-dot";
-    if (rawState === "triggered") {
-      dotEl.classList.add("triggered");
+    // Only pulse when a zone is actually triggered — not just because system is armed
+    const anyZoneTriggered = haConnected && zones.some(z => getZoneState(z) === "triggered");
+    if (rawState === "triggered" || anyZoneTriggered) {
+      dotEl.classList.add("triggered");         // red + pulse
     } else if (rawState === "armed_away") {
-      dotEl.classList.add("armed-away");
+      dotEl.classList.add("armed-away");         // solid colour, no pulse
     } else if (rawState === "armed_home" || rawState === "armed_night") {
       dotEl.classList.add("armed-home");
     } else if (rawState === "pending" || rawState === "arming") {
       dotEl.classList.add("pending");
     } else if (effectiveArmed) {
-      dotEl.classList.add("triggered");
+      dotEl.classList.add("armed-away");         // generic armed — solid, no pulse
     }
   }
 
@@ -3124,7 +3151,7 @@ function renderStatusDropdown() {
   body.innerHTML = `
     <div class="status-dd-header">
       <div class="status-dd-master">
-        <div style="width:10px;height:10px;flex-shrink:0;"></div>
+        <div style="width:8px;height:8px;flex-shrink:0;"></div>
         <span style="flex:1;">Master</span>
         <span class="status-dd-state"></span>
         <button class="zone-eye-btn" id="masterEyeBtn"
@@ -3143,17 +3170,21 @@ function renderStatusDropdown() {
         : zones.map(z => {
             const state  = getZoneState(z);
             const isOff  = z.enabled === false || !masterEnabled;
-            const colour = state === "triggered" ? resolveColour(entityTypeColour(detectEntityType((z.sensors||[])[0]||"")))
-                         : state === "fault"     ? "#ff9500"
-                         : isOff                 ? "#444"
-                         : (z.colorHex || "#0096ff");
-            const stateLabel = state === "triggered" ? "triggered"
+            const isTriggeredZone = state === "triggered";
+            // Dot colour: triggered uses alarm-on colour (red if armed, zone-colour if disarmed)
+            const dotColour = isTriggeredZone
+              ? (isOff ? (z.colorHex || "#0096ff") : "#ff3b30")
+              : state === "fault" ? "#ff9500"
+              : isOff ? "#444"
+              : (z.colorHex || "#0096ff");
+            const colour = dotColour; // state label uses same colour
+            const stateLabel = isTriggeredZone ? "triggered"
                              : state === "fault"     ? "fault"
                              : isOff                 ? "disarmed"
                              : "armed";
             return `
               <div class="status-dd-zone">
-                <div class="zone-list-dot" style="background:${colour};flex-shrink:0;opacity:${isOff?0.4:1};"></div>
+                <div class="zone-list-dot${isTriggeredZone ? ' flashing' : ''}" data-zone-id="${z.id}" style="background:${dotColour};flex-shrink:0;opacity:${isOff?0.5:1};"></div>
                 <span class="status-dd-zname" style="opacity:${z.hidden ? 0.35 : isOff ? 0.5 : 1}">${escapeHtml(z.name || z.id)}</span>
                 <span class="status-dd-state" style="color:${colour}">${stateLabel}</span>
                 <button class="zone-eye-btn" data-zone-id="${z.id}"

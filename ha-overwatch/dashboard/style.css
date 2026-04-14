@@ -1,3 +1,12 @@
+/* ============================================================
+ * GLOBAL SCROLLBAR THEME
+ * ============================================================ */
+* { scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.12) transparent; }
+*::-webkit-scrollbar { width: 4px; height: 4px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 4px; }
+*::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.22); }
+
 :root {
   --sidebar-width: 72px;
   --sidebar-icon-size: 26px;
@@ -442,6 +451,9 @@ display: flex;
   border-radius: 50%;
   flex-shrink: 0;
   background: #0096ff;
+}
+.zone-list-dot.flashing {
+  animation: pulse-dot 0.8s infinite;
 }
 
 .zones-editor-footer {
@@ -1462,22 +1474,6 @@ display: flex;
   padding: 6px 0;
   max-height: 280px;
   overflow-y: auto;
-  /* Dark themed scrollbar */
-  scrollbar-width: thin;
-  scrollbar-color: rgba(255,255,255,0.12) transparent;
-}
-.status-dd-zones::-webkit-scrollbar {
-  width: 4px;
-}
-.status-dd-zones::-webkit-scrollbar-track {
-  background: transparent;
-}
-.status-dd-zones::-webkit-scrollbar-thumb {
-  background: rgba(255,255,255,0.12);
-  border-radius: 4px;
-}
-.status-dd-zones::-webkit-scrollbar-thumb:hover {
-  background: rgba(255,255,255,0.22);
 }
 .status-dd-empty {
   padding: 12px 14px;
