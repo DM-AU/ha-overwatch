@@ -102,6 +102,7 @@ let searchDebounce = null;
 /* ─── HA STATE ────────────────────────────────────────────── */
 let haSocket = null;
 let haConnected = false;
+let haEverConnected = false;  // true after first successful auth_ok
 let haStates = {};        // entity_id -> state object
 let haMsgId = 1;
 let haPendingCmds = {};
@@ -2087,13 +2088,8 @@ async function checkServerHealth() {
     if (data.isAddon && !isAddonMode) {
       isAddonMode = true;
       logEvent("ok", "Running as HA Add-on — HA connection is automatic.", "system");
-      // Auto-connect to HA using the internal supervisor WebSocket
-      // The add-on supervisor proxies /api/websocket internally
-      if (!haConnected) {
-        uiConfig.ha_url   = window.location.origin;
-        uiConfig.ha_token = "";   // add-on uses supervisor token server-side; WS auth still needed
-        connectHA();
-      }
+      // connectHA() is called by init() after the first health check completes.
+      // Subsequent health checks don't re-connect — haConnected guard handles that.
     }
 
     if (wasDown) logEvent("ok", "server.js is reachable again.", "system");
@@ -2117,8 +2113,11 @@ async function checkServerHealth() {
 }
 
 function startServerHealthCheck() {
-  checkServerHealth();
+  // Return a promise that resolves after the FIRST health check completes.
+  // init() awaits this so isAddonMode is known before connectHA() is called.
+  const firstCheck = checkServerHealth();
   serverCheckTimer = setInterval(checkServerHealth, 20000);
+  return firstCheck;
 }
 
 /* ─── OFFLINE ENTITY CHECK (issue 10) ───────────────────────── */
@@ -2208,6 +2207,7 @@ function connectHA() {
 
     if (msg.type === "auth_ok") {
       haConnected = true;
+      haEverConnected = true;
       setHAStatus("connected");
       logEvent("ok", "Connected to Home Assistant (" + (msg.ha_version || "?") + ")", "ha");
       fetchAllStates();
@@ -2217,7 +2217,10 @@ function connectHA() {
     if (msg.type === "auth_invalid") {
       haConnected = false;
       setHAStatus("error");
-      logEvent("error", "HA authentication failed. Check your Long-Lived Access Token.", "ha");
+      // Only show error toast if we've connected before — suppresses noise on first load
+      if (haEverConnected) {
+        logEvent("error", "HA authentication failed. Check your Long-Lived Access Token.", "ha");
+      }
       haSocket.close();
     }
 
@@ -2293,13 +2296,19 @@ function connectHA() {
     haConnected = false;
     setHAStatus("disconnected");
     const reason = ev.reason ? ` (${ev.reason})` : "";
-    logEvent("warn", `HA WebSocket disconnected (code ${ev.code})${reason}. Retrying in 10s…`, "ha");
+    // Only show disconnect warning if we had a working connection before
+    if (haEverConnected) {
+      logEvent("warn", `HA WebSocket disconnected (code ${ev.code})${reason}. Retrying in 10s…`, "ha");
+    }
     haReconnectTimer = setTimeout(connectHA, 10000);
   };
 
-  haSocket.onerror = (ev) => {
+  haSocket.onerror = () => {
     setHAStatus("error");
-    logEvent("error", "HA WebSocket error. Is the HA URL correct and reachable?", "ha");
+    // Only show error if we've connected before — suppresses noise on first load
+    if (haEverConnected) {
+      logEvent("error", "HA WebSocket error. Is the HA URL correct and reachable?", "ha");
+    }
   };
 }
 
@@ -3181,8 +3190,14 @@ async function init() {
   renderZones();
   await loadConfig();
 
+  // Wait for the first health check to complete so isAddonMode is set
+  // before connectHA() fires — prevents spurious standalone WS attempts
+  await startServerHealthCheck();
+
+  // Connect to HA — by now isAddonMode is known so the right path is taken
+  if (!haConnected) connectHA();
+
   startLiveRefresh();
-  startServerHealthCheck();
   logEvent("info", "HA-Overwatch initialised.", "system");
 
   // Subscribe entities once zones are loaded (if HA already connected)
