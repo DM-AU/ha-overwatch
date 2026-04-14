@@ -639,10 +639,14 @@ function entityTypeColour(type) {
     animal: "color_triggered_default", vehicle: "color_triggered_default",
     default: "color_triggered_default",
   };
-  // Prefer new colour_on/off keys, fall back to legacy triggered keys
   const newKey = prefix + type;
   if (uiConfig[newKey]) return uiConfig[newKey];
   return uiConfig[legacyMap[type] || "color_triggered_default"] || "#ff3b30";
+}
+
+// Always returns the disarmed (off) colour regardless of alarm state
+function entityTypeColourOff(type) {
+  return uiConfig[`color_off_${type}`] || uiConfig.color_off_default || "#4cd964";
 }
 
 /* ─── ZONE FADE STATE ─────────────────────────────────────── */
@@ -902,7 +906,9 @@ function renderZones() {
 
     // Hidden zones: never show in live mode, show faded outline in editor only
     if (isHidden && !editorMode) return;
-    if (!editorMode && !showInLive) return;
+    // In live mode: show all non-hidden zones (disarmed zones show with off-colours)
+    // Only skip if no points and not in editor
+    if (!editorMode && !pts.length) return;
 
     const pointsStr = pts.map(p => `${p.x},${p.y}`).join(" ");
 
@@ -962,15 +968,39 @@ function renderZones() {
     } else if (editorMode) {
       const hex = zone.colorHex || "#0096ff";
       if (isSelected) {
-        // Selected: brighter fill + visible yellow selection stroke
         poly.style.fill        = hexToRgba(hex, 0.35);
         poly.style.stroke      = "#ffcc00";
         poly.style.strokeWidth = String(2 / zoom.scale);
       } else {
-        // Unselected editor zones: subtle fill, very soft stroke matching fill colour
         poly.style.fill        = hexToRgba(hex, 0.22);
         poly.style.stroke      = hexToRgba(hex, 0.45);
         poly.style.strokeWidth = String(1 / zoom.scale);
+      }
+    } else {
+      // Live mode — normal or disarmed zone
+      // Check if any sensor is active (triggered while disarmed = show off-colour)
+      const sensors = zone.sensors || [];
+      const anyActive = sensors.some(isEntityTriggered);
+      if (anyActive && !isDisabled) {
+        // Armed zone with active sensor but not yet "triggered" state — shouldn't happen, but fallback
+        const type = detectEntityType(sensors.find(isEntityTriggered) || "");
+        const hex  = resolveColour(entityTypeColour(type));
+        poly.style.fill        = hexToRgba(hex, 0.12);
+        poly.style.stroke      = hexToRgba(hex, 0.25);
+        poly.style.strokeWidth = String(1 / zoom.scale);
+      } else if (anyActive && isDisabled) {
+        // Disarmed zone with active sensor — use off-colour palette
+        const type = detectEntityType(sensors.find(isEntityTriggered) || "");
+        const hex  = resolveColour(entityTypeColourOff(type));
+        poly.style.fill        = hexToRgba(hex, 0.22);
+        poly.style.stroke      = hexToRgba(hex, 0.45);
+        poly.style.strokeWidth = String(1 / zoom.scale);
+      } else {
+        // Clear zone (armed or disarmed, no sensor active) — very subtle presence
+        const hex = zone.colorHex || "#0096ff";
+        poly.style.fill        = hexToRgba(hex, 0.04);
+        poly.style.stroke      = hexToRgba(hex, 0.12);
+        poly.style.strokeWidth = String(0.75 / zoom.scale);
       }
     }
 
@@ -3094,12 +3124,14 @@ function renderStatusDropdown() {
   body.innerHTML = `
     <div class="status-dd-header">
       <div class="status-dd-master">
-        <span>Master</span>
+        <div style="width:10px;height:10px;flex-shrink:0;"></div>
+        <span style="flex:1;">Master</span>
+        <span class="status-dd-state"></span>
         <button class="zone-eye-btn" id="masterEyeBtn"
           title="${allHidden ? 'All zones hidden — click to show all' : 'Show — click to hide all'}"
           style="background:none;border:none;padding:0 2px;cursor:pointer;color:${allHidden ? 'rgba(255,255,255,0.25)' : 'rgba(255,255,255,0.65)'};line-height:0;flex-shrink:0;"
         >${allHidden ? eyeClosed : eyeOpen}</button>
-        <label class="zone-toggle-switch" style="margin-left:auto;" title="Arm/disarm all zones">
+        <label class="zone-toggle-switch" style="flex-shrink:0;" title="Arm/disarm all zones">
           <input type="checkbox" id="masterToggleChk" ${masterEnabled ? "checked" : ""}>
           <span class="zone-toggle-track"></span>
         </label>
