@@ -1310,8 +1310,9 @@ function renderZonesEditor() {
   const selectedGroup = selectedGroupId ? groups.find(g => g.id === selectedGroupId) : null;
 
   const editPtsLabel    = isEditingPoints ? "✔ Done Editing" : "Edit Zone";
-  const editorW         = editorSize.w;
-  const editorH         = editorSize.h;
+  const hasSelection = !!(selectedZone || selectedGroup);
+  const editorW = hasSelection ? editorSize.w : 260;
+  const editorH = editorSize.h;
 
   // ── Build left panel zone list with group headers ──────────
   function buildZoneList() {

@@ -311,7 +311,7 @@ display: flex;
   left: 20px;
   width: 560px;
   height: 420px;
-  min-width: 400px;
+  min-width: 220px;
   min-height: 280px;
   background: rgba(14, 14, 14, 0.97);
   border: 1px solid rgba(255,255,255,0.1);
@@ -362,6 +362,7 @@ display: flex;
   flex-direction: column;
   overflow: hidden;
 }
+/* When left is full width (right panel hidden), override via inline style */
 .zed-list {
   flex: 1;
   overflow-y: auto;
@@ -1533,7 +1534,7 @@ display: flex;
   border: 1px solid rgba(255,255,255,0.1);
   border-radius: 12px;
   box-shadow: 0 16px 40px rgba(0,0,0,0.6);
-  min-width: 280px;
+  min-width: 320px;
   max-width: calc(100vw - 40px);
   overflow: hidden;
   backdrop-filter: blur(10px);
@@ -1580,7 +1581,7 @@ display: flex;
 }
 .status-dd-zone:hover { background: rgba(255,255,255,0.04); }
 .status-dd-zone-indented {
-  padding-left: 30px; /* chevron(10) + gap(8) + dot(8) + gap(8) - outer-padding(14) = 30 */
+  padding-left: 36px; /* chevron(14)+gap(8)+dot(8)+gap(8) - outer-pad(14) + 12 = 36 */
 }
 .status-dd-group-header {
   display: flex;
