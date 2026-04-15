@@ -40,29 +40,22 @@ function waitForOW(cb, attempts = 0) {
 
 /* ── HA camera snapshot URL ─────────────────────────────────── */
 function camSnapshotUrl(entityId) {
-  // Camera proxy goes through HA ingress directly
-  // In add-on mode: BASE_PATH/api/camera_proxy/<entity>
-  // In standalone mode: <ha_url>/api/camera_proxy/<entity>
-  const OW = window.OW;
-  if (window.isAddonMode !== false) {
-    // Use BASE_PATH which is the ingress prefix
-    const base = OW.apiPath('').replace(/\/ow\/?$/, '').replace(/\/$/, '');
-    return `${base}/api/camera_proxy/${entityId}?t=${Date.now()}`;
-  } else {
-    const haUrl = (OW.uiConfig.ha_url || '').replace(/\/$/, '');
-    return `${haUrl}/api/camera_proxy/${entityId}?t=${Date.now()}`;
+  // Use relative URL — the <base> tag injected by server.js resolves it
+  // correctly through HA ingress automatically.
+  // In standalone mode, fall back to ha_url.
+  if (window.OW.isAddonMode) {
+    return `api/camera_proxy/${entityId}?t=${Date.now()}`;
   }
+  const haUrl = (window.OW.uiConfig.ha_url || '').replace(/\/$/, '');
+  return `${haUrl}/api/camera_proxy/${entityId}?t=${Date.now()}`;
 }
 
 function camStreamUrl(entityId) {
-  const OW = window.OW;
-  if (window.isAddonMode !== false) {
-    const base = OW.apiPath('').replace(/\/ow\/?$/, '').replace(/\/$/, '');
-    return `${base}/api/camera_proxy_stream/${entityId}`;
-  } else {
-    const haUrl = (OW.uiConfig.ha_url || '').replace(/\/$/, '');
-    return `${haUrl}/api/camera_proxy_stream/${entityId}`;
+  if (window.OW.isAddonMode) {
+    return `api/camera_proxy_stream/${entityId}`;
   }
+  const haUrl = (window.OW.uiConfig.ha_url || '').replace(/\/$/, '');
+  return `${haUrl}/api/camera_proxy_stream/${entityId}`;
 }
 
 /* ── Tile entity resolution ──────────────────────────────────── */
@@ -418,12 +411,17 @@ function renderCameraStatusBar() {
 
   dropdownHtml += `</div>`;
 
+  // Put mode buttons on opposite side from sidebar
+  const sidebarOnRight = (window.OW.uiConfig.sidebar_position || 'right') !== 'left';
+  const modeButtons = `
+    <div class="cam-status-mode" style="${sidebarOnRight ? 'margin-right:auto;' : 'margin-left:auto;'}">
+      <button class="cam-mode-btn ${camMode === 'snapshot' ? 'active' : ''}" id="camSnapBtn">Snapshot</button>
+      <button class="cam-mode-btn ${camMode === 'live' ? 'active' : ''}" id="camLiveBtn">Live</button>
+    </div>`;
+
   container.innerHTML = `
     <div class="cam-status-bar" id="camStatusBar">
-      <div class="cam-status-mode">
-        <button class="cam-mode-btn ${camMode === 'snapshot' ? 'active' : ''}" id="camSnapBtn">Snapshot</button>
-        <button class="cam-mode-btn ${camMode === 'live' ? 'active' : ''}" id="camLiveBtn">Live</button>
-      </div>
+      ${sidebarOnRight ? modeButtons : ''}
       <div class="cam-status-inner" id="camStatusToggle">
         <div class="cam-status-dot ${globalOn ? 'active' : ''}"></div>
         <span class="cam-status-label">${globalOn ? 'Cameras Active' : 'Cameras Off'}</span>
@@ -431,6 +429,7 @@ function renderCameraStatusBar() {
           <path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
       </div>
+      ${!sidebarOnRight ? modeButtons : ''}
     </div>
     ${dropdownHtml}
   `;
@@ -463,6 +462,10 @@ function renderCameraStatusBar() {
 
   document.getElementById('camSnapBtn')?.addEventListener('click', () => {
     camMode = 'snapshot';
+    // Re-render all tiles with snapshot images
+    const grid = document.getElementById('cameraGrid');
+    if (grid) grid.innerHTML = '';
+    renderCameraGrid();
     startSnapshotRefresh();
     renderCameraStatusBar();
   });

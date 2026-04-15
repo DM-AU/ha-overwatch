@@ -1711,8 +1711,6 @@ body.page-cameras.sidebar-left  .cam-main  { padding-left:  var(--sidebar-width)
 .cam-status-mode {
   display: flex;
   gap: 4px;
-  /* On left side — sidebar collapse button is on the right */
-  margin-right: auto;
 }
 .cam-mode-btn {
   font-size: 11px;

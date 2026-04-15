@@ -3,7 +3,7 @@ description: >
   Floor plan based alarm and monitoring dashboard for Home Assistant.
   Features live zone monitoring, HA entity integration, per-zone arm/disarm,
   and camera/light/siren device linking.
-version: "0.55"
+version: "0.56"
 slug: ha_overwatch
 url: https://github.com/DM-AU/ha-overwatch
 arch:
