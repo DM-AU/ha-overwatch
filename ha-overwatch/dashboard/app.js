@@ -998,10 +998,12 @@ setInterval(() => {
   flashPhase = !flashPhase;
   if (haConnected || Object.keys(zoneFadeState).length > 0) renderZones();
 
-  // Live-update zone dots in the dropdown if it's open (no full re-render needed)
+  // Live-update all dots in the dropdown if it's open
   if (haConnected) {
     const dd = document.getElementById("statusDropdown");
     if (dd && dd.style.display !== "none") {
+
+      // ── Zone member dots ───────────────────────────────────
       dd.querySelectorAll(".zone-list-dot[data-zone-id]").forEach(dot => {
         const zone = zones.find(z => z.id === dot.dataset.zoneId);
         if (!zone) return;
@@ -1017,15 +1019,61 @@ setInterval(() => {
           : isDisarmedActive
           ? resolveColour(entityTypeColourOff(detectEntityType(sensors.find(isEntityTriggered) || "")))
           : st === "fault" ? "#ff9500"
-          : (zone.colorHex || "#0096ff");  // always zone colour, opacity handles dimming
+          : (zone.colorHex || "#0096ff");
         dot.style.opacity = (isOff && !isDisarmedActive) ? "0.3" : "1";
       });
+
+      // ── Group dots ─────────────────────────────────────────
+      dd.querySelectorAll(".zone-list-dot[data-group-dot]").forEach(dot => {
+        const gid = dot.dataset.groupDot;
+        let members;
+        if (gid === "__ungrouped") {
+          const groupedIds = new Set(groups.flatMap(g => g.zone_ids || []));
+          members = zones.filter(z => !groupedIds.has(z.id));
+        } else {
+          const group = groups.find(g => g.id === gid);
+          if (!group) return;
+          members = (group.zone_ids || []).map(id => zones.find(z => z.id === id)).filter(Boolean);
+          dot._groupHex = group.colorHex || "#ff3b30";
+        }
+        const groupHex = dot._groupHex || "#888";
+
+        if (!members.length) {
+          dot.style.background = groupHex;
+          dot.style.opacity = "0.3";
+          dot.classList.remove("flashing");
+          return;
+        }
+
+        const anyTriggered  = members.some(z => getZoneState(z) === "triggered");
+        const allArmed      = members.every(z => z.enabled !== false && masterEnabled);
+        const allDisarmed   = members.every(z => z.enabled === false || !masterEnabled);
+        const someArmed     = !allArmed && !allDisarmed; // mixed
+
+        // Colour logic:
+        // All armed            → red (solid or flashing if triggered)
+        // Mixed armed/disarmed → orange (solid or flashing if triggered)
+        // All disarmed         → group colour (dimmed)
+        const colour  = allDisarmed ? groupHex
+                      : someArmed   ? "#ff9500"  // orange = mixed
+                      :               "#ff3b30";  // red = all armed
+        const opacity = allDisarmed ? 0.35 : 1;
+        const flash   = anyTriggered && !allDisarmed;
+
+        dot.classList.toggle("flashing", flash);
+        dot.style.background = colour;
+        dot.style.opacity    = String(opacity);
+      });
     }
-    // Update status bar dot based on any zone triggered
+
+    // Update status bar dot
     const dotEl = document.getElementById("statusDot");
     if (dotEl) {
       const anyTriggered = zones.some(z => getZoneState(z) === "triggered");
       if (anyTriggered) dotEl.classList.add("triggered");
+      else if (!dotEl.classList.contains("armed-away") && !dotEl.classList.contains("armed-home")) {
+        dotEl.classList.remove("triggered");
+      }
     }
   }
 }, 700);
@@ -3324,9 +3372,13 @@ function renderStatusDropdown() {
     const anyTriggered = members.some(z => getZoneState(z) === "triggered");
     const allMembHidden = members.length > 0 && members.every(z => z.hidden);
     const gHex        = g.colorHex || "#ff3b30";
-    const gDotColour  = anyTriggered ? "#ff3b30" : gHex;
+    const anyArmed    = !allDisarmed;
+    const someArmed   = anyArmed && !allArmed;   // mixed
+    const gDotColour  = allDisarmed ? gHex
+                      : someArmed   ? "#ff9500"   // orange = mixed
+                      :               "#ff3b30";  // red = all armed
     const gDotOpacity = allDisarmed ? 0.35 : 1;
-    const gDotFlash   = !allDisarmed && anyTriggered;
+    const gDotFlash   = anyTriggered && !allDisarmed;
     const storageKey  = `ddGroup_${g.id}`;
     const collapsed   = localStorage.getItem(storageKey) === "collapsed";
     return `
@@ -3355,10 +3407,13 @@ function renderStatusDropdown() {
     const allArmed    = ungroupedZones.length > 0 && ungroupedZones.every(z => z.enabled !== false && masterEnabled);
     const allDisarmed = ungroupedZones.every(z => z.enabled === false || !masterEnabled);
     const anyTriggered = ungroupedZones.some(z => getZoneState(z) === "triggered");
+    const someArmed   = !allArmed && !allDisarmed;
     const allHidn     = ungroupedZones.length > 0 && ungroupedZones.every(z => z.hidden);
-    const dotColour   = anyTriggered ? "#ff3b30" : "#888";
+    const dotColour   = allDisarmed ? "#888"
+                      : someArmed   ? "#ff9500"
+                      :               "#ff3b30";
     const dotOpacity  = allDisarmed ? 0.35 : 1;
-    const dotFlash    = !allDisarmed && anyTriggered;
+    const dotFlash    = anyTriggered && !allDisarmed;
     return `
       <div class="status-dd-group-header ungrouped-header" data-group-id="__ungrouped" data-storage-key="${storageKey}">
         <span class="status-dd-chevron" style="font-size:9px;color:#555;width:10px;flex-shrink:0;transition:transform 0.2s;display:inline-block;transform:rotate(${collapsed ? '-90' : '0'}deg);">▾</span>
