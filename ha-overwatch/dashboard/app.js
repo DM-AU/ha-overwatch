@@ -1698,7 +1698,7 @@ function renderZonesEditor() {
     });
     resizeHandle.addEventListener("pointermove", e => {
       if (!resizing) return;
-      editorSize.w = Math.max(480, rsw + (e.clientX - rsx));
+      editorSize.w = Math.max(240, rsw + (e.clientX - rsx));
       editorSize.h = Math.max(300, rsh + (e.clientY - rsy));
       const panel = container.querySelector(".zones-editor");
       if (panel) { panel.style.width = editorSize.w + "px"; panel.style.height = editorSize.h + "px"; }

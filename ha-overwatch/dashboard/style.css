@@ -1580,8 +1580,8 @@ display: flex;
   transition: background 0.1s;
 }
 .status-dd-zone:hover { background: rgba(255,255,255,0.04); }
-.status-dd-zone-indented {
-  padding-left: 36px; /* chevron(14)+gap(8)+dot(8)+gap(8) - outer-pad(14) + 12 = 36 */
+.status-dd-zone.status-dd-zone-indented {
+  padding-left: 36px;
 }
 .status-dd-group-header {
   display: flex;
