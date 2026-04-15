@@ -2562,6 +2562,8 @@ function connectHA() {
       checkZoneStateChanges();   // log any zones already triggered at connect time
       renderZones();
       if (editorMode) renderZonesEditor();
+      // Notify camera page if loaded
+      if (window.OW && window.camUpdate) window.camUpdate();
     }
 
     if (msg.type === "result" && !msg.success) {
@@ -2603,6 +2605,8 @@ function connectHA() {
           checkZoneStateChanges();   // detect trigger/clear/fault transitions and log them
           renderZones();
           if (editorMode) renderZonesEditor();
+          // Real-time camera grid update
+          if (window.camUpdate) window.camUpdate();
         }
       }
     }
@@ -3917,7 +3921,12 @@ async function init() {
     isEntityTriggered,
     apiPath,
     logEvent,
+    renderSettingsPanel,
+    renderLogPanel,
   };
+  // Also expose directly for camera-sidebar inline onclick fallback
+  window.renderSettingsPanel = renderSettingsPanel;
+  window.renderLogPanel      = renderLogPanel;
 }
 
 window.addEventListener("DOMContentLoaded", init);

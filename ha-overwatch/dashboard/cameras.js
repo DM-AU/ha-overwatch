@@ -532,22 +532,23 @@ function buildCamYamlPatch(cfg) {
 function initCameraPage() {
   const OW = window.OW;
 
-  // Load camera sidebar instead of floorplan sidebar
-  // app.js already loaded modules/sidebar.html; we replace it
+  // Load camera sidebar and rebind buttons after injection
   const sidebarContainer = document.getElementById('sidebarContainer');
   if (sidebarContainer) {
     fetch(`modules/camera-sidebar.html?v=${Date.now()}`)
       .then(r => r.text())
       .then(html => {
         sidebarContainer.innerHTML = html;
-        // Re-bind sidebar collapse (app.js bindSidebarToggle looks for #collapseBtn)
         const collapseBtn = document.getElementById('collapseBtn');
         const sidebar     = document.getElementById('sidebarEl');
         if (collapseBtn && sidebar) {
-          collapseBtn.addEventListener('click', () => {
-            sidebar.classList.toggle('collapsed');
-          });
+          collapseBtn.addEventListener('click', () => sidebar.classList.toggle('collapsed'));
         }
+        // Rebind settings + log now that sidebar DOM exists
+        const settingsBtn = document.getElementById('settingsBtn');
+        const logBtn      = document.getElementById('logBtn');
+        if (settingsBtn) settingsBtn.onclick = () => window.renderSettingsPanel && window.renderSettingsPanel();
+        if (logBtn)      logBtn.onclick      = () => window.renderLogPanel    && window.renderLogPanel(true);
       });
   }
 
@@ -572,6 +573,9 @@ function initCameraPage() {
 
   // Poll every 2s for zone state changes
   camUpdateInterval = setInterval(camUpdate, 2000);
+
+  // Expose update function for app.js to call on HA state changes
+  window.camUpdate = camUpdate;
 
   OW.logEvent('info', 'Camera dashboard initialised.', 'system');
 }

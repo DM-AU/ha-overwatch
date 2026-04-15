@@ -1673,16 +1673,20 @@ body.page-cameras.sidebar-left  .cam-main  { padding-left:  var(--sidebar-width)
 }
 
 .cam-status-inner {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
   display: flex;
   align-items: center;
   gap: 8px;
   cursor: pointer;
-  padding: 4px 10px;
+  padding: 4px 14px;
   border-radius: 20px;
   background: rgba(255,255,255,0.05);
   border: 1px solid rgba(255,255,255,0.08);
   transition: background 0.15s;
   user-select: none;
+  white-space: nowrap;
 }
 .cam-status-inner:hover { background: rgba(255,255,255,0.09); }
 
