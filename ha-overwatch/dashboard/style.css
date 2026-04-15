@@ -1578,6 +1578,7 @@ display: flex;
   padding: 7px 14px;
   box-sizing: border-box;
   transition: background 0.1s;
+  cursor: pointer;
 }
 .status-dd-zone:hover { background: rgba(255,255,255,0.04); }
 .status-dd-zone.status-dd-zone-indented {

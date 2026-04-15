@@ -97,8 +97,10 @@ let isEditingPoints = false;
 /* ─── SEARCH STATE ────────────────────────────────────────── */
 let searchOpen = false;
 let settingsOpen = false;
-let highlightedZoneId = null;
-let highlightedUntil = 0;
+let highlightedZoneId  = null;
+let highlightedUntil   = 0;
+let highlightedGroupId = null;
+let highlightedGroupUntil = 0;
 let searchDebounce = null;
 
 /* ─── HA STATE ────────────────────────────────────────────── */
@@ -1085,26 +1087,27 @@ function renderZones() {
   while (svg.firstChild) svg.removeChild(svg.firstChild);
 
   const now = Date.now();
-  const showHighlight = highlightedZoneId && now < highlightedUntil;
+  const showHighlight      = highlightedZoneId  && now < highlightedUntil;
+  const showGroupHighlight = highlightedGroupId && now < highlightedGroupUntil;
 
   // ── Group member highlight layer ────────────────────────────
-  // Render all group members into a single <g> with group-level opacity
-  // so overlapping zones don't stack/seam — they become one flat shape.
-  if (editorMode && selectedGroupId) {
-    const selectedGrp = groups.find(g => g.id === selectedGroupId);
-    if (selectedGrp) {
-      const grpHex = selectedGrp.colorHex || "#ff3b30";
+  // Works in both editor mode (selectedGroupId) and live mode (highlightedGroupId from dropdown).
+  const activeGrpId  = (editorMode && selectedGroupId) ? selectedGroupId
+                     : showGroupHighlight ? highlightedGroupId : null;
+  if (activeGrpId) {
+    const activeGrp = groups.find(g => g.id === activeGrpId);
+    if (activeGrp) {
+      const grpHex = activeGrp.colorHex || "#ff3b30";
 
       // Single fill-only pass — no per-polygon strokes so overlaps never show seams
       const fillGroup = document.createElementNS("http://www.w3.org/2000/svg", "g");
       fillGroup.setAttribute("fill", grpHex);
       fillGroup.setAttribute("fill-opacity", "0.72");
       fillGroup.setAttribute("stroke", "none");
-      // Drop-shadow filter gives a subtle outer glow/outline without internal seams
       fillGroup.setAttribute("style", `filter: drop-shadow(0 0 3px ${grpHex})`);
 
       let hasMembers = false;
-      (selectedGrp.zone_ids || []).forEach(zid => {
+      (activeGrp.zone_ids || []).forEach(zid => {
         const zone = zones.find(z => z.id === zid);
         if (!zone || !zone.points?.length || zone.hidden) return;
         const poly = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
@@ -1137,11 +1140,12 @@ function renderZones() {
     // In live mode: show all non-hidden zones (disarmed zones show with off-colours)
     if (!editorMode && !pts.length) return;
 
-    // Group member zones are already rendered by the group layer above with uniform colour.
+    // Group member zones are already rendered by the group layer above.
     // Skip individual rendering for them (unless they are also the selected zone).
-    const activeGrp = editorMode && selectedGroupId ? groups.find(g => g.id === selectedGroupId) : null;
-    const isGroupMember = activeGrp && (activeGrp.zone_ids || []).includes(zone.id);
-    if (isGroupMember && !isSelected && editorMode) return;
+    const activeGrp2 = (editorMode && selectedGroupId) ? groups.find(g => g.id === selectedGroupId)
+                     : (showGroupHighlight && highlightedGroupId) ? groups.find(g => g.id === highlightedGroupId)
+                     : null;
+    if (activeGrp2 && (activeGrp2.zone_ids || []).includes(zone.id) && !isSelected && editorMode) return;
 
     const pointsStr = pts.map(p => `${p.x},${p.y}`).join(" ");
 
@@ -2023,8 +2027,10 @@ function bindZonesSvgEvents() {
     }
 
     // 5) Empty canvas click — deselect BUT let the event propagate so bindPan can pan
-    selectedZoneId  = null;
-    selectedGroupId = null;
+    selectedZoneId    = null;
+    selectedGroupId   = null;
+    highlightedZoneId = null; highlightedUntil      = 0;
+    highlightedGroupId = null; highlightedGroupUntil = 0;
     isEditingPoints = false;
     renderZones();
     renderZonesEditor();
@@ -3294,13 +3300,39 @@ function focusZone(zoneId) {
 
   // Issue 2: highlight only — do NOT move/zoom the map
   highlightedZoneId = zoneId;
-  highlightedUntil = Date.now() + 2500;
+  highlightedUntil  = Date.now() + 15000;
   renderZones();
-  setTimeout(() => renderZones(), 2600);
+  setTimeout(() => renderZones(), 15100);
 
   selectedZoneId = zoneId;
   if (editorMode) { renderZonesEditor(); renderZones(); }
   setSearchOpen(false);
+}
+
+function setHighlightFromDropdown(zoneId) {
+  highlightedZoneId    = zoneId;
+  highlightedUntil     = Date.now() + 15000;
+  highlightedGroupId   = null;
+  highlightedGroupUntil = 0;
+  renderZones();
+  setTimeout(() => renderZones(), 15100);
+}
+
+function setGroupHighlightFromDropdown(groupId) {
+  highlightedGroupId    = groupId;
+  highlightedGroupUntil = Date.now() + 15000;
+  highlightedZoneId     = null;
+  highlightedUntil      = 0;
+  renderZones();
+  setTimeout(() => renderZones(), 15100);
+}
+
+function clearDropdownHighlight() {
+  highlightedZoneId     = null;
+  highlightedUntil      = 0;
+  highlightedGroupId    = null;
+  highlightedGroupUntil = 0;
+  renderZones();
 }
 
 function animateZoomTo(scale, x, y, durationMs) {
@@ -3585,7 +3617,7 @@ function renderStatusDropdown() {
     zones.forEach(z => setZoneHidden(z.id, anyVisible));
   });
 
-  // Group header collapse toggle
+  // Group header collapse toggle + highlight on expand
   body.querySelectorAll(".status-dd-group-header").forEach(hdr => {
     hdr.addEventListener("click", e => {
       if (e.target.closest("button,input,label")) return;
@@ -3594,10 +3626,27 @@ function renderStatusDropdown() {
       const membersEl = body.querySelector(`.status-dd-group-members[data-group-id="${gid}"]`);
       const chevron = hdr.querySelector(".status-dd-chevron");
       if (!membersEl) return;
-      const collapsed = membersEl.style.display === "none";
-      membersEl.style.display = collapsed ? "" : "none";
-      if (chevron) chevron.style.transform = `rotate(${collapsed ? "0" : "-90"}deg)`;
-      localStorage.setItem(key, collapsed ? "expanded" : "collapsed");
+      const wasCollapsed = membersEl.style.display === "none";
+      membersEl.style.display = wasCollapsed ? "" : "none";
+      if (chevron) chevron.style.transform = `rotate(${wasCollapsed ? "0" : "-90"}deg)`;
+      localStorage.setItem(key, wasCollapsed ? "expanded" : "collapsed");
+      // Highlight group on map when expanding (not collapsing), skip __ungrouped
+      if (wasCollapsed && gid && gid !== "__ungrouped") {
+        setGroupHighlightFromDropdown(gid);
+      } else if (!wasCollapsed) {
+        clearDropdownHighlight();
+      }
+    });
+  });
+
+  // Zone row click → highlight zone on map
+  body.querySelectorAll(".status-dd-zone").forEach(row => {
+    row.addEventListener("click", e => {
+      if (e.target.closest("button,input,label")) return;
+      const dot = row.querySelector(".zone-list-dot[data-zone-id]");
+      if (!dot) return;
+      const zid = dot.dataset.zoneId;
+      if (zid) setHighlightFromDropdown(zid);
     });
   });
 
