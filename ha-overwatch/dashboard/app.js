@@ -1159,11 +1159,12 @@ function renderZones() {
     poly.setAttribute("class", cls);
 
     if (isHighlight) {
-      // Dropdown highlight: zone's own colour at strong opacity, matching editor selected-zone style
+      // Highlight: zone's own colour at strong opacity + glow, matching editor selected-zone style
       const hex = zone.colorHex || "#0096ff";
       poly.style.fill        = hexToRgba(hex, 0.72);
       poly.style.stroke      = hex;
       poly.style.strokeWidth = String(2.5 / zoom.scale);
+      poly.style.filter      = `drop-shadow(0 0 4px ${hex})`;
 
     } else if (isHidden && editorMode) {
       // Hidden zone in editor: very faint dotted outline, not interactive

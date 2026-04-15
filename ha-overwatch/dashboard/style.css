@@ -672,9 +672,7 @@ display: flex;
 
 /* Temporary highlight */
 .zone-highlight {
-  fill: rgba(255, 204, 0, 0.18) !important;
-  stroke: var(--search-accent) !important;
-  stroke-width: 3 !important;
+  /* Styles applied via inline JS using zone's own colorHex at strong opacity */
 }
 
 /* Zone live states */
