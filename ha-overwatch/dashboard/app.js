@@ -1038,15 +1038,41 @@ function renderZones() {
   const now = Date.now();
   const showHighlight = highlightedZoneId && now < highlightedUntil;
 
+  // ── Group member highlight layer ────────────────────────────
+  // Render all group members into a single <g> with group-level opacity
+  // so overlapping zones don't stack/seam — they become one flat shape.
+  if (editorMode && selectedGroupId) {
+    const selectedGrp = groups.find(g => g.id === selectedGroupId);
+    if (selectedGrp) {
+      const grpHex = selectedGrp.colorHex || "#ff3b30";
+      const memberGroup = document.createElementNS("http://www.w3.org/2000/svg", "g");
+      memberGroup.setAttribute("fill", grpHex);
+      memberGroup.setAttribute("fill-opacity", "0.72");
+      memberGroup.setAttribute("stroke", grpHex);
+      memberGroup.setAttribute("stroke-opacity", "1");
+      memberGroup.setAttribute("stroke-width", String(2.5 / (zoom?.scale || 1)));
+      // Use even-odd fill rule so overlapping zones don't double-darken
+      memberGroup.setAttribute("fill-rule", "evenodd");
+
+      let hasMembers = false;
+      (selectedGrp.zone_ids || []).forEach(zid => {
+        const zone = zones.find(z => z.id === zid);
+        if (!zone || !zone.points?.length || zone.hidden) return;
+        const poly = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
+        poly.setAttribute("points", zone.points.map(p => `${p.x},${p.y}`).join(" "));
+        memberGroup.appendChild(poly);
+        hasMembers = true;
+      });
+      if (hasMembers) svg.appendChild(memberGroup);
+    }
+  }
+
   zones.forEach(zone => {
     const pts = zone.points || [];
     if (!pts.length) return;
 
     const isSelected     = zone.id === selectedZoneId;
     const isHighlight    = showHighlight && zone.id === highlightedZoneId;
-    // Highlight all member zones when a group is selected in editor
-    const selectedGrp    = selectedGroupId ? groups.find(g => g.id === selectedGroupId) : null;
-    const isGroupMember  = editorMode && selectedGrp && (selectedGrp.zone_ids || []).includes(zone.id);
     const zoneState    = getZoneState(zone);
     const isDisabled   = zoneState === "disabled";
     const isHidden     = zone.hidden === true;
@@ -1071,7 +1097,6 @@ function renderZones() {
     let cls = "zone-polygon";
     if (editorMode && isSelected) cls += " selected";
     if (isHighlight) cls += " zone-highlight";
-    if (isGroupMember) cls += " group-highlight";
     poly.setAttribute("class", cls);
 
     if (isHighlight) {
@@ -1079,13 +1104,6 @@ function renderZones() {
       poly.style.fill        = "rgba(255,204,0,0.22)";
       poly.style.stroke      = "rgba(255,204,0,0.5)";
       poly.style.strokeWidth = String(1.5 / zoom.scale);
-
-    } else if (isGroupMember && editorMode) {
-      // Group member: highlighted in the GROUP's colour, not the zone's own colour
-      const grpHex = selectedGrp.colorHex || "#ff3b30";
-      poly.style.fill        = hexToRgba(grpHex, 0.55);
-      poly.style.stroke      = grpHex;
-      poly.style.strokeWidth = String(2.5 / zoom.scale);
 
     } else if (isHidden && editorMode) {
       // Hidden zone in editor: very faint dotted outline, not interactive
