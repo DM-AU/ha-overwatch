@@ -74,6 +74,16 @@ let uiConfig = {
 
   // Zone fade-out after trigger clears (issue 9)
   zone_fade_duration: 3,  // seconds to fade from full to transparent after trigger clears
+
+  // Camera dashboard
+  cam_default_mode:       "snapshot",  // "snapshot" | "live"
+  cam_snapshot_interval:  2,           // seconds between snapshot refreshes
+  cam_cooldown:           30,          // seconds camera stays visible after zone clears
+  cam_max_visible:        0,           // 0 = unlimited
+  cam_sort_order:         "recent_first",
+  cam_fail_hide_seconds:  5,
+  cam_low_res_map:        "{}",        // JSON: { "camera.high_res": "camera.low_res" }
+  cam_pinned:             "[]",        // JSON: ["camera.entity_id", ...]
 };
 
 let zoom = { scale: 1, x: 0, y: 0 };
@@ -3058,7 +3068,16 @@ function renderSettingsPanel() {
       `  color_off_animal: "${g("cfgColOffAnimal") || uiConfig.color_off_animal}"\n` +
       `  color_off_vehicle: "${g("cfgColOffVehicle") || uiConfig.color_off_vehicle}"\n` +
       `  color_off_smoke: "${g("cfgColOffSmoke") || uiConfig.color_off_smoke}"\n` +
-      `  color_off_co: "${g("cfgColOffCo") || uiConfig.color_off_co}"\n`
+      `  color_off_co: "${g("cfgColOffCo") || uiConfig.color_off_co}"\n` +
+      `  # Camera dashboard\n` +
+      `  cam_default_mode: "${uiConfig.cam_default_mode || "snapshot"}"\n` +
+      `  cam_snapshot_interval: ${uiConfig.cam_snapshot_interval || 2}\n` +
+      `  cam_cooldown: ${uiConfig.cam_cooldown || 30}\n` +
+      `  cam_max_visible: ${uiConfig.cam_max_visible || 0}\n` +
+      `  cam_sort_order: "${uiConfig.cam_sort_order || "recent_first"}"\n` +
+      `  cam_fail_hide_seconds: ${uiConfig.cam_fail_hide_seconds || 5}\n` +
+      `  cam_low_res_map: '${uiConfig.cam_low_res_map || "{}"}'\n` +
+      `  cam_pinned: '${uiConfig.cam_pinned || "[]"}'\n`
     );
   }
 
@@ -3830,30 +3849,42 @@ function initFloorplan() {
 }
 
 async function init() {
-  await loadModule("sidebarContainer", "sidebar.html");
-  // sidebar sanity: if module path is wrong, the whole UI looks missing
-  if (!document.getElementById("sidebarEl")) {
-    console.warn('[HA-Overwatch] sidebarEl not found after loadModule(sidebar.html). Check file location: /modules/sidebar.html vs /sidebar.html');
+  const isCameraPage = document.body.classList.contains("page-cameras");
+
+  // Load appropriate sidebar
+  if (isCameraPage) {
+    await loadModule("sidebarContainer", "camera-sidebar.html");
+  } else {
+    await loadModule("sidebarContainer", "sidebar.html");
   }
 
-  await loadModule("expandBtnContainer", "expand-btn.html");
-  await loadModule("statusContainer", "status.html");
-  await loadModule("zonesEditorContainer", "zones-editor.html");
+  if (!document.getElementById("sidebarEl")) {
+    console.warn('[HA-Overwatch] sidebarEl not found — check module paths');
+  }
 
-  bindZoomControls();
-  bindPan();
-  initFloorplan();
+  // Camera page only needs sidebar + HA connection — skip floorplan modules
+  if (!isCameraPage) {
+    await loadModule("expandBtnContainer", "expand-btn.html");
+    await loadModule("statusContainer", "status.html");
+    await loadModule("zonesEditorContainer", "zones-editor.html");
+
+    bindZoomControls();
+    bindPan();
+    initFloorplan();
+    bindZonesButton();
+    bindStatusBar();
+    bindSearchUI();
+  }
 
   bindSidebarToggle();
-  bindZonesButton();
-  bindStatusBar();
-  bindSearchUI();
 
   await loadZones();
   await loadGroups();
-  bindZonesSvgEvents();
-  renderZonesEditor();
-  renderZones();
+  if (!isCameraPage) {
+    bindZonesSvgEvents();
+    renderZonesEditor();
+    renderZones();
+  }
   await loadConfig();
 
   // Wait for the first health check to complete so isAddonMode is set
@@ -3868,6 +3899,20 @@ async function init() {
 
   // Subscribe entities once zones are loaded (if HA already connected)
   subscribeHAEntities();
+
+  // ── Expose shared state for cameras.js ─────────────────────
+  // These are live references — cameras.js reads them directly.
+  window.OW = {
+    get zones()         { return zones; },
+    get groups()        { return groups; },
+    get haStates()      { return haStates; },
+    get haConnected()   { return haConnected; },
+    get uiConfig()      { return uiConfig; },
+    get masterEnabled() { return masterEnabled; },
+    isEntityTriggered,
+    apiPath,
+    logEvent,
+  };
 }
 
 window.addEventListener("DOMContentLoaded", init);
