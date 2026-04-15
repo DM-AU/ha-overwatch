@@ -1085,8 +1085,13 @@ function renderZones() {
     // Hidden zones: never show in live mode, show faded outline in editor only
     if (isHidden && !editorMode) return;
     // In live mode: show all non-hidden zones (disarmed zones show with off-colours)
-    // Only skip if no points and not in editor
     if (!editorMode && !pts.length) return;
+
+    // Group member zones are already rendered by the group layer above with uniform colour.
+    // Skip individual rendering for them (unless they are also the selected zone).
+    const activeGrp = editorMode && selectedGroupId ? groups.find(g => g.id === selectedGroupId) : null;
+    const isGroupMember = activeGrp && (activeGrp.zone_ids || []).includes(zone.id);
+    if (isGroupMember && !isSelected && editorMode) return;
 
     const pointsStr = pts.map(p => `${p.x},${p.y}`).join(" ");
 
@@ -1413,14 +1418,21 @@ function renderZonesEditor() {
           </div>
           <div style="font-size:11px;color:#666;margin-top:4px;">Members</div>
           <div id="groupMemberList" style="border:1px solid #222;border-radius:8px;padding:4px;flex:1;overflow-y:auto;">
-            ${zones.map(z => {
-              const inGroup = (selectedGroup.zone_ids || []).includes(z.id);
-              return `<label style="display:flex;align-items:center;gap:6px;padding:4px 6px;cursor:pointer;border-radius:6px;">
-                <input type="checkbox" class="group-member-chk" data-zone-id="${z.id}" ${inGroup ? "checked" : ""} style="accent-color:#0096ff;">
-                <div class="zone-list-dot" style="background:${z.colorHex || '#0096ff'};width:6px;height:6px;flex-shrink:0;"></div>
-                <span style="font-size:12px;color:#ccc;">${escapeHtml(z.name || z.id)}</span>
-              </label>`;
-            }).join("")}
+            ${[...zones]
+              .sort((a, b) => {
+                const aIn = (selectedGroup.zone_ids || []).includes(a.id);
+                const bIn = (selectedGroup.zone_ids || []).includes(b.id);
+                if (aIn !== bIn) return aIn ? -1 : 1; // checked first
+                return (a.name||a.id).localeCompare(b.name||b.id);
+              })
+              .map(z => {
+                const inGroup = (selectedGroup.zone_ids || []).includes(z.id);
+                return `<label style="display:flex;align-items:center;gap:6px;padding:4px 6px;cursor:pointer;border-radius:6px;${inGroup ? 'background:rgba(255,255,255,0.04);' : ''}">
+                  <input type="checkbox" class="group-member-chk" data-zone-id="${z.id}" ${inGroup ? "checked" : ""} style="accent-color:#0096ff;">
+                  <div class="zone-list-dot" style="background:${z.colorHex || '#0096ff'};width:6px;height:6px;flex-shrink:0;"></div>
+                  <span style="font-size:12px;color:${inGroup ? '#fff' : '#888'};">${escapeHtml(z.name || z.id)}</span>
+                </label>`;
+              }).join("")}
           </div>
         </div>`;
     }
