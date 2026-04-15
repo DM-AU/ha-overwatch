@@ -406,16 +406,16 @@ function renderCameraStatusBar() {
 
   container.innerHTML = `
     <div class="cam-status-bar" id="camStatusBar">
+      <div class="cam-status-mode">
+        <button class="cam-mode-btn ${camMode === 'snapshot' ? 'active' : ''}" id="camSnapBtn">Snapshot</button>
+        <button class="cam-mode-btn ${camMode === 'live' ? 'active' : ''}" id="camLiveBtn">Live</button>
+      </div>
       <div class="cam-status-inner" id="camStatusToggle">
         <div class="cam-status-dot ${globalOn ? 'active' : ''}"></div>
         <span class="cam-status-label">${globalOn ? 'Cameras Active' : 'Cameras Off'}</span>
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" style="opacity:0.5;margin-left:4px;transition:transform 0.2s;transform:rotate(${camStatusOpen ? '180' : '0'}deg)">
           <path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
-      </div>
-      <div class="cam-status-mode">
-        <button class="cam-mode-btn ${camMode === 'snapshot' ? 'active' : ''}" id="camSnapBtn">Snapshot</button>
-        <button class="cam-mode-btn ${camMode === 'live' ? 'active' : ''}" id="camLiveBtn">Live</button>
       </div>
     </div>
     ${dropdownHtml}

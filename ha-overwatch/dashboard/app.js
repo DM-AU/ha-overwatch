@@ -3869,7 +3869,7 @@ async function init() {
     console.warn('[HA-Overwatch] sidebarEl not found — check module paths');
   }
 
-  // Camera page only needs sidebar + HA connection — skip floorplan modules
+  // Camera page only needs sidebar + expand btn + HA connection — skip floorplan modules
   if (!isCameraPage) {
     await loadModule("expandBtnContainer", "expand-btn.html");
     await loadModule("statusContainer", "status.html");
@@ -3881,6 +3881,11 @@ async function init() {
     bindZonesButton();
     bindStatusBar();
     bindSearchUI();
+  } else {
+    // Camera page still needs expand button
+    await loadModule("expandBtnContainer", "expand-btn.html");
+    document.getElementById("expandBtnContainer") &&
+      (document.getElementById("expandBtnContainer").style.display = "");
   }
 
   bindSidebarToggle();

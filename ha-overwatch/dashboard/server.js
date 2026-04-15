@@ -476,8 +476,8 @@ const server = http.createServer(async (req, res) => {
     const ext  = path.extname(filePath).toLowerCase();
     const mime = MIME[ext] || "application/octet-stream";
 
-    // For index.html: inject <base> tag so relative URLs resolve through ingress correctly
-    if (filePath.endsWith("index.html")) {
+    // For HTML pages: inject <base> tag so relative URLs resolve through ingress correctly
+    if (ext === ".html") {
       let html = fs.readFileSync(filePath, "utf8");
       const ingressPath = req.headers["x-ingress-path"] || "";
       const base = ingressPath ? ingressPath.replace(/\/?$/, "/") : "./";
