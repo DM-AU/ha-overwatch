@@ -82,7 +82,9 @@ let pollingTimer = null;
 
 /* ─── ZONES STATE ─────────────────────────────────────────── */
 let zones = [];
-let selectedZoneId = null;
+let groups = [];          // Zone groups
+let selectedZoneId  = null;
+let selectedGroupId = null; // "group" or "zone" selection in editor
 let editorMode = false;
 let undoStack = [];
 let isCreatingZone = false;
@@ -576,6 +578,117 @@ async function deleteZoneFile(zoneId) {
 function saveZones() {
   zones.forEach(z => saveZone(z));
   localStorage.setItem("zones", JSON.stringify(zones));
+}
+
+/* ─── ZONE GROUPS ─────────────────────────────────────────── */
+function groupFilename(id) { return `group_${id}.yaml`; }
+
+function groupToYaml(g) {
+  let out = `id: ${g.id}\n`;
+  out += `name: "${(g.name || "").replace(/"/g, '\\"')}"\n`;
+  out += `zone_ids:\n`;
+  (g.zone_ids || []).forEach(id => { out += ` - ${id}\n`; });
+  return out;
+}
+
+function parseGroupYaml(text) {
+  const g = { zone_ids: [] };
+  let section = "";
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    if (line === "zone_ids:") { section = "zone_ids"; continue; }
+    if (line.startsWith("-") && section === "zone_ids") {
+      g.zone_ids.push(line.slice(1).trim());
+      continue;
+    }
+    if (line.includes(":")) {
+      section = "";
+      const ci = line.indexOf(":");
+      const key = line.slice(0, ci).trim();
+      let val = line.slice(ci + 1).trim().replace(/^"(.*)"$/, "$1");
+      if (key === "id")   g.id   = val;
+      if (key === "name") g.name = val;
+    }
+  }
+  return g;
+}
+
+async function loadGroups() {
+  try {
+    const res = await fetch(apiPath("config/zones/groups_index.json") + "?v=" + Date.now());
+    if (!res.ok) { groups = []; return; }
+    const index = await res.json();
+    const loaded = await Promise.all(index.map(async fname => {
+      try {
+        const r = await fetch(apiPath("config/zones/" + fname) + "?v=" + Date.now());
+        if (!r.ok) return null;
+        return parseGroupYaml(await r.text());
+      } catch { return null; }
+    }));
+    groups = loaded.filter(Boolean);
+  } catch { groups = []; }
+}
+
+async function saveGroup(group) {
+  const fname = groupFilename(group.id);
+  try {
+    // Save group YAML via save-zone route (same directory)
+    await fetch(apiPath("ow/save-zone"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename: fname, content: groupToYaml(group) })
+    });
+    // Update groups_index.json
+    const indexRes = await fetch(apiPath("config/zones/groups_index.json") + "?v=" + Date.now());
+    let index = indexRes.ok ? await indexRes.json() : [];
+    if (!index.includes(fname)) {
+      index.push(fname);
+      await fetch(apiPath("ow/save-zone"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename: "groups_index.json", content: JSON.stringify(index, null, 2) })
+      });
+    }
+  } catch { /* ignore */ }
+}
+
+async function deleteGroup(groupId) {
+  const fname = groupFilename(groupId);
+  try {
+    await fetch(apiPath("ow/delete-zone"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename: fname })
+    });
+    // Remove from groups_index.json
+    const indexRes = await fetch(apiPath("config/zones/groups_index.json") + "?v=" + Date.now());
+    let index = indexRes.ok ? await indexRes.json() : [];
+    index = index.filter(f => f !== fname);
+    await fetch(apiPath("ow/save-zone"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename: "groups_index.json", content: JSON.stringify(index, null, 2) })
+    });
+  } catch { /* ignore */ }
+}
+
+/* Group state helpers */
+function getGroupState(group) {
+  const members = (group.zone_ids || []).map(id => zones.find(z => z.id === id)).filter(Boolean);
+  if (!members.length) return { anyTriggered: false, anyArmed: false, allDisarmed: true };
+  const anyTriggered = members.some(z => getZoneState(z) === "triggered");
+  const anyArmed     = members.some(z => z.enabled !== false && masterEnabled);
+  const allDisarmed  = members.every(z => z.enabled === false || !masterEnabled);
+  return { anyTriggered, anyArmed, allDisarmed };
+}
+
+function setGroupArmed(groupId, armed) {
+  const group = groups.find(g => g.id === groupId);
+  if (!group) return;
+  (group.zone_ids || []).forEach(zoneId => setZoneEnabled(zoneId, armed));
+  renderStatusDropdown();
+  renderZonesEditor();
 }
 
 /* ─── UNDO ────────────────────────────────────────────────── */
@@ -1093,10 +1206,11 @@ function refreshEntityStateDots(container) {
 /* ─── ZONES EDITOR PANEL (draggable) ──────────────────────── */
 let editorPosRestored = false;
 let editorDrag = { active: false, startX: 0, startY: 0 };
-let editorPos  = { x: 20, y: 70 }; // default: left side, away from right sidebar
+let editorSize = { w: 560, h: 420 };
+let editorPos  = { x: 20, y: 70 };
 
-function makeDraggableEditor() {
-  const container = document.getElementById("zonesEditorContainer");
+function makeDraggableEditor(containerEl) {
+  const container = containerEl || document.getElementById("zonesEditorContainer");
   if (!container) return;
   const panel = container.querySelector(".zones-editor");
   const titlebar = container.querySelector(".zones-editor-titlebar");
@@ -1165,478 +1279,406 @@ function renderZonesEditor() {
   const container = document.getElementById("zonesEditorContainer");
   if (!container) return;
 
-  if (!editorMode) {
-    container.innerHTML = "";
-    return;
-  }
+  if (!editorMode) { container.innerHTML = ""; return; }
 
-  // Issue 11: don't blow away the DOM while the user is typing in the editor
+  // Don't blow away DOM while user is typing
   const activeEl = document.activeElement;
   const editorPanel = container.querySelector(".zones-editor");
   if (editorPanel && activeEl && editorPanel.contains(activeEl) &&
       (activeEl.tagName === "INPUT" || activeEl.tagName === "TEXTAREA")) {
-    // Just refresh the entity state dots without re-rendering
     refreshEntityStateDots(container);
     return;
   }
 
-  const selectedZone = zones.find(z => z.id === selectedZoneId) || null;
+  const selectedZone  = selectedZoneId  ? zones.find(z => z.id === selectedZoneId)   : null;
+  const selectedGroup = selectedGroupId ? groups.find(g => g.id === selectedGroupId) : null;
 
-  let modeHint = "";
-  if (isCreatingZone) {
-    modeHint = `<div class="zone-mode-hint">✏️ Click map to add points · Double-click to finish</div>`;
-  } else if (isEditingPoints && selectedZone) {
-    modeHint = `<div class="zone-mode-hint">🔧 Click near edge to insert · Right-click handle to remove · Click Edit again when done</div>`;
+  const editPtsLabel    = isEditingPoints ? "✔ Done Editing" : "Edit Zone";
+  const editorW         = editorSize.w;
+  const editorH         = editorSize.h;
+
+  // ── Build left panel zone list with group headers ──────────
+  function buildZoneList() {
+    const ungroupedZones = zones.filter(z => !groups.some(g => (g.zone_ids||[]).includes(z.id)));
+    let html = "";
+
+    groups.forEach(g => {
+      const gSel = g.id === selectedGroupId;
+      const gState = getGroupState(g);
+      const gColour = gState.anyTriggered ? "#ff3b30" : gState.anyArmed ? "#ff3b30" : "#555";
+      const gFlash  = gState.anyTriggered;
+      html += `
+        <div class="zed-group-header ${gSel ? 'selected' : ''}" data-group-id="${g.id}">
+          <div class="zone-list-dot${gFlash ? ' flashing' : ''}" style="background:${gColour};width:6px;height:6px;flex-shrink:0;"></div>
+          <span style="flex:1;font-size:11px;font-weight:600;color:#999;text-transform:uppercase;letter-spacing:0.06em;">${escapeHtml(g.name || g.id)}</span>
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" style="opacity:0.4;flex-shrink:0;"><path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </div>`;
+      (g.zone_ids || []).forEach(zid => {
+        const z = zones.find(zz => zz.id === zid);
+        if (!z) return;
+        html += buildZoneItem(z, true);
+      });
+    });
+
+    if (ungroupedZones.length > 0) {
+      html += `<div class="zed-group-header" style="cursor:default;">
+        <div style="width:6px;height:6px;flex-shrink:0;background:transparent;"></div>
+        <span style="flex:1;font-size:11px;font-weight:600;color:#555;text-transform:uppercase;letter-spacing:0.06em;">Ungrouped</span>
+      </div>`;
+      ungroupedZones.forEach(z => { html += buildZoneItem(z, false); });
+    }
+    return html || `<div style="color:#555;font-size:11px;padding:8px;">No zones yet.</div>`;
   }
 
-  const editPtsLabel = isEditingPoints ? "✔ Done Editing" : "Edit Points";
-  const editPtsDisabled = (!selectedZone || isCreatingZone) ? "disabled" : "";
+  function buildZoneItem(z, indented) {
+    const state = getZoneState(z);
+    const isOff = z.enabled === false || !masterEnabled;
+    const dotColour = isOff ? "#444" :
+      state === "triggered" ? resolveColour(entityTypeColour(detectEntityType((z.sensors||[])[0]||""))) :
+      state === "fault" ? "#ff9500" : (z.colorHex || "#0096ff");
+    const sel = z.id === selectedZoneId;
+    return `<div class="zones-list-item ${sel ? 'selected' : ''}" data-zone-id="${z.id}" style="${indented ? 'padding-left:20px;' : ''}">
+      <div class="zone-list-dot" style="background:${dotColour};opacity:${isOff ? 0.4 : 1};"></div>
+      <span style="flex:1;opacity:${isOff ? 0.5 : 1};font-size:12px;">${escapeHtml(z.name || z.id)}</span>
+      ${z.hidden ? `<span style="font-size:9px;color:#555;">hidden</span>` : state === "triggered" ? `<span style="font-size:9px;color:#ff3b30;">⚠</span>` : `<span style="font-size:9px;color:#444;">${(z.points||[]).length}pt</span>`}
+    </div>`;
+  }
 
+  // ── Build right panel ──────────────────────────────────────
+  function buildRightPanel() {
+    if (selectedGroup && !selectedZone) {
+      // Group config panel
+      const members = (selectedGroup.zone_ids || []).map(id => zones.find(z => z.id === id)).filter(Boolean);
+      const allArmed = members.length > 0 && members.every(z => z.enabled !== false);
+      return `
+        <div class="zed-right-content">
+          <div class="zones-editor-row"><label>Group Name</label>
+            <input type="text" id="groupNameInput" value="${escapeHtml(selectedGroup.name || "")}" placeholder="Group name">
+          </div>
+          <div class="zones-editor-row" style="align-items:center;">
+            <label>Group Armed</label>
+            <label class="zone-toggle-switch">
+              <input type="checkbox" id="groupArmedToggle" ${allArmed ? "checked" : ""}>
+              <span class="zone-toggle-track"></span>
+            </label>
+          </div>
+          <div style="font-size:11px;color:#666;margin-top:4px;">Members</div>
+          <div id="groupMemberList" style="border:1px solid #222;border-radius:8px;padding:4px;max-height:120px;overflow-y:auto;">
+            ${zones.map(z => {
+              const inGroup = (selectedGroup.zone_ids || []).includes(z.id);
+              return `<label style="display:flex;align-items:center;gap:6px;padding:4px 6px;cursor:pointer;border-radius:6px;">
+                <input type="checkbox" class="group-member-chk" data-zone-id="${z.id}" ${inGroup ? "checked" : ""} style="accent-color:#0096ff;">
+                <div class="zone-list-dot" style="background:${z.colorHex || '#0096ff'};width:6px;height:6px;flex-shrink:0;"></div>
+                <span style="font-size:12px;color:#ccc;">${escapeHtml(z.name || z.id)}</span>
+              </label>`;
+            }).join("")}
+          </div>
+          <div style="margin-top:auto;padding-top:8px;">
+            <button id="deleteGroupBtn" class="danger" style="width:100%;">Delete Group</button>
+          </div>
+        </div>`;
+    }
+
+    if (selectedZone) {
+      // Zone config panel
+      const modeHint = isCreatingZone
+        ? `<div class="zone-mode-hint">✏️ Click map to add points · Double-click to finish</div>`
+        : isEditingPoints
+        ? `<div class="zone-mode-hint">🔧 Click edge to insert · Right-click handle to remove</div>`
+        : "";
+      return `
+        <div class="zed-right-content">
+          ${modeHint}
+          <div class="zones-editor-row"><label>Name</label>
+            <input type="text" id="zoneNameInput" value="${escapeHtml(selectedZone.name || "")}" placeholder="Zone name">
+          </div>
+          <div class="zones-editor-row"><label>Colour</label>
+            <input type="color" id="zoneColorInput" value="${selectedZone.colorHex || '#0096ff'}">
+          </div>
+          <div class="zones-editor-row" style="align-items:center;gap:8px;">
+            <label style="flex:0 0 auto;">Armed</label>
+            <label class="zone-toggle-switch">
+              <input type="checkbox" id="zoneEnabledToggle" ${selectedZone.enabled !== false ? "checked" : ""}>
+              <span class="zone-toggle-track"></span>
+            </label>
+            <span style="flex:1;"></span>
+            <span style="font-size:11px;color:#666;">Visible</span>
+            <button id="zoneHiddenToggle"
+              style="background:none;border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:5px 8px;cursor:pointer;line-height:0;color:${selectedZone.hidden ? 'rgba(255,255,255,0.25)' : 'rgba(255,255,255,0.7)'};"
+            >${selectedZone.hidden
+              ? `<svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M1 12C1 12 5 5 12 5s11 7 11 7-4 7-11 7S1 12 1 12z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M3 3l18 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>`
+              : `<svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M1 12C1 12 5 5 12 5s11 7 11 7-4 7-11 7S1 12 1 12z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2"/></svg>`
+            }</button>
+          </div>
+          <div class="ha-section" style="margin-top:2px;">
+            <div class="ha-device-tabs" id="haDeviceTabs">
+              <button class="ha-device-tab active" data-tab="sensors">Sensors</button>
+              <button class="ha-device-tab" data-tab="cameras">Cameras</button>
+              <button class="ha-device-tab" data-tab="lights">Lights</button>
+              <button class="ha-device-tab" data-tab="sirens">Sirens</button>
+            </div>
+            <div class="ha-tab-panel" id="tabPanel_sensors">
+              <div class="entity-search-wrap"><input type="text" id="entitySearchInput" class="entity-search-input" placeholder="Search HA entities…" autocomplete="off">
+              <div class="entity-search-results" id="entitySearchResults" style="display:none;"></div></div>
+              <div class="ha-entity-list" id="zoneEntityList">${(selectedZone.sensors||[]).map(e=>deviceRow(e,"sensors")).join("")}</div>
+            </div>
+            <div class="ha-tab-panel" id="tabPanel_cameras" style="display:none;">
+              <div class="entity-search-wrap"><input type="text" id="cameraSearchInput" class="entity-search-input" placeholder="Search camera entities…" autocomplete="off">
+              <div class="entity-search-results" id="cameraSearchResults" style="display:none;"></div></div>
+              <div class="ha-entity-list" id="zoneCameraList">${(selectedZone.cameras||[]).map(e=>deviceRow(e,"cameras")).join("")}</div>
+            </div>
+            <div class="ha-tab-panel" id="tabPanel_lights" style="display:none;">
+              <div class="entity-search-wrap"><input type="text" id="lightSearchInput" class="entity-search-input" placeholder="Search light entities…" autocomplete="off">
+              <div class="entity-search-results" id="lightSearchResults" style="display:none;"></div></div>
+              <div class="ha-entity-list" id="zoneLightList">${(selectedZone.lights||[]).map(e=>deviceRow(e,"lights")).join("")}</div>
+            </div>
+            <div class="ha-tab-panel" id="tabPanel_sirens" style="display:none;">
+              <div class="entity-search-wrap"><input type="text" id="sirenSearchInput" class="entity-search-input" placeholder="Search siren entities…" autocomplete="off">
+              <div class="entity-search-results" id="sirenSearchResults" style="display:none;"></div></div>
+              <div class="ha-entity-list" id="zoneSirenList">${(selectedZone.sirens||[]).map(e=>deviceRow(e,"sirens")).join("")}</div>
+            </div>
+          </div>
+        </div>`;
+    }
+
+    // Nothing selected
+    return `<div class="zed-right-empty">Select a zone or group to configure</div>`;
+  }
 
   container.innerHTML = `
-    <div class="zones-editor" style="left:${editorPos.x}px;top:${editorPos.y}px;">
+    <div class="zones-editor" style="left:${editorPos.x}px;top:${editorPos.y}px;width:${editorW}px;height:${editorH}px;">
       <div class="zones-editor-titlebar">
         <h3>Zones</h3>
         <button class="zones-editor-close" id="zonesCloseBtn" title="Close editor">✕</button>
       </div>
-
-      <div class="zones-editor-body">
-        ${modeHint}
-
-        <div class="zones-list" id="zonesList">
-          ${zones.map(z => {
-            const state = getZoneState(z);
-            const isOff = z.enabled === false || !masterEnabled;
-            const dotColour = isOff ? "#444" :
-                              state === "triggered" ? resolveColour(entityTypeColour(detectEntityType((z.sensors||[])[0]||""))) :
-                              state === "fault" ? "#ff9500" : (z.colorHex || "#0096ff");
-            const badge = isOff ? `<span style="font-size:9px;color:#555;margin-left:auto;">disarmed</span>` :
-                          z.hidden ? `<span style="font-size:9px;color:#555;margin-left:auto;">👁 hidden</span>` :
-                          state === "triggered" ? `<span style="font-size:9px;color:#ff3b30;margin-left:auto;">⚠</span>` :
-                          state === "fault"     ? `<span style="font-size:9px;color:#ff9500;margin-left:auto;">!</span>` :
-                          `<span style="font-size:9px;color:#555;margin-left:auto;">${(z.points||[]).length}pt</span>`;
-            return `
-              <div class="zones-list-item ${z.id === selectedZoneId ? "selected" : ""}" data-zone-id="${z.id}">
-                <div class="zone-list-dot" style="background:${dotColour};opacity:${isOff ? 0.4 : 1};"></div>
-                <span style="opacity:${isOff ? 0.5 : 1}">${escapeHtml(z.name || z.id)}</span>
-                ${badge}
-              </div>`;
-          }).join("")}
-        </div>
-
-        <div class="zones-editor-row">
-          <button id="addZoneBtn">+ Add Zone</button>
-          <button id="deleteZoneBtn" class="danger" ${selectedZone ? "" : "disabled"}>Delete</button>
-        </div>
-
-        <div class="zones-editor-row">
-          <button id="editPointsBtn" ${editPtsDisabled} style="${isEditingPoints ? "border-color:rgba(255,204,0,0.5);color:#ffcc00;" : ""}">${editPtsLabel}</button>
-        </div>
-
-        <div class="zones-editor-row">
-          <label>Name</label>
-          <input type="text" id="zoneNameInput" value="${selectedZone ? escapeHtml(selectedZone.name || "") : ""}" ${selectedZone ? "" : "disabled"} placeholder="Zone name">
-        </div>
-
-        <div class="zones-editor-row">
-          <label>Colour</label>
-          <input type="color" id="zoneColorInput" value="${selectedZone?.colorHex || "#0096ff"}" ${selectedZone ? "" : "disabled"}>
-        </div>
-
-        <div class="zones-editor-row" style="align-items:center;gap:8px;">
-          <label style="flex:0 0 auto;">Zone armed</label>
-          <label class="zone-toggle-switch">
-            <input type="checkbox" id="zoneEnabledToggle" ${selectedZone ? "" : "disabled"} ${(selectedZone?.enabled !== false) ? "checked" : ""}>
-            <span class="zone-toggle-track"></span>
-          </label>
-          <span style="flex:1;"></span>
-          <label style="flex:0 0 auto;font-size:11px;color:#666;" title="Hide this zone from the map (alarm still active)">Visible</label>
-          <button id="zoneHiddenToggle" title="${selectedZone?.hidden ? 'Zone hidden — click to show' : 'Zone visible — click to hide'}"
-            style="background:none;border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:5px 8px;cursor:pointer;line-height:0;color:${selectedZone?.hidden ? 'rgba(255,255,255,0.25)' : 'rgba(255,255,255,0.7)'};${selectedZone ? '' : 'opacity:0.3;pointer-events:none;'}"
-          >${selectedZone?.hidden
-            ? `<svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M1 12C1 12 5 5 12 5s11 7 11 7-4 7-11 7S1 12 1 12z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M3 3l18 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>`
-            : `<svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M1 12C1 12 5 5 12 5s11 7 11 7-4 7-11 7S1 12 1 12z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2"/></svg>`
-          }</button>
-        </div>
-
-        ${selectedZone ? `
-        <div class="ha-section">
-          <div class="ha-device-tabs" id="haDeviceTabs">
-            <button class="ha-device-tab active" data-tab="sensors">Sensors</button>
-            <button class="ha-device-tab" data-tab="cameras">Cameras</button>
-            <button class="ha-device-tab" data-tab="lights">Lights</button>
-            <button class="ha-device-tab" data-tab="sirens">Sirens</button>
-          </div>
-
-          <div class="ha-tab-panel" id="tabPanel_sensors">
-            <div class="entity-search-wrap">
-              <input type="text" id="entitySearchInput" class="entity-search-input" placeholder="Search HA entities…" autocomplete="off">
-              <div class="entity-search-results" id="entitySearchResults" style="display:none;"></div>
-            </div>
-            <div class="ha-entity-list" id="zoneEntityList">
-              ${(selectedZone.sensors || []).map(entityId => deviceRow(entityId, "sensors")).join("")}
-            </div>
-          </div>
-
-          <div class="ha-tab-panel" id="tabPanel_cameras" style="display:none;">
-            <div class="entity-search-wrap">
-              <input type="text" id="cameraSearchInput" class="entity-search-input" placeholder="Search camera entities…" autocomplete="off">
-              <div class="entity-search-results" id="cameraSearchResults" style="display:none;"></div>
-            </div>
-            <div class="ha-entity-list" id="zoneCameraList">
-              ${(selectedZone.cameras || []).map(entityId => deviceRow(entityId, "cameras")).join("")}
-            </div>
-          </div>
-
-          <div class="ha-tab-panel" id="tabPanel_lights" style="display:none;">
-            <div class="entity-search-wrap">
-              <input type="text" id="lightSearchInput" class="entity-search-input" placeholder="Search light entities…" autocomplete="off">
-              <div class="entity-search-results" id="lightSearchResults" style="display:none;"></div>
-            </div>
-            <div class="ha-entity-list" id="zoneLightList">
-              ${(selectedZone.lights || []).map(entityId => deviceRow(entityId, "lights")).join("")}
-            </div>
-          </div>
-
-          <div class="ha-tab-panel" id="tabPanel_sirens" style="display:none;">
-            <div class="entity-search-wrap">
-              <input type="text" id="sirenSearchInput" class="entity-search-input" placeholder="Search siren entities…" autocomplete="off">
-              <div class="entity-search-results" id="sirenSearchResults" style="display:none;"></div>
-            </div>
-            <div class="ha-entity-list" id="zoneSirenList">
-              ${(selectedZone.sirens || []).map(entityId => deviceRow(entityId, "sirens")).join("")}
-            </div>
+      <div class="zed-body">
+        <!-- LEFT PANEL -->
+        <div class="zed-left">
+          <div class="zed-list" id="zonesList">${buildZoneList()}</div>
+          <div class="zed-actions">
+            <button id="addGroupBtn" title="Add Group">+ Group</button>
+            <button id="addZoneBtn">+ Zone</button>
+            ${selectedZone ? `<button id="editPointsBtn" style="${isEditingPoints ? 'border-color:rgba(255,204,0,0.5);color:#ffcc00;' : ''}">${editPtsLabel}</button>` : ""}
+            <button id="deleteZoneBtn" class="danger" ${selectedZone || selectedGroup ? "" : "disabled"}
+              title="${selectedGroup && !selectedZone ? 'Delete Group' : 'Delete Zone'}">Delete</button>
           </div>
         </div>
-        ` : `<div style="color:#555;font-size:11px;padding:8px 0;">Select a zone to configure devices</div>`}
-
-        ${selectedZone ? (() => {
-          const ids = haZoneEntityIds(selectedZone);
-          return `
-          <div class="ha-section" style="margin-top:6px;">
-            <div class="ha-section-label" style="font-size:10px;opacity:0.6;">HA Entity IDs (for automations)</div>
-            <div style="font-size:9px;font-family:monospace;color:#555;line-height:1.8;user-select:all;">
-              ${ids.armed}<br>
-              ${ids.triggered}
-            </div>
-          </div>`;
-        })() : ""}
-
-        <div class="zones-editor-footer">
-          <button id="undoZonesBtn">↩ Undo</button>
-          <button id="exportZonesBtn" class="accent">Export YAML</button>
-          <button id="setupHABtn" class="accent" title="Create input_boolean entities in HA for each zone">☁ Setup HA</button>
-        </div>
-        <div id="haSetupStatus" style="font-size:10px;color:#666;padding:4px 0 0 0;min-height:14px;"></div>
+        <!-- RIGHT PANEL -->
+        <div class="zed-right">${buildRightPanel()}</div>
       </div>
+      <!-- Resize handle -->
+      <div class="zed-resize-handle" id="zedResizeHandle"></div>
     </div>
   `;
 
-  // Close handled by makeDraggableEditor on the titlebar clone
+  // ── Wire events ────────────────────────────────────────────
+  // Zone list item clicks
+  container.querySelectorAll(".zones-list-item").forEach(item => {
+    item.onclick = () => {
+      selectedZoneId  = item.dataset.zoneId;
+      selectedGroupId = null;
+      isCreatingZone = false; currentNewZone = null;
+      renderZones(); renderZonesEditor();
+    };
+  });
 
-  const list = document.getElementById("zonesList");
-  if (list) {
-    list.querySelectorAll(".zones-list-item").forEach(item => {
-      item.onclick = () => {
-        selectedZoneId = item.dataset.zoneId;
-        isCreatingZone = false;
-        currentNewZone = null;
-        renderZones();
-        renderZonesEditor();
-      };
-    });
-  }
-
-  const addZoneBtn = document.getElementById("addZoneBtn");
-  if (addZoneBtn) {
-    addZoneBtn.onclick = () => {
-      const id = "zone_" + Date.now();
-      const newZone = { id, name: "New Zone", colorHex: "#0096ff", color: hexToRgba("#0096ff", 0.25), points: [], sensors: [], cameras: [], lights: [], sirens: [], enabled: true };
-      pushUndo();
-      zones.push(newZone);
-      selectedZoneId = id;
-      isCreatingZone = true;
-      isEditingPoints = false;
-      currentNewZone = newZone;
-      saveZone(newZone);
-      renderZones();
+  // Group header clicks
+  container.querySelectorAll(".zed-group-header[data-group-id]").forEach(hdr => {
+    hdr.onclick = () => {
+      selectedGroupId = hdr.dataset.groupId;
+      selectedZoneId  = null;
       renderZonesEditor();
     };
-  }
+  });
 
-  const deleteBtn = document.getElementById("deleteZoneBtn");
-  if (deleteBtn && selectedZone) {
-    deleteBtn.onclick = () => {
+  // Add Zone
+  document.getElementById("addZoneBtn")?.addEventListener("click", () => {
+    const id = "zone_" + Date.now();
+    const nz = { id, name: "New Zone", colorHex: "#0096ff", color: hexToRgba("#0096ff", 0.25),
+                 points: [], sensors: [], cameras: [], lights: [], sirens: [], enabled: true, hidden: false };
+    pushUndo(); zones.push(nz);
+    selectedZoneId = id; selectedGroupId = null;
+    isCreatingZone = true; isEditingPoints = false; currentNewZone = nz;
+    saveZone(nz); renderZones(); renderZonesEditor();
+  });
+
+  // Add Group
+  document.getElementById("addGroupBtn")?.addEventListener("click", () => {
+    const id = "grp_" + Date.now();
+    const ng = { id, name: "New Group", zone_ids: [] };
+    groups.push(ng);
+    selectedGroupId = id; selectedZoneId = null;
+    saveGroup(ng); renderZonesEditor();
+  });
+
+  // Delete
+  document.getElementById("deleteZoneBtn")?.addEventListener("click", () => {
+    if (selectedGroup && !selectedZone) {
+      if (!confirm(`Delete group "${selectedGroup.name}"?`)) return;
+      deleteGroup(selectedGroupId);
+      groups = groups.filter(g => g.id !== selectedGroupId);
+      selectedGroupId = null;
+      renderZonesEditor();
+    } else if (selectedZone) {
       pushUndo();
       deleteZoneFile(selectedZoneId);
       zones = zones.filter(z => z.id !== selectedZoneId);
-      selectedZoneId = null;
-      isCreatingZone = false;
-      isEditingPoints = false;
-      currentNewZone = null;
-      renderZones();
-      renderZonesEditor();
-    };
-  }
-
-  const editPtsBtn = document.getElementById("editPointsBtn");
-  if (editPtsBtn && selectedZone) {
-    editPtsBtn.onclick = () => {
-      isEditingPoints = !isEditingPoints;
-      isCreatingZone = false;
-      currentNewZone = null;
-      renderZones();
-      renderZonesEditor();
-    };
-  }
-
-  const nameInput = document.getElementById("zoneNameInput");
-  if (nameInput && selectedZone) {
-    nameInput.oninput = () => {
-      selectedZone.name = nameInput.value;
-      saveZone(selectedZone);
-      const li = document.querySelector(`.zones-list-item[data-zone-id="${selectedZone.id}"] span`);
-      if (li) li.textContent = selectedZone.name || selectedZone.id;
-    };
-  }
-
-  const colorInput = document.getElementById("zoneColorInput");
-  if (colorInput && selectedZone) {
-    colorInput.oninput = () => {
-      selectedZone.colorHex = colorInput.value;
-      selectedZone.color = hexToRgba(colorInput.value, 0.25);
-      saveZone(selectedZone);
-      renderZones();
-    };
-  }
-
-  // Zone enabled toggle (issue 17)
-  const enabledToggle = document.getElementById("zoneEnabledToggle");
-  if (enabledToggle && selectedZone) {
-    enabledToggle.onchange = () => {
-      setZoneEnabled(selectedZone.id, enabledToggle.checked);
-      renderZonesEditor();
-    };
-  }
-
-  // Eyeball hidden toggle (issue 30)
-  const hiddenToggle = document.getElementById("zoneHiddenToggle");
-  if (hiddenToggle && selectedZone) {
-    hiddenToggle.onclick = () => {
-      setZoneHidden(selectedZone.id, !selectedZone.hidden);
-      renderZonesEditor();
-    };
-  }
-
-  // Device tab switching (issue 16)
-  document.getElementById("haDeviceTabs")?.querySelectorAll(".ha-device-tab").forEach(btn => {
-    btn.addEventListener("click", () => {
-      document.querySelectorAll(".ha-device-tab").forEach(b => b.classList.remove("active"));
-      document.querySelectorAll(".ha-tab-panel").forEach(p => p.style.display = "none");
-      btn.classList.add("active");
-      const panel = document.getElementById("tabPanel_" + btn.dataset.tab);
-      if (panel) panel.style.display = "block";
-    });
+      // Remove from any group
+      groups.forEach(g => { g.zone_ids = (g.zone_ids||[]).filter(id => id !== selectedZoneId); saveGroup(g); });
+      selectedZoneId = null; isCreatingZone = false; isEditingPoints = false; currentNewZone = null;
+      renderZones(); renderZonesEditor();
+    }
   });
 
-  // Wire remove buttons for all device types
-  ["sensors","cameras","lights","sirens"].forEach(devType => {
-    const listId = { sensors:"zoneEntityList", cameras:"zoneCameraList", lights:"zoneLightList", sirens:"zoneSirenList" }[devType];
-    const listEl = document.getElementById(listId);
-    if (listEl) {
-      listEl.querySelectorAll(".ha-entity-remove").forEach(btn => {
+  // Edit Zone points
+  document.getElementById("editPointsBtn")?.addEventListener("click", () => {
+    isEditingPoints = !isEditingPoints; isCreatingZone = false; currentNewZone = null;
+    renderZones(); renderZonesEditor();
+  });
+
+  // ── Group config wiring ──────────────────────────────────
+  if (selectedGroup && !selectedZone) {
+    document.getElementById("groupNameInput")?.addEventListener("input", e => {
+      selectedGroup.name = e.target.value;
+      saveGroup(selectedGroup);
+      renderZonesEditor();
+    });
+
+    document.getElementById("groupArmedToggle")?.addEventListener("change", e => {
+      setGroupArmed(selectedGroupId, e.target.checked);
+    });
+
+    document.querySelectorAll(".group-member-chk").forEach(chk => {
+      chk.addEventListener("change", e => {
+        const zid = e.target.dataset.zoneId;
+        selectedGroup.zone_ids = selectedGroup.zone_ids || [];
+        if (e.target.checked) {
+          if (!selectedGroup.zone_ids.includes(zid)) selectedGroup.zone_ids.push(zid);
+        } else {
+          selectedGroup.zone_ids = selectedGroup.zone_ids.filter(id => id !== zid);
+        }
+        saveGroup(selectedGroup);
+        renderZonesEditor();
+      });
+    });
+
+    document.getElementById("deleteGroupBtn")?.addEventListener("click", () => {
+      if (!confirm(`Delete group "${selectedGroup.name}"?`)) return;
+      deleteGroup(selectedGroupId);
+      groups = groups.filter(g => g.id !== selectedGroupId);
+      selectedGroupId = null;
+      renderZonesEditor();
+    });
+  }
+
+  // ── Zone config wiring ───────────────────────────────────
+  if (selectedZone) {
+    document.getElementById("zoneNameInput")?.addEventListener("input", e => {
+      selectedZone.name = e.target.value;
+      saveZone(selectedZone);
+    });
+
+    document.getElementById("zoneColorInput")?.addEventListener("input", e => {
+      selectedZone.colorHex = e.target.value;
+      selectedZone.color = hexToRgba(e.target.value, 0.25);
+      saveZone(selectedZone); renderZones();
+    });
+
+    document.getElementById("zoneEnabledToggle")?.addEventListener("change", e => {
+      setZoneEnabled(selectedZone.id, e.target.checked); renderZonesEditor();
+    });
+
+    document.getElementById("zoneHiddenToggle")?.addEventListener("click", () => {
+      setZoneHidden(selectedZone.id, !selectedZone.hidden); renderZonesEditor();
+    });
+
+    // Device tabs
+    document.getElementById("haDeviceTabs")?.querySelectorAll(".ha-device-tab").forEach(btn => {
+      btn.addEventListener("click", () => {
+        document.querySelectorAll(".ha-device-tab").forEach(b => b.classList.remove("active"));
+        document.querySelectorAll(".ha-tab-panel").forEach(p => p.style.display = "none");
+        btn.classList.add("active");
+        document.getElementById("tabPanel_" + btn.dataset.tab)?.style && (document.getElementById("tabPanel_" + btn.dataset.tab).style.display = "block");
+      });
+    });
+
+    // Entity remove buttons
+    ["sensors","cameras","lights","sirens"].forEach(devType => {
+      const listId = { sensors:"zoneEntityList", cameras:"zoneCameraList", lights:"zoneLightList", sirens:"zoneSirenList" }[devType];
+      document.getElementById(listId)?.querySelectorAll(".ha-entity-remove").forEach(btn => {
         btn.onclick = e => {
           e.stopPropagation();
-          const id = btn.dataset.entityId;
-          selectedZone[devType] = (selectedZone[devType] || []).filter(s => s !== id);
+          selectedZone[devType] = (selectedZone[devType]||[]).filter(s => s !== btn.dataset.entityId);
           saveZone(selectedZone);
           if (devType === "sensors") subscribeHAEntities();
           renderZonesEditor();
         };
       });
-    }
-  });
+    });
 
-  // Entity search within zone editor — sensors tab
-  bindDeviceSearch(selectedZone, "entitySearchInput", "entitySearchResults", "sensors", "zoneEntityList");
-  bindDeviceSearch(selectedZone, "cameraSearchInput", "cameraSearchResults", "cameras", "zoneCameraList");
-  bindDeviceSearch(selectedZone, "lightSearchInput",  "lightSearchResults",  "lights",  "zoneLightList");
-  bindDeviceSearch(selectedZone, "sirenSearchInput",  "sirenSearchResults",  "sirens",  "zoneSirenList");
-
-  const undoBtn = document.getElementById("undoZonesBtn");
-  if (undoBtn) undoBtn.onclick = () => undoZones();
-
-  // Setup HA Entities button — creates input_boolean helpers in HA for all zones
-  const setupHABtn    = document.getElementById("setupHABtn");
-  const haSetupStatus = document.getElementById("haSetupStatus");
-  if (setupHABtn) {
-    setupHABtn.onclick = async () => {
-      if (!serverApiAvailable) {
-        if (haSetupStatus) { haSetupStatus.textContent = "✗ server.js is not running — cannot reach HA"; haSetupStatus.style.color = "#ff3b30"; }
-        return;
-      }
-      setupHABtn.disabled = true;
-      if (haSetupStatus) { haSetupStatus.textContent = "Creating HA entities…"; haSetupStatus.style.color = "#888"; }
-      try {
-        const res  = await fetch(apiPath("ow/ha-setup-zones"), { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
-        const data = await res.json();
-        if (data.ok) {
-          const errCount = (data.errors || []).length;
-          const msg = errCount
-            ? `✓ ${data.created} entities created, ${errCount} error(s) — check HA URL/token`
-            : `✓ ${data.created} entities ready in HA`;
-          if (haSetupStatus) { haSetupStatus.textContent = msg; haSetupStatus.style.color = errCount ? "#ff9500" : "#32d74b"; }
-          logEvent("ok", `HA entity setup: ${data.created} input_booleans created/updated`, "ha");
-
-          // Show entity IDs for reference
-          if (data.entityMap) {
-            const ids = (data.entityMap.zones || []).map(z =>
-              `${z.name}: ${z.armed} / ${z.triggered}`
-            ).join("\n");
-            console.log("[HA-Overwatch] HA Zone Entities:\n" + ids);
-          }
-        } else {
-          if (haSetupStatus) { haSetupStatus.textContent = "✗ " + (data.error || "Unknown error"); haSetupStatus.style.color = "#ff3b30"; }
-          logEvent("error", "HA entity setup failed: " + (data.error || "unknown"), "ha");
-        }
-      } catch (e) {
-        if (haSetupStatus) { haSetupStatus.textContent = "✗ " + e.message; haSetupStatus.style.color = "#ff3b30"; }
-      }
-      setupHABtn.disabled = false;
-    };
+    bindDeviceSearch(selectedZone, "entitySearchInput", "entitySearchResults", "sensors",  "zoneEntityList");
+    bindDeviceSearch(selectedZone, "cameraSearchInput", "cameraSearchResults", "cameras",  "zoneCameraList");
+    bindDeviceSearch(selectedZone, "lightSearchInput",  "lightSearchResults",  "lights",   "zoneLightList");
+    bindDeviceSearch(selectedZone, "sirenSearchInput",  "sirenSearchResults",  "sirens",   "zoneSirenList");
   }
+
+  // ── Undo / Export ────────────────────────────────────────
+  document.getElementById("undoZonesBtn")?.addEventListener("click", undoZones);
 
   const exportBtn = document.getElementById("exportZonesBtn");
   if (exportBtn) {
     exportBtn.onclick = () => {
       const blob = new Blob([generateZonesYaml()], { type: "text/yaml" });
       const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "zones_export.yaml";
-      a.click();
+      const a = document.createElement("a"); a.href = url; a.download = "zones_export.yaml"; a.click();
       URL.revokeObjectURL(url);
     };
-  }
-
-  /* IMPORT_ZONES_SAFE: Add Import YAML next to Export without touching editor template */
-  try {
-    if (exportBtn && !document.getElementById("importZonesBtn")) {
+    // Import button
+    if (!document.getElementById("importZonesBtn")) {
       const importBtn = document.createElement("button");
-      importBtn.id = "importZonesBtn";
-      importBtn.textContent = "Import YAML";
-
+      importBtn.id = "importZonesBtn"; importBtn.textContent = "Import YAML";
       const importInput = document.createElement("input");
-      importInput.id = "importZonesFile";
-      importInput.type = "file";
-      importInput.accept = ".yaml,.yml,.txt";
-      importInput.style.display = "none";
-
+      importInput.id = "importZonesFile"; importInput.type = "file"; importInput.accept = ".yaml,.yml,.txt"; importInput.style.display = "none";
       exportBtn.insertAdjacentElement("afterend", importBtn);
       importBtn.insertAdjacentElement("afterend", importInput);
-
-      const parseZonesExportYaml = (text) => {
-        // Normalize newlines and parse the simple YAML produced by generateZonesYaml()
-        const out = [];
-        const norm = String(text || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-        const lines = norm.split("\n");
-
-        let cur = null;
-        let mode = "";
-
-        for (const raw of lines) {
-          const line = raw.trim();
-          if (!line || line.startsWith("#")) continue;
-          if (line === "zones:") continue;
-
-          if (line.startsWith("- id:")) {
-            if (cur) out.push(cur);
-            cur = { id: line.slice(5).trim(), name: "", colorHex: "#0096ff", color: hexToRgba("#0096ff", 0.25), points: [], sensors: [] };
-            mode = "";
-            continue;
-          }
-          if (!cur) continue;
-
-          if (line.startsWith("name:")) {
-            cur.name = line.slice(5).trim().replace(/^\"(.*)\"$/, "$1").replace(/^'(.*)'$/, "$1");
-            continue;
-          }
-          if (line.startsWith("color:")) {
-            cur.colorHex = line.slice(6).trim().replace(/^\"(.*)\"$/, "$1").replace(/^'(.*)'$/, "$1");
-            cur.color = hexToRgba(cur.colorHex || "#0096ff", 0.25);
-            continue;
-          }
-          if (line.startsWith("points:")) { mode = "points"; continue; }
-          if (line.startsWith("sensors:")) { mode = "sensors"; continue; }
-
-          if (mode === "points" && line.startsWith("-")) {
-            const m = line.match(/\[\s*([\d.+-]+)\s*,\s*([\d.+-]+)\s*\]/);
-            if (m) cur.points.push({ x: parseFloat(m[1]), y: parseFloat(m[2]) });
-            continue;
-          }
-
-          if (mode === "sensors" && line.startsWith("-")) {
-            cur.sensors.push(line.slice(1).trim());
-            continue;
-          }
-        }
-
-        if (cur) out.push(cur);
-        return out.filter(z => z && z.id);
-      };
-
       importBtn.onclick = () => importInput.click();
-
-      importInput.onchange = async () => {
-        const file = importInput.files && importInput.files[0];
-        if (!file) return;
-
-        try {
-          const text = await file.text();
-          const incoming = parseZonesExportYaml(text);
-          if (!incoming.length) {
-            alert("Import failed: no zones found in file");
-            return;
-          }
-
-          const replaceAll = confirm("Import zones?\n\nOK = Replace ALL existing zones\nCancel = Merge/replace matching zone IDs");
-          pushUndo();
-
-          if (replaceAll) {
-            zones = incoming;
-          } else {
-            const map = new Map(zones.map(z => [z.id, z]));
-            for (const z of incoming) map.set(z.id, z);
-            zones = Array.from(map.values());
-          }
-
-          saveZones();
-          subscribeHAEntities();
-
-          selectedZoneId = null;
-          isCreatingZone = false;
-          isEditingPoints = false;
-          currentNewZone = null;
-
-          renderZones();
-          renderZonesEditor();
-
-          alert("Import complete: " + incoming.length + " zone(s)");
-        } catch (err) {
-          alert("Import failed: " + (err && err.message ? err.message : err));
-        } finally {
-          importInput.value = "";
-        }
+      importInput.onchange = () => {
+        const file = importInput.files[0]; if (!file) return;
+        const reader = new FileReader();
+        reader.onload = e => { try { importZonesFromYaml(e.target.result); } catch {} };
+        reader.readAsText(file);
       };
     }
-  } catch (e) {
-    console.error("[HA-Overwatch] Import setup failed", e);
   }
 
+  // ── Resize handle (bottom-right corner) ──────────────────
+  const resizeHandle = document.getElementById("zedResizeHandle");
+  if (resizeHandle) {
+    let resizing = false, rsx = 0, rsy = 0, rsw = 0, rsh = 0;
+    resizeHandle.addEventListener("pointerdown", e => {
+      resizing = true; rsx = e.clientX; rsy = e.clientY;
+      rsw = editorSize.w; rsh = editorSize.h;
+      resizeHandle.setPointerCapture(e.pointerId);
+      e.stopPropagation(); e.preventDefault();
+    });
+    resizeHandle.addEventListener("pointermove", e => {
+      if (!resizing) return;
+      editorSize.w = Math.max(480, rsw + (e.clientX - rsx));
+      editorSize.h = Math.max(300, rsh + (e.clientY - rsy));
+      const panel = container.querySelector(".zones-editor");
+      if (panel) { panel.style.width = editorSize.w + "px"; panel.style.height = editorSize.h + "px"; }
+    });
+    resizeHandle.addEventListener("pointerup", () => { resizing = false; });
+  }
 
-  // Make draggable after render
-  makeDraggableEditor();
+  // Restore draggable
+  const titlebar = container.querySelector(".zones-editor-titlebar");
+  if (titlebar && !titlebar._draggableWired) {
+    makeDraggableEditor(container);
+    titlebar._draggableWired = true;
+  }
 }
+
 
 /* ─── DEVICE ROW HELPER ───────────────────────────────────── */
 function deviceRow(entityId, devType) {
@@ -3129,20 +3171,75 @@ function renderStatusDropdown() {
   const body = document.getElementById("statusDropdownBody");
   if (!body) return;
 
-  const armed = isAlarmArmed();
+  const eyeOpen   = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M1 12C1 12 5 5 12 5s11 7 11 7-4 7-11 7S1 12 1 12z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2"/></svg>`;
+  const eyeClosed = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M1 12C1 12 5 5 12 5s11 7 11 7-4 7-11 7S1 12 1 12z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M3 3l18 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>`;
 
-  // SVG eye icons — consistent style for open and closed
-  const eyeOpen   = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-    <path d="M1 12C1 12 5 5 12 5s11 7 11 7-4 7-11 7S1 12 1 12z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-    <circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2"/>
-  </svg>`;
-  const eyeClosed = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-    <path d="M1 12C1 12 5 5 12 5s11 7 11 7-4 7-11 7S1 12 1 12z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-    <path d="M3 3l18 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-  </svg>`;
-
-  // Master hide — hides ALL zones at once
   const allHidden = zones.length > 0 && zones.every(z => z.hidden);
+
+  // Build zone row HTML (shared by group members and ungrouped)
+  function zoneRow(z, indented = false) {
+    const state = getZoneState(z);
+    const isOff = z.enabled === false || !masterEnabled;
+    const isTriggeredZone = state === "triggered";
+    const sensors = z.sensors || [];
+    const anyActive = haConnected && sensors.some(isEntityTriggered);
+    const isDisarmedActive = isOff && anyActive;
+    const dotColour = isTriggeredZone ? "#ff3b30"
+      : isDisarmedActive ? resolveColour(entityTypeColourOff(detectEntityType(sensors.find(isEntityTriggered) || "")))
+      : state === "fault" ? "#ff9500"
+      : isOff ? "#555" : (z.colorHex || "#0096ff");
+    const dotFlashing = isTriggeredZone || isDisarmedActive;
+    const dotOpacity  = (isOff && !isDisarmedActive) ? 0.3 : 1;
+    const stateLabel  = isTriggeredZone ? "triggered" : state === "fault" ? "fault" : isOff ? "disarmed" : "armed";
+    return `
+      <div class="status-dd-zone${indented ? ' status-dd-zone-indented' : ''}" style="">
+        <div class="zone-list-dot${dotFlashing ? ' flashing' : ''}" data-zone-id="${z.id}" style="background:${dotColour};flex-shrink:0;opacity:${dotOpacity};"></div>
+        <span class="status-dd-zname" style="opacity:${z.hidden ? 0.35 : isOff && !isDisarmedActive ? 0.5 : 1}">${escapeHtml(z.name || z.id)}</span>
+        <span class="status-dd-state" style="color:${dotColour};opacity:${isOff && !isDisarmedActive ? 0.4 : 0.8}">${stateLabel}</span>
+        <button class="zone-eye-btn" data-zone-id="${z.id}" title="${z.hidden ? 'Hidden' : 'Visible'}"
+          style="background:none;border:none;padding:0 2px;cursor:pointer;color:${z.hidden ? 'rgba(255,255,255,0.25)' : 'rgba(255,255,255,0.65)'};line-height:0;flex-shrink:0;"
+        >${z.hidden ? eyeClosed : eyeOpen}</button>
+        <label class="zone-toggle-switch" style="flex-shrink:0;">
+          <input type="checkbox" class="zone-enabled-chk" data-zone-id="${z.id}" ${z.enabled !== false ? "checked" : ""} ${!masterEnabled ? "disabled" : ""}>
+          <span class="zone-toggle-track"></span>
+        </label>
+      </div>`;
+  }
+
+  // Build group section
+  function groupSection(g) {
+    const members = (g.zone_ids || []).map(id => zones.find(z => z.id === id)).filter(Boolean);
+    const allArmed    = members.length > 0 && members.every(z => z.enabled !== false && masterEnabled);
+    const allDisarmed = members.length === 0 || members.every(z => z.enabled === false || !masterEnabled);
+    const anyTriggered = members.some(z => getZoneState(z) === "triggered");
+    const allMembHidden = members.length > 0 && members.every(z => z.hidden);
+    // Dot: red static = any armed, red flash = any armed+triggered, blue = all disarmed
+    const gDotColour  = allDisarmed ? "#5ac8fa" : "#ff3b30";
+    const gDotFlash   = !allDisarmed && anyTriggered;
+    const storageKey  = `ddGroup_${g.id}`;
+    const collapsed   = localStorage.getItem(storageKey) === "collapsed";
+    return `
+      <div class="status-dd-group-header" data-group-id="${g.id}" data-storage-key="${storageKey}">
+        <div class="zone-list-dot${gDotFlash ? ' flashing' : ''}" data-group-dot="${g.id}"
+          style="background:${gDotColour};flex-shrink:0;width:8px;height:8px;border-radius:50%;"></div>
+        <span style="flex:1;font-size:11px;font-weight:600;color:#999;letter-spacing:0.04em;">${escapeHtml(g.name || g.id)}</span>
+        <span class="status-dd-state" style="opacity:0;"></span>
+        <button class="zone-eye-btn group-eye-btn" data-group-id="${g.id}" title="${allMembHidden ? 'Show all' : 'Hide all'}"
+          style="background:none;border:none;padding:0 2px;cursor:pointer;color:${allMembHidden ? 'rgba(255,255,255,0.25)' : 'rgba(255,255,255,0.65)'};line-height:0;flex-shrink:0;"
+        >${allMembHidden ? eyeClosed : eyeOpen}</button>
+        <label class="zone-toggle-switch" style="flex-shrink:0;" title="Arm/disarm group">
+          <input type="checkbox" class="group-armed-chk" data-group-id="${g.id}" ${allArmed ? "checked" : ""}>
+          <span class="zone-toggle-track"></span>
+        </label>
+        <span class="status-dd-chevron" style="font-size:10px;color:#555;margin-left:4px;transition:transform 0.2s;display:inline-block;transform:rotate(${collapsed ? '-90' : '0'}deg);">▾</span>
+      </div>
+      <div class="status-dd-group-members" data-group-id="${g.id}" style="${collapsed ? 'display:none;' : ''}">
+        ${members.map(z => zoneRow(z, true)).join("") || `<div style="padding:4px 14px 4px 28px;font-size:11px;color:#444;">No members</div>`}
+      </div>`;
+  }
+
+  const groupedZoneIds = new Set(groups.flatMap(g => g.zone_ids || []));
+  const ungroupedZones = zones.filter(z => !groupedZoneIds.has(z.id));
 
   body.innerHTML = `
     <div class="status-dd-zones">
@@ -3151,75 +3248,77 @@ function renderStatusDropdown() {
         <span style="flex:1;">Master</span>
         <span class="status-dd-state"></span>
         <button class="zone-eye-btn" id="masterEyeBtn"
-          title="${allHidden ? 'All zones hidden — click to show all' : 'Show — click to hide all'}"
           style="background:none;border:none;padding:0 2px;cursor:pointer;color:${allHidden ? 'rgba(255,255,255,0.25)' : 'rgba(255,255,255,0.65)'};line-height:0;flex-shrink:0;"
         >${allHidden ? eyeClosed : eyeOpen}</button>
-        <label class="zone-toggle-switch" style="flex-shrink:0;" title="Arm/disarm all zones">
+        <label class="zone-toggle-switch" style="flex-shrink:0;">
           <input type="checkbox" id="masterToggleChk" ${masterEnabled ? "checked" : ""}>
           <span class="zone-toggle-track"></span>
         </label>
       </div>
-      <div style="height:1px;background:rgba(255,255,255,0.06);margin:0 14px;"></div>
-      ${zones.length === 0
-        ? `<div class="status-dd-empty">No zones configured</div>`
-        : zones.map(z => {
-            const state  = getZoneState(z);
-            const isOff  = z.enabled === false || !masterEnabled;
-            const isTriggeredZone = state === "triggered";
-            // Check raw sensor activity even when disarmed
-            const sensors = z.sensors || [];
-            const anyActive = haConnected && sensors.some(isEntityTriggered);
-            const isDisarmedActive = isOff && anyActive;
-            // Dot colour:
-            // - Triggered (armed) → red flash
-            // - Active while disarmed → off-colour flash
-            // - Fault → amber
-            // - Disarmed clear → grey dim
-            // - Armed clear → zone colour
-            const dotColour = isTriggeredZone
-              ? "#ff3b30"
-              : isDisarmedActive
-              ? resolveColour(entityTypeColourOff(detectEntityType(sensors.find(isEntityTriggered) || "")))
-              : state === "fault" ? "#ff9500"
-              : isOff ? "#555"
-              : (z.colorHex || "#0096ff");
-            const dotFlashing = isTriggeredZone || isDisarmedActive;
-            const dotOpacity  = (isOff && !isDisarmedActive) ? 0.3 : 1;
-            const colour = dotColour;
-            const stateLabel = isTriggeredZone ? "triggered"
-                             : state === "fault"     ? "fault"
-                             : isOff                 ? "disarmed"
-                             : "armed";
-            return `
-              <div class="status-dd-zone">
-                <div class="zone-list-dot${dotFlashing ? ' flashing' : ''}" data-zone-id="${z.id}" style="background:${dotColour};flex-shrink:0;opacity:${dotOpacity};"></div>
-                <span class="status-dd-zname" style="opacity:${z.hidden ? 0.35 : isOff && !isDisarmedActive ? 0.5 : 1}">${escapeHtml(z.name || z.id)}</span>
-                <span class="status-dd-state" style="color:${colour};opacity:${isOff && !isDisarmedActive ? 0.4 : 0.8}">${stateLabel}</span>
-                <button class="zone-eye-btn" data-zone-id="${z.id}"
-                  title="${z.hidden ? 'Hidden — click to show' : 'Visible — click to hide'}"
-                  style="background:none;border:none;padding:0 2px;cursor:pointer;color:${z.hidden ? 'rgba(255,255,255,0.25)' : 'rgba(255,255,255,0.65)'};line-height:0;flex-shrink:0;"
-                >${z.hidden ? eyeClosed : eyeOpen}</button>
-                <label class="zone-toggle-switch" style="flex-shrink:0;" title="Arm/disarm this zone">
-                  <input type="checkbox" class="zone-enabled-chk" data-zone-id="${z.id}" ${z.enabled !== false ? "checked" : ""} ${!masterEnabled ? "disabled" : ""}>
-                  <span class="zone-toggle-track"></span>
-                </label>
-              </div>`;
-          }).join("")}
+      <div style="height:1px;background:rgba(255,255,255,0.06);margin:0 14px 4px;"></div>
+      ${groups.map(g => groupSection(g)).join("")}
+      ${ungroupedZones.length > 0 ? `
+        <div class="status-dd-group-header ungrouped-header" data-group-id="__ungrouped" data-storage-key="ddGroup___ungrouped">
+          <div style="width:8px;height:8px;flex-shrink:0;"></div>
+          <span style="flex:1;font-size:11px;font-weight:600;color:#666;letter-spacing:0.04em;">Ungrouped</span>
+          <span class="status-dd-state" style="opacity:0;"></span>
+          <div style="width:18px;flex-shrink:0;"></div>
+          <div style="width:36px;flex-shrink:0;"></div>
+          <span class="status-dd-chevron" style="font-size:10px;color:#555;margin-left:4px;transition:transform 0.2s;display:inline-block;transform:rotate(${localStorage.getItem('ddGroup___ungrouped') === 'collapsed' ? '-90' : '0'}deg);">▾</span>
+        </div>
+        <div class="status-dd-group-members" data-group-id="__ungrouped" style="${localStorage.getItem('ddGroup___ungrouped') === 'collapsed' ? 'display:none;' : ''}">
+          ${ungroupedZones.map(z => zoneRow(z, false)).join("")}
+        </div>` : ""}
+      ${zones.length === 0 ? `<div class="status-dd-empty">No zones configured</div>` : ""}
     </div>
   `;
 
-  document.getElementById("masterToggleChk")?.addEventListener("change", e => {
-    setMasterEnabled(e.target.checked);
-  });
+  // Master toggle
+  document.getElementById("masterToggleChk")?.addEventListener("change", e => setMasterEnabled(e.target.checked));
 
-  // Master eye — toggle visibility of all zones at once
+  // Master eye
   document.getElementById("masterEyeBtn")?.addEventListener("click", e => {
     e.stopPropagation();
     const anyVisible = zones.some(z => !z.hidden);
     zones.forEach(z => setZoneHidden(z.id, anyVisible));
   });
 
-  body.querySelectorAll(".zone-eye-btn").forEach(btn => {
+  // Group header collapse toggle
+  body.querySelectorAll(".status-dd-group-header").forEach(hdr => {
+    hdr.addEventListener("click", e => {
+      if (e.target.closest("button,input,label")) return;
+      const gid = hdr.dataset.groupId;
+      const key = hdr.dataset.storageKey;
+      const membersEl = body.querySelector(`.status-dd-group-members[data-group-id="${gid}"]`);
+      const chevron = hdr.querySelector(".status-dd-chevron");
+      if (!membersEl) return;
+      const collapsed = membersEl.style.display === "none";
+      membersEl.style.display = collapsed ? "" : "none";
+      if (chevron) chevron.style.transform = `rotate(${collapsed ? "0" : "-90"}deg)`;
+      localStorage.setItem(key, collapsed ? "expanded" : "collapsed");
+    });
+  });
+
+  // Group eye buttons
+  body.querySelectorAll(".group-eye-btn").forEach(btn => {
+    btn.addEventListener("click", e => {
+      e.stopPropagation();
+      const gid = btn.dataset.groupId;
+      const group = groups.find(g => g.id === gid);
+      if (!group) return;
+      const members = (group.zone_ids || []).map(id => zones.find(z => z.id === id)).filter(Boolean);
+      const anyVisible = members.some(z => !z.hidden);
+      members.forEach(z => setZoneHidden(z.id, anyVisible));
+    });
+  });
+
+  // Group arm toggles
+  body.querySelectorAll(".group-armed-chk").forEach(chk => {
+    chk.addEventListener("change", e => setGroupArmed(e.target.dataset.groupId, e.target.checked));
+  });
+
+  // Zone eye buttons
+  body.querySelectorAll(".zone-eye-btn[data-zone-id]").forEach(btn => {
     btn.addEventListener("click", e => {
       e.stopPropagation();
       const zone = zones.find(z => z.id === btn.dataset.zoneId);
@@ -3227,10 +3326,9 @@ function renderStatusDropdown() {
     });
   });
 
+  // Zone arm toggles
   body.querySelectorAll(".zone-enabled-chk").forEach(chk => {
-    chk.addEventListener("change", e => {
-      setZoneEnabled(e.target.dataset.zoneId, e.target.checked);
-    });
+    chk.addEventListener("change", e => setZoneEnabled(e.target.dataset.zoneId, e.target.checked));
   });
 }
 
@@ -3383,6 +3481,7 @@ async function init() {
   bindSearchUI();
 
   await loadZones();
+  await loadGroups();
   bindZonesSvgEvents();
   renderZonesEditor();
   renderZones();
