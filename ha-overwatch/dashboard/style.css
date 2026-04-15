@@ -1451,7 +1451,7 @@ display: flex;
 .zone-toggle-switch {
   position: relative;
   display: inline-block;
-  width: 38px;
+  width: 40px;
   height: 22px;
   cursor: pointer;
   flex-shrink: 0;
@@ -1464,7 +1464,7 @@ display: flex;
 }
 .zone-toggle-track {
   position: absolute;
-  inset: 0;
+  top: 0; left: 0; right: 0; bottom: 0;
   background: #333;
   border-radius: 22px;
   transition: background 0.2s;
@@ -1485,7 +1485,7 @@ display: flex;
 }
 .zone-toggle-switch input:checked + .zone-toggle-track::after {
   background: #32d74b;
-  transform: translateX(16px);  /* 38 - 3 - 3 - 16 = 16 */
+  transform: translateX(18px);  /* 40 - 3 - 3 - 16 = 18 */
 }
 .zone-toggle-switch input:disabled + .zone-toggle-track {
   opacity: 0.4;
@@ -1579,7 +1579,7 @@ display: flex;
 }
 .status-dd-zone:hover { background: rgba(255,255,255,0.04); }
 .status-dd-zone-indented {
-  padding-left: 24px;
+  padding-left: 30px; /* chevron(10) + gap(8) + dot(8) + gap(8) - outer-padding(14) = 30 */
 }
 .status-dd-group-header {
   display: flex;
@@ -1595,6 +1595,11 @@ display: flex;
 .status-dd-group-header.ungrouped-header {
   border-top: 1px solid rgba(255,255,255,0.06);
   margin-top: 4px;
+}
+/* Polygon highlight when group selected in editor */
+.zone-polygon.group-highlight {
+  stroke-width: 2px !important;
+  opacity: 0.75 !important;
 }
 .status-dd-zname {
   font-size: 12px;

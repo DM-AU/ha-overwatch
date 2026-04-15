@@ -1037,8 +1037,11 @@ function renderZones() {
     const pts = zone.points || [];
     if (!pts.length) return;
 
-    const isSelected   = zone.id === selectedZoneId;
-    const isHighlight  = showHighlight && zone.id === highlightedZoneId;
+    const isSelected     = zone.id === selectedZoneId;
+    const isHighlight    = showHighlight && zone.id === highlightedZoneId;
+    // Highlight all member zones when a group is selected in editor
+    const selectedGrp    = selectedGroupId ? groups.find(g => g.id === selectedGroupId) : null;
+    const isGroupMember  = editorMode && selectedGrp && (selectedGrp.zone_ids || []).includes(zone.id);
     const zoneState    = getZoneState(zone);
     const isDisabled   = zoneState === "disabled";
     const isHidden     = zone.hidden === true;
@@ -1063,12 +1066,20 @@ function renderZones() {
     let cls = "zone-polygon";
     if (editorMode && isSelected) cls += " selected";
     if (isHighlight) cls += " zone-highlight";
+    if (isGroupMember) cls += " group-highlight";
     poly.setAttribute("class", cls);
 
     if (isHighlight) {
       // Search highlight: soft amber fill, soft stroke
       poly.style.fill        = "rgba(255,204,0,0.22)";
       poly.style.stroke      = "rgba(255,204,0,0.5)";
+      poly.style.strokeWidth = String(1.5 / zoom.scale);
+
+    } else if (isGroupMember && editorMode) {
+      // Group member: strong fill to make members obvious when group is selected
+      const hex = zone.colorHex || "#0096ff";
+      poly.style.fill        = hexToRgba(hex, 0.55);
+      poly.style.stroke      = hexToRgba(hex, 0.85);
       poly.style.strokeWidth = String(1.5 / zoom.scale);
 
     } else if (isHidden && editorMode) {
@@ -1363,7 +1374,7 @@ function renderZonesEditor() {
             </label>
           </div>
           <div style="font-size:11px;color:#666;margin-top:4px;">Members</div>
-          <div id="groupMemberList" style="border:1px solid #222;border-radius:8px;padding:4px;max-height:120px;overflow-y:auto;">
+          <div id="groupMemberList" style="border:1px solid #222;border-radius:8px;padding:4px;flex:1;overflow-y:auto;">
             ${zones.map(z => {
               const inGroup = (selectedGroup.zone_ids || []).includes(z.id);
               return `<label style="display:flex;align-items:center;gap:6px;padding:4px 6px;cursor:pointer;border-radius:6px;">
@@ -1372,9 +1383,6 @@ function renderZonesEditor() {
                 <span style="font-size:12px;color:#ccc;">${escapeHtml(z.name || z.id)}</span>
               </label>`;
             }).join("")}
-          </div>
-          <div style="margin-top:auto;padding-top:8px;">
-            <button id="deleteGroupBtn" class="danger" style="width:100%;">Delete Group</button>
           </div>
         </div>`;
     }
@@ -1410,14 +1418,14 @@ function renderZonesEditor() {
               : `<svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M1 12C1 12 5 5 12 5s11 7 11 7-4 7-11 7S1 12 1 12z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2"/></svg>`
             }</button>
           </div>
-          <div class="ha-section" style="margin-top:2px;">
+          <div class="ha-section" style="margin-top:2px;flex:1;display:flex;flex-direction:column;">
             <div class="ha-device-tabs" id="haDeviceTabs">
               <button class="ha-device-tab active" data-tab="sensors">Sensors</button>
               <button class="ha-device-tab" data-tab="cameras">Cameras</button>
               <button class="ha-device-tab" data-tab="lights">Lights</button>
               <button class="ha-device-tab" data-tab="sirens">Sirens</button>
             </div>
-            <div class="ha-tab-panel" id="tabPanel_sensors">
+            <div class="ha-tab-panel" id="tabPanel_sensors" style="flex:1;overflow-y:auto;">
               <div class="entity-search-wrap"><input type="text" id="entitySearchInput" class="entity-search-input" placeholder="Search HA entities…" autocomplete="off">
               <div class="entity-search-results" id="entitySearchResults" style="display:none;"></div></div>
               <div class="ha-entity-list" id="zoneEntityList">${(selectedZone.sensors||[]).map(e=>deviceRow(e,"sensors")).join("")}</div>
@@ -1441,8 +1449,8 @@ function renderZonesEditor() {
         </div>`;
     }
 
-    // Nothing selected
-    return `<div class="zed-right-empty">Select a zone or group to configure</div>`;
+    // Nothing selected — hide right panel
+    return ``;
   }
 
   container.innerHTML = `
@@ -1456,17 +1464,15 @@ function renderZonesEditor() {
         <div class="zed-left">
           <div class="zed-list" id="zonesList">${buildZoneList()}</div>
           <div class="zed-actions">
-            <button id="addGroupBtn" title="Add Group">+ Group</button>
+            <button id="addGroupBtn">+ Group</button>
             <button id="addZoneBtn">+ Zone</button>
             ${selectedZone ? `<button id="editPointsBtn" style="${isEditingPoints ? 'border-color:rgba(255,204,0,0.5);color:#ffcc00;' : ''}">${editPtsLabel}</button>` : ""}
-            <button id="deleteZoneBtn" class="danger" ${selectedZone || selectedGroup ? "" : "disabled"}
-              title="${selectedGroup && !selectedZone ? 'Delete Group' : 'Delete Zone'}">Delete</button>
+            ${(selectedZone || selectedGroup) ? `<button id="deleteZoneBtn" class="danger">Delete</button>` : ""}
           </div>
         </div>
-        <!-- RIGHT PANEL -->
-        <div class="zed-right">${buildRightPanel()}</div>
+        <!-- RIGHT PANEL — hidden border when empty -->
+        <div class="zed-right" style="${(!selectedZone && !selectedGroup) ? 'border-left:none;' : ''}">${buildRightPanel()}</div>
       </div>
-      <!-- Resize handle -->
       <div class="zed-resize-handle" id="zedResizeHandle"></div>
     </div>
   `;
@@ -1868,7 +1874,8 @@ function bindZonesSvgEvents() {
     }
 
     // 5) Empty canvas click — deselect BUT let the event propagate so bindPan can pan
-    selectedZoneId = null;
+    selectedZoneId  = null;
+    selectedGroupId = null;
     isEditingPoints = false;
     renderZones();
     renderZonesEditor();
@@ -3192,11 +3199,11 @@ function renderStatusDropdown() {
     const dotOpacity  = (isOff && !isDisarmedActive) ? 0.3 : 1;
     const stateLabel  = isTriggeredZone ? "triggered" : state === "fault" ? "fault" : isOff ? "disarmed" : "armed";
     return `
-      <div class="status-dd-zone${indented ? ' status-dd-zone-indented' : ''}" style="">
+      <div class="status-dd-zone status-dd-zone-indented">
         <div class="zone-list-dot${dotFlashing ? ' flashing' : ''}" data-zone-id="${z.id}" style="background:${dotColour};flex-shrink:0;opacity:${dotOpacity};"></div>
         <span class="status-dd-zname" style="opacity:${z.hidden ? 0.35 : isOff && !isDisarmedActive ? 0.5 : 1}">${escapeHtml(z.name || z.id)}</span>
         <span class="status-dd-state" style="color:${dotColour};opacity:${isOff && !isDisarmedActive ? 0.4 : 0.8}">${stateLabel}</span>
-        <button class="zone-eye-btn" data-zone-id="${z.id}" title="${z.hidden ? 'Hidden' : 'Visible'}"
+        <button class="zone-eye-btn" data-zone-id="${z.id}"
           style="background:none;border:none;padding:0 2px;cursor:pointer;color:${z.hidden ? 'rgba(255,255,255,0.25)' : 'rgba(255,255,255,0.65)'};line-height:0;flex-shrink:0;"
         >${z.hidden ? eyeClosed : eyeOpen}</button>
         <label class="zone-toggle-switch" style="flex-shrink:0;">
@@ -3213,28 +3220,56 @@ function renderStatusDropdown() {
     const allDisarmed = members.length === 0 || members.every(z => z.enabled === false || !masterEnabled);
     const anyTriggered = members.some(z => getZoneState(z) === "triggered");
     const allMembHidden = members.length > 0 && members.every(z => z.hidden);
-    // Dot: red static = any armed, red flash = any armed+triggered, blue = all disarmed
     const gDotColour  = allDisarmed ? "#5ac8fa" : "#ff3b30";
     const gDotFlash   = !allDisarmed && anyTriggered;
     const storageKey  = `ddGroup_${g.id}`;
     const collapsed   = localStorage.getItem(storageKey) === "collapsed";
     return `
       <div class="status-dd-group-header" data-group-id="${g.id}" data-storage-key="${storageKey}">
+        <span class="status-dd-chevron" style="font-size:9px;color:#555;width:10px;flex-shrink:0;transition:transform 0.2s;display:inline-block;transform:rotate(${collapsed ? '-90' : '0'}deg);">▾</span>
         <div class="zone-list-dot${gDotFlash ? ' flashing' : ''}" data-group-dot="${g.id}"
           style="background:${gDotColour};flex-shrink:0;width:8px;height:8px;border-radius:50%;"></div>
         <span style="flex:1;font-size:11px;font-weight:600;color:#999;letter-spacing:0.04em;">${escapeHtml(g.name || g.id)}</span>
-        <span class="status-dd-state" style="opacity:0;"></span>
-        <button class="zone-eye-btn group-eye-btn" data-group-id="${g.id}" title="${allMembHidden ? 'Show all' : 'Hide all'}"
+        <span class="status-dd-state" style="opacity:0;user-select:none;">——</span>
+        <button class="zone-eye-btn group-eye-btn" data-group-id="${g.id}"
           style="background:none;border:none;padding:0 2px;cursor:pointer;color:${allMembHidden ? 'rgba(255,255,255,0.25)' : 'rgba(255,255,255,0.65)'};line-height:0;flex-shrink:0;"
         >${allMembHidden ? eyeClosed : eyeOpen}</button>
-        <label class="zone-toggle-switch" style="flex-shrink:0;" title="Arm/disarm group">
+        <label class="zone-toggle-switch" style="flex-shrink:0;">
           <input type="checkbox" class="group-armed-chk" data-group-id="${g.id}" ${allArmed ? "checked" : ""}>
           <span class="zone-toggle-track"></span>
         </label>
-        <span class="status-dd-chevron" style="font-size:10px;color:#555;margin-left:4px;transition:transform 0.2s;display:inline-block;transform:rotate(${collapsed ? '-90' : '0'}deg);">▾</span>
       </div>
       <div class="status-dd-group-members" data-group-id="${g.id}" style="${collapsed ? 'display:none;' : ''}">
-        ${members.map(z => zoneRow(z, true)).join("") || `<div style="padding:4px 14px 4px 28px;font-size:11px;color:#444;">No members</div>`}
+        ${members.map(z => zoneRow(z, true)).join("") || `<div style="padding:4px 14px 4px 32px;font-size:11px;color:#444;">No members</div>`}
+      </div>`;
+  }
+
+  function ungroupedSection(ungroupedZones) {
+    const storageKey  = "ddGroup___ungrouped";
+    const collapsed   = localStorage.getItem(storageKey) === "collapsed";
+    const allArmed    = ungroupedZones.length > 0 && ungroupedZones.every(z => z.enabled !== false && masterEnabled);
+    const allDisarmed = ungroupedZones.every(z => z.enabled === false || !masterEnabled);
+    const anyTriggered = ungroupedZones.some(z => getZoneState(z) === "triggered");
+    const allHidn     = ungroupedZones.length > 0 && ungroupedZones.every(z => z.hidden);
+    const dotColour   = allDisarmed ? "#5ac8fa" : "#ff3b30";
+    const dotFlash    = !allDisarmed && anyTriggered;
+    return `
+      <div class="status-dd-group-header ungrouped-header" data-group-id="__ungrouped" data-storage-key="${storageKey}">
+        <span class="status-dd-chevron" style="font-size:9px;color:#555;width:10px;flex-shrink:0;transition:transform 0.2s;display:inline-block;transform:rotate(${collapsed ? '-90' : '0'}deg);">▾</span>
+        <div class="zone-list-dot${dotFlash ? ' flashing' : ''}" data-group-dot="__ungrouped"
+          style="background:${dotColour};flex-shrink:0;width:8px;height:8px;border-radius:50%;"></div>
+        <span style="flex:1;font-size:11px;font-weight:600;color:#666;letter-spacing:0.04em;">Ungrouped</span>
+        <span class="status-dd-state" style="opacity:0;user-select:none;">——</span>
+        <button class="zone-eye-btn ungrouped-eye-btn"
+          style="background:none;border:none;padding:0 2px;cursor:pointer;color:${allHidn ? 'rgba(255,255,255,0.25)' : 'rgba(255,255,255,0.65)'};line-height:0;flex-shrink:0;"
+        >${allHidn ? eyeClosed : eyeOpen}</button>
+        <label class="zone-toggle-switch" style="flex-shrink:0;">
+          <input type="checkbox" class="ungrouped-armed-chk" ${allArmed ? "checked" : ""}>
+          <span class="zone-toggle-track"></span>
+        </label>
+      </div>
+      <div class="status-dd-group-members" data-group-id="__ungrouped" style="${collapsed ? 'display:none;' : ''}">
+        ${ungroupedZones.map(z => zoneRow(z, true)).join("")}
       </div>`;
   }
 
@@ -3244,9 +3279,10 @@ function renderStatusDropdown() {
   body.innerHTML = `
     <div class="status-dd-zones">
       <div class="status-dd-master">
+        <span style="width:10px;flex-shrink:0;"></span>
         <div style="width:8px;height:8px;flex-shrink:0;"></div>
-        <span style="flex:1;">Master</span>
-        <span class="status-dd-state"></span>
+        <span style="flex:1;font-size:11px;font-weight:600;color:#aaa;">Master</span>
+        <span class="status-dd-state" style="opacity:0;user-select:none;">——</span>
         <button class="zone-eye-btn" id="masterEyeBtn"
           style="background:none;border:none;padding:0 2px;cursor:pointer;color:${allHidden ? 'rgba(255,255,255,0.25)' : 'rgba(255,255,255,0.65)'};line-height:0;flex-shrink:0;"
         >${allHidden ? eyeClosed : eyeOpen}</button>
@@ -3257,18 +3293,7 @@ function renderStatusDropdown() {
       </div>
       <div style="height:1px;background:rgba(255,255,255,0.06);margin:0 14px 4px;"></div>
       ${groups.map(g => groupSection(g)).join("")}
-      ${ungroupedZones.length > 0 ? `
-        <div class="status-dd-group-header ungrouped-header" data-group-id="__ungrouped" data-storage-key="ddGroup___ungrouped">
-          <div style="width:8px;height:8px;flex-shrink:0;"></div>
-          <span style="flex:1;font-size:11px;font-weight:600;color:#666;letter-spacing:0.04em;">Ungrouped</span>
-          <span class="status-dd-state" style="opacity:0;"></span>
-          <div style="width:18px;flex-shrink:0;"></div>
-          <div style="width:36px;flex-shrink:0;"></div>
-          <span class="status-dd-chevron" style="font-size:10px;color:#555;margin-left:4px;transition:transform 0.2s;display:inline-block;transform:rotate(${localStorage.getItem('ddGroup___ungrouped') === 'collapsed' ? '-90' : '0'}deg);">▾</span>
-        </div>
-        <div class="status-dd-group-members" data-group-id="__ungrouped" style="${localStorage.getItem('ddGroup___ungrouped') === 'collapsed' ? 'display:none;' : ''}">
-          ${ungroupedZones.map(z => zoneRow(z, false)).join("")}
-        </div>` : ""}
+      ${ungroupedZones.length > 0 ? ungroupedSection(ungroupedZones) : ""}
       ${zones.length === 0 ? `<div class="status-dd-empty">No zones configured</div>` : ""}
     </div>
   `;
@@ -3315,6 +3340,22 @@ function renderStatusDropdown() {
   // Group arm toggles
   body.querySelectorAll(".group-armed-chk").forEach(chk => {
     chk.addEventListener("change", e => setGroupArmed(e.target.dataset.groupId, e.target.checked));
+  });
+
+  // Ungrouped eye toggle
+  body.querySelector(".ungrouped-eye-btn")?.addEventListener("click", e => {
+    e.stopPropagation();
+    const groupedIds = new Set(groups.flatMap(g => g.zone_ids || []));
+    const ung = zones.filter(z => !groupedIds.has(z.id));
+    const anyVisible = ung.some(z => !z.hidden);
+    ung.forEach(z => setZoneHidden(z.id, anyVisible));
+  });
+
+  // Ungrouped arm toggle
+  body.querySelector(".ungrouped-armed-chk")?.addEventListener("change", e => {
+    const groupedIds = new Set(groups.flatMap(g => g.zone_ids || []));
+    const ung = zones.filter(z => !groupedIds.has(z.id));
+    ung.forEach(z => setZoneEnabled(z.id, e.target.checked));
   });
 
   // Zone eye buttons
