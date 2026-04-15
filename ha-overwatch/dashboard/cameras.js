@@ -40,11 +40,11 @@ function waitForOW(cb, attempts = 0) {
 
 /* ── HA camera snapshot URL ─────────────────────────────────── */
 function camSnapshotUrl(entityId) {
-  // Use relative URL — the <base> tag injected by server.js resolves it
-  // correctly through HA ingress automatically.
-  // In standalone mode, fall back to ha_url.
+  // Route through our server's /ow/camera_proxy which adds Bearer auth token.
+  // In add-on mode: use relative path (base tag handles ingress prefix).
+  // In standalone mode: use absolute path via ha_url.
   if (window.OW.isAddonMode) {
-    return `api/camera_proxy/${entityId}?t=${Date.now()}`;
+    return `ow/camera_proxy/${entityId}?t=${Date.now()}`;
   }
   const haUrl = (window.OW.uiConfig.ha_url || '').replace(/\/$/, '');
   return `${haUrl}/api/camera_proxy/${entityId}?t=${Date.now()}`;
@@ -52,7 +52,7 @@ function camSnapshotUrl(entityId) {
 
 function camStreamUrl(entityId) {
   if (window.OW.isAddonMode) {
-    return `api/camera_proxy_stream/${entityId}`;
+    return `ow/camera_proxy_stream/${entityId}`;
   }
   const haUrl = (window.OW.uiConfig.ha_url || '').replace(/\/$/, '');
   return `${haUrl}/api/camera_proxy_stream/${entityId}`;
@@ -460,25 +460,24 @@ function renderCameraStatusBar() {
     });
   });
 
-  document.getElementById('camSnapBtn')?.addEventListener('click', () => {
+  const snapBtn = document.getElementById('camSnapBtn');
+  const liveBtn = document.getElementById('camLiveBtn');
+  if (snapBtn) snapBtn.onclick = () => {
     camMode = 'snapshot';
-    // Re-render all tiles with snapshot images
     const grid = document.getElementById('cameraGrid');
     if (grid) grid.innerHTML = '';
     renderCameraGrid();
     startSnapshotRefresh();
     renderCameraStatusBar();
-  });
-
-  document.getElementById('camLiveBtn')?.addEventListener('click', () => {
+  };
+  if (liveBtn) liveBtn.onclick = () => {
     camMode = 'live';
     stopSnapshotRefresh();
-    // Re-render tiles with live streams
     const grid = document.getElementById('cameraGrid');
     if (grid) grid.innerHTML = '';
     renderCameraGrid();
     renderCameraStatusBar();
-  });
+  };
 }
 
 /* ── Utility ─────────────────────────────────────────────────── */
