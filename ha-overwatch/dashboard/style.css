@@ -1581,7 +1581,7 @@ display: flex;
 }
 .status-dd-zone:hover { background: rgba(255,255,255,0.04); }
 .status-dd-zone.status-dd-zone-indented {
-  padding-left: 36px;
+  padding-left: 52px;
 }
 .status-dd-group-header {
   display: flex;

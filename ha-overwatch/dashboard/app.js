@@ -590,6 +590,7 @@ function groupFilename(id) { return `group_${id}.yaml`; }
 function groupToYaml(g) {
   let out = `id: ${g.id}\n`;
   out += `name: "${(g.name || "").replace(/"/g, '\\"')}"\n`;
+  out += `color: "${g.colorHex || "#ff3b30"}"\n`;
   out += `zone_ids:\n`;
   (g.zone_ids || []).forEach(id => { out += ` - ${id}\n`; });
   return out;
@@ -611,8 +612,9 @@ function parseGroupYaml(text) {
       const ci = line.indexOf(":");
       const key = line.slice(0, ci).trim();
       let val = line.slice(ci + 1).trim().replace(/^"(.*)"$/, "$1");
-      if (key === "id")   g.id   = val;
-      if (key === "name") g.name = val;
+      if (key === "id")    g.id    = val;
+      if (key === "name")  g.name  = val;
+      if (key === "color") g.colorHex = val;
     }
   }
   return g;
@@ -1079,10 +1081,10 @@ function renderZones() {
       poly.style.strokeWidth = String(1.5 / zoom.scale);
 
     } else if (isGroupMember && editorMode) {
-      // Group member: very strong fill so members are unmistakably obvious
-      const hex = zone.colorHex || "#0096ff";
-      poly.style.fill        = hexToRgba(hex, 0.72);
-      poly.style.stroke      = hexToRgba(hex, 1.0);
+      // Group member: highlighted in the GROUP's colour, not the zone's own colour
+      const grpHex = selectedGrp.colorHex || "#ff3b30";
+      poly.style.fill        = hexToRgba(grpHex, 0.55);
+      poly.style.stroke      = grpHex;
       poly.style.strokeWidth = String(2.5 / zoom.scale);
 
     } else if (isHidden && editorMode) {
@@ -1325,13 +1327,15 @@ function renderZonesEditor() {
     sortedGroups.forEach(g => {
       const gSel = g.id === selectedGroupId;
       const gState = getGroupState(g);
-      const gColour = gState.anyTriggered ? "#ff3b30" : gState.anyArmed ? "#ff3b30" : "#555";
+      const gHex    = g.colorHex || "#ff3b30";
+      const gColour = gState.anyTriggered ? "#ff3b30" : gState.anyArmed ? gHex : gHex;
+      const gOpacity = gState.anyArmed ? 1 : 0.35;
       const gFlash  = gState.anyTriggered;
       const storageKey = `zedGroup_${g.id}`;
       const collapsed  = localStorage.getItem(storageKey) === "collapsed";
       html += `
         <div class="zed-group-header ${gSel ? 'selected' : ''}" data-group-id="${g.id}" data-storage-key="${storageKey}">
-          <div class="zone-list-dot${gFlash ? ' flashing' : ''}" style="background:${gColour};width:6px;height:6px;flex-shrink:0;"></div>
+          <div class="zone-list-dot${gFlash ? ' flashing' : ''}" style="background:${gColour};opacity:${gOpacity};width:6px;height:6px;flex-shrink:0;"></div>
           <span style="flex:1;font-size:11px;font-weight:600;color:#999;text-transform:uppercase;letter-spacing:0.06em;">${escapeHtml(g.name || g.id)}</span>
           <span class="zed-chevron" style="font-size:11px;color:#555;transition:transform 0.2s;display:inline-block;transform:rotate(${collapsed ? '-90' : '0'}deg);">▾</span>
         </div>
@@ -1378,6 +1382,9 @@ function renderZonesEditor() {
         <div class="zed-right-content">
           <div class="zones-editor-row"><label>Group Name</label>
             <input type="text" id="groupNameInput" value="${escapeHtml(selectedGroup.name || "")}" placeholder="Group name">
+          </div>
+          <div class="zones-editor-row"><label>Colour</label>
+            <input type="color" id="groupColorInput" value="${selectedGroup.colorHex || '#ff3b30'}">
           </div>
           <div class="zones-editor-row" style="align-items:center;">
             <label>Group Armed</label>
@@ -1540,7 +1547,7 @@ function renderZonesEditor() {
   // Add Group
   document.getElementById("addGroupBtn")?.addEventListener("click", () => {
     const id = "grp_" + Date.now();
-    const ng = { id, name: "New Group", zone_ids: [] };
+    const ng = { id, name: "New Group", colorHex: "#ff3b30", zone_ids: [] };
     groups.push(ng);
     selectedGroupId = id; selectedZoneId = null;
     saveGroup(ng); renderZonesEditor();
@@ -1576,6 +1583,13 @@ function renderZonesEditor() {
     document.getElementById("groupNameInput")?.addEventListener("input", e => {
       selectedGroup.name = e.target.value;
       saveGroup(selectedGroup);
+      renderZonesEditor();
+    });
+
+    document.getElementById("groupColorInput")?.addEventListener("input", e => {
+      selectedGroup.colorHex = e.target.value;
+      saveGroup(selectedGroup);
+      renderZones();
       renderZonesEditor();
     });
 
@@ -3256,7 +3270,9 @@ function renderStatusDropdown() {
     const allDisarmed = members.length === 0 || members.every(z => z.enabled === false || !masterEnabled);
     const anyTriggered = members.some(z => getZoneState(z) === "triggered");
     const allMembHidden = members.length > 0 && members.every(z => z.hidden);
-    const gDotColour  = allDisarmed ? "#5ac8fa" : "#ff3b30";
+    const gHex        = g.colorHex || "#ff3b30";
+    const gDotColour  = anyTriggered ? "#ff3b30" : gHex;
+    const gDotOpacity = allDisarmed ? 0.35 : 1;
     const gDotFlash   = !allDisarmed && anyTriggered;
     const storageKey  = `ddGroup_${g.id}`;
     const collapsed   = localStorage.getItem(storageKey) === "collapsed";
@@ -3264,7 +3280,7 @@ function renderStatusDropdown() {
       <div class="status-dd-group-header" data-group-id="${g.id}" data-storage-key="${storageKey}">
         <span class="status-dd-chevron" style="font-size:9px;color:#555;width:10px;flex-shrink:0;transition:transform 0.2s;display:inline-block;transform:rotate(${collapsed ? '-90' : '0'}deg);">▾</span>
         <div class="zone-list-dot${gDotFlash ? ' flashing' : ''}" data-group-dot="${g.id}"
-          style="background:${gDotColour};flex-shrink:0;width:8px;height:8px;border-radius:50%;"></div>
+          style="background:${gDotColour};opacity:${gDotOpacity};flex-shrink:0;width:8px;height:8px;border-radius:50%;"></div>
         <span style="flex:1;font-size:11px;font-weight:600;color:#999;letter-spacing:0.04em;">${escapeHtml(g.name || g.id)}</span>
         <span class="status-dd-state" style="opacity:0;user-select:none;">——</span>
         <button class="zone-eye-btn group-eye-btn" data-group-id="${g.id}"
@@ -3287,13 +3303,14 @@ function renderStatusDropdown() {
     const allDisarmed = ungroupedZones.every(z => z.enabled === false || !masterEnabled);
     const anyTriggered = ungroupedZones.some(z => getZoneState(z) === "triggered");
     const allHidn     = ungroupedZones.length > 0 && ungroupedZones.every(z => z.hidden);
-    const dotColour   = allDisarmed ? "#5ac8fa" : "#ff3b30";
+    const dotColour   = anyTriggered ? "#ff3b30" : "#888";
+    const dotOpacity  = allDisarmed ? 0.35 : 1;
     const dotFlash    = !allDisarmed && anyTriggered;
     return `
       <div class="status-dd-group-header ungrouped-header" data-group-id="__ungrouped" data-storage-key="${storageKey}">
         <span class="status-dd-chevron" style="font-size:9px;color:#555;width:10px;flex-shrink:0;transition:transform 0.2s;display:inline-block;transform:rotate(${collapsed ? '-90' : '0'}deg);">▾</span>
         <div class="zone-list-dot${dotFlash ? ' flashing' : ''}" data-group-dot="__ungrouped"
-          style="background:${dotColour};flex-shrink:0;width:8px;height:8px;border-radius:50%;"></div>
+          style="background:${dotColour};opacity:${dotOpacity};flex-shrink:0;width:8px;height:8px;border-radius:50%;"></div>
         <span style="flex:1;font-size:11px;font-weight:600;color:#666;letter-spacing:0.04em;">Ungrouped</span>
         <span class="status-dd-state" style="opacity:0;user-select:none;">——</span>
         <button class="zone-eye-btn ungrouped-eye-btn"
