@@ -1159,10 +1159,11 @@ function renderZones() {
     poly.setAttribute("class", cls);
 
     if (isHighlight) {
-      // Search highlight: soft amber fill, soft stroke
-      poly.style.fill        = "rgba(255,204,0,0.22)";
-      poly.style.stroke      = "rgba(255,204,0,0.5)";
-      poly.style.strokeWidth = String(1.5 / zoom.scale);
+      // Dropdown highlight: zone's own colour at strong opacity, matching editor selected-zone style
+      const hex = zone.colorHex || "#0096ff";
+      poly.style.fill        = hexToRgba(hex, 0.72);
+      poly.style.stroke      = hex;
+      poly.style.strokeWidth = String(2.5 / zoom.scale);
 
     } else if (isHidden && editorMode) {
       // Hidden zone in editor: very faint dotted outline, not interactive
@@ -1409,7 +1410,7 @@ function renderZonesEditor() {
       const gOpacity = gState.anyArmed ? 1 : 0.35;
       const gFlash  = gState.anyTriggered;
       const storageKey = `zedGroup_${g.id}`;
-      const collapsed  = localStorage.getItem(storageKey) === "collapsed";
+      const collapsed  = localStorage.getItem(storageKey) !== "expanded";
       html += `
         <div class="zed-group-header ${gSel ? 'selected' : ''}" data-group-id="${g.id}" data-storage-key="${storageKey}">
           <div class="zone-list-dot${gFlash ? ' flashing' : ''}" style="background:${gColour};opacity:${gOpacity};width:6px;height:6px;flex-shrink:0;"></div>
@@ -3525,7 +3526,7 @@ function renderStatusDropdown() {
     const gDotOpacity = allDisarmed ? 0.35 : 1;
     const gDotFlash   = anyTriggered && !allDisarmed;
     const storageKey  = `ddGroup_${g.id}`;
-    const collapsed   = localStorage.getItem(storageKey) === "collapsed";
+    const collapsed   = localStorage.getItem(storageKey) !== "expanded";
     return `
       <div class="status-dd-group-header" data-group-id="${g.id}" data-storage-key="${storageKey}">
         <span class="status-dd-chevron" style="font-size:9px;color:#555;width:10px;flex-shrink:0;transition:transform 0.2s;display:inline-block;transform:rotate(${collapsed ? '-90' : '0'}deg);">▾</span>
@@ -3548,7 +3549,7 @@ function renderStatusDropdown() {
 
   function ungroupedSection(ungroupedZones) {
     const storageKey  = "ddGroup___ungrouped";
-    const collapsed   = localStorage.getItem(storageKey) === "collapsed";
+    const collapsed   = localStorage.getItem(storageKey) !== "expanded";
     const allArmed    = ungroupedZones.length > 0 && ungroupedZones.every(z => z.enabled !== false && masterEnabled);
     const allDisarmed = ungroupedZones.every(z => z.enabled === false || !masterEnabled);
     const anyTriggered = ungroupedZones.some(z => getZoneState(z) === "triggered");
