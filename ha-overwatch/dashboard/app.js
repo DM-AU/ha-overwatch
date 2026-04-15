@@ -535,7 +535,11 @@ async function loadZones() {
     const idxRes = await fetch(ZONES_DIR + "index.json?v=" + Date.now());
     if (!idxRes.ok) throw new Error("no index");
     const index = await idxRes.json();
-    const results = await Promise.all(index.map(async filename => {
+    // Skip group files and index files that may have been added by saveGroup
+    const zoneFiles = index.filter(f =>
+      !f.startsWith("group_") && f !== "groups_index.json" && f.endsWith(".yaml")
+    );
+    const results = await Promise.all(zoneFiles.map(async filename => {
       const r = await fetch(ZONES_DIR + filename + "?v=" + Date.now());
       if (!r.ok) return null;
       return parseZoneYaml(await r.text());
@@ -1076,11 +1080,11 @@ function renderZones() {
       poly.style.strokeWidth = String(1.5 / zoom.scale);
 
     } else if (isGroupMember && editorMode) {
-      // Group member: strong fill to make members obvious when group is selected
+      // Group member: very strong fill so members are unmistakably obvious
       const hex = zone.colorHex || "#0096ff";
-      poly.style.fill        = hexToRgba(hex, 0.55);
-      poly.style.stroke      = hexToRgba(hex, 0.85);
-      poly.style.strokeWidth = String(1.5 / zoom.scale);
+      poly.style.fill        = hexToRgba(hex, 0.72);
+      poly.style.stroke      = hexToRgba(hex, 1.0);
+      poly.style.strokeWidth = String(2.5 / zoom.scale);
 
     } else if (isHidden && editorMode) {
       // Hidden zone in editor: very faint dotted outline, not interactive
@@ -1310,10 +1314,13 @@ function renderZonesEditor() {
 
   // ── Build left panel zone list with group headers ──────────
   function buildZoneList() {
-    const ungroupedZones = zones.filter(z => !groups.some(g => (g.zone_ids||[]).includes(z.id)));
+    const sortedGroups = [...groups].sort((a, b) => (a.name||"").localeCompare(b.name||""));
+    const groupedZoneIds = new Set(groups.flatMap(g => g.zone_ids || []));
+    const ungroupedZones = zones.filter(z => !groupedZoneIds.has(z.id))
+      .sort((a, b) => (a.name||a.id).localeCompare(b.name||b.id));
     let html = "";
 
-    groups.forEach(g => {
+    sortedGroups.forEach(g => {
       const gSel = g.id === selectedGroupId;
       const gState = getGroupState(g);
       const gColour = gState.anyTriggered ? "#ff3b30" : gState.anyArmed ? "#ff3b30" : "#555";
@@ -1324,11 +1331,11 @@ function renderZonesEditor() {
           <span style="flex:1;font-size:11px;font-weight:600;color:#999;text-transform:uppercase;letter-spacing:0.06em;">${escapeHtml(g.name || g.id)}</span>
           <svg width="10" height="10" viewBox="0 0 24 24" fill="none" style="opacity:0.4;flex-shrink:0;"><path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </div>`;
-      (g.zone_ids || []).forEach(zid => {
-        const z = zones.find(zz => zz.id === zid);
-        if (!z) return;
-        html += buildZoneItem(z, true);
-      });
+      const memberZones = (g.zone_ids || [])
+        .map(id => zones.find(zz => zz.id === id))
+        .filter(Boolean)
+        .sort((a, b) => (a.name||a.id).localeCompare(b.name||b.id));
+      memberZones.forEach(z => { html += buildZoneItem(z, true); });
     });
 
     if (ungroupedZones.length > 0) {
@@ -1467,6 +1474,7 @@ function renderZonesEditor() {
             <button id="addGroupBtn">+ Group</button>
             <button id="addZoneBtn">+ Zone</button>
             ${selectedZone ? `<button id="editPointsBtn" style="${isEditingPoints ? 'border-color:rgba(255,204,0,0.5);color:#ffcc00;' : ''}">${editPtsLabel}</button>` : ""}
+            ${selectedZone ? `<button id="undoZonesBtn" title="Undo last change">↩ Undo</button>` : ""}
             ${(selectedZone || selectedGroup) ? `<button id="deleteZoneBtn" class="danger">Delete</button>` : ""}
           </div>
         </div>
@@ -1841,19 +1849,23 @@ function bindZonesSvgEvents() {
       }
     }
 
-    // 3) Clicking a polygon — select it (and prepare to drag whole zone), block pan
-    // Hidden zones cannot be selected by clicking their polygon on the map
+    // 3) Clicking a polygon — select it (unless editing points on another zone)
+    // Hidden zones cannot be selected. Can't switch zones while editing points.
     if (target.classList.contains("zone-polygon")) {
       const zoneId = target.dataset.zoneId;
       const zone   = zones.find(z => z.id === zoneId);
-      if (zone?.hidden) { e.stopPropagation(); return; } // not selectable when hidden
-      selectedZoneId = zoneId;
-      if (!isEditingPoints) {
-        if (zone) {
-          draggingZone = { zoneId, startPoints: zone.points.map(p => ({ ...p })) };
-          dragStart = { x: sx, y: sy };
-          svg.setPointerCapture(e.pointerId);
-        }
+      if (zone?.hidden) { e.stopPropagation(); return; }
+      // Block switching to a different zone while editing points
+      if (isEditingPoints && selectedZoneId && zoneId !== selectedZoneId) {
+        e.stopPropagation(); return;
+      }
+      selectedZoneId  = zoneId;
+      selectedGroupId = null;
+      // Only allow dragging whole zone when in edit points mode
+      if (isEditingPoints && zone) {
+        draggingZone = { zoneId, startPoints: zone.points.map(p => ({ ...p })) };
+        dragStart = { x: sx, y: sy };
+        svg.setPointerCapture(e.pointerId);
       }
       renderZones();
       renderZonesEditor();
@@ -3215,7 +3227,10 @@ function renderStatusDropdown() {
 
   // Build group section
   function groupSection(g) {
-    const members = (g.zone_ids || []).map(id => zones.find(z => z.id === id)).filter(Boolean);
+    const members = (g.zone_ids || [])
+      .map(id => zones.find(z => z.id === id))
+      .filter(Boolean)
+      .sort((a, b) => (a.name||a.id).localeCompare(b.name||b.id));
     const allArmed    = members.length > 0 && members.every(z => z.enabled !== false && masterEnabled);
     const allDisarmed = members.length === 0 || members.every(z => z.enabled === false || !masterEnabled);
     const anyTriggered = members.some(z => getZoneState(z) === "triggered");
@@ -3274,7 +3289,10 @@ function renderStatusDropdown() {
   }
 
   const groupedZoneIds = new Set(groups.flatMap(g => g.zone_ids || []));
-  const ungroupedZones = zones.filter(z => !groupedZoneIds.has(z.id));
+  const ungroupedZones = zones
+    .filter(z => !groupedZoneIds.has(z.id))
+    .sort((a, b) => (a.name||a.id).localeCompare(b.name||b.id));
+  const sortedGroups = [...groups].sort((a, b) => (a.name||"").localeCompare(b.name||""));
 
   body.innerHTML = `
     <div class="status-dd-zones">
@@ -3292,7 +3310,7 @@ function renderStatusDropdown() {
         </label>
       </div>
       <div style="height:1px;background:rgba(255,255,255,0.06);margin:0 14px 4px;"></div>
-      ${groups.map(g => groupSection(g)).join("")}
+      ${sortedGroups.map(g => groupSection(g)).join("")}
       ${ungroupedZones.length > 0 ? ungroupedSection(ungroupedZones) : ""}
       ${zones.length === 0 ? `<div class="status-dd-empty">No zones configured</div>` : ""}
     </div>

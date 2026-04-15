@@ -1585,15 +1585,22 @@ display: flex;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 14px;
+  padding: 8px 14px;
   box-sizing: border-box;
   cursor: pointer;
-  border-top: 1px solid rgba(255,255,255,0.04);
-  margin-top: 2px;
-}
-.status-dd-group-header:hover { background: rgba(255,255,255,0.03); }
-.status-dd-group-header.ungrouped-header {
   border-top: 1px solid rgba(255,255,255,0.06);
+  margin-top: 2px;
+  background: rgba(255,255,255,0.02);
+}
+.status-dd-group-header:hover { background: rgba(255,255,255,0.05); }
+.status-dd-group-header .status-dd-chevron {
+  font-size: 13px !important;
+  color: #666 !important;
+  width: 14px !important;
+  text-align: center;
+}
+.status-dd-group-header.ungrouped-header {
+  border-top: 1px solid rgba(255,255,255,0.08);
   margin-top: 4px;
 }
 /* Polygon highlight when group selected in editor */
