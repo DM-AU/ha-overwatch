@@ -1045,25 +1045,42 @@ function renderZones() {
     const selectedGrp = groups.find(g => g.id === selectedGroupId);
     if (selectedGrp) {
       const grpHex = selectedGrp.colorHex || "#ff3b30";
-      const memberGroup = document.createElementNS("http://www.w3.org/2000/svg", "g");
-      memberGroup.setAttribute("fill", grpHex);
-      memberGroup.setAttribute("fill-opacity", "0.72");
-      memberGroup.setAttribute("stroke", grpHex);
-      memberGroup.setAttribute("stroke-opacity", "1");
-      memberGroup.setAttribute("stroke-width", String(2.5 / (zoom?.scale || 1)));
-      // Use even-odd fill rule so overlapping zones don't double-darken
-      memberGroup.setAttribute("fill-rule", "evenodd");
+      const scale  = zoom?.scale || 1;
+
+      // Pass 1: fills only — no stroke — so overlapping zones merge into flat colour
+      const fillGroup = document.createElementNS("http://www.w3.org/2000/svg", "g");
+      fillGroup.setAttribute("fill", grpHex);
+      fillGroup.setAttribute("fill-opacity", "0.72");
+      fillGroup.setAttribute("stroke", "none");
+
+      // Pass 2: outlines only — drawn on top so no seams inside the group
+      const strokeGroup = document.createElementNS("http://www.w3.org/2000/svg", "g");
+      strokeGroup.setAttribute("fill", "none");
+      strokeGroup.setAttribute("stroke", grpHex);
+      strokeGroup.setAttribute("stroke-opacity", "0.95");
+      strokeGroup.setAttribute("stroke-width", String(2.5 / scale));
 
       let hasMembers = false;
       (selectedGrp.zone_ids || []).forEach(zid => {
         const zone = zones.find(z => z.id === zid);
         if (!zone || !zone.points?.length || zone.hidden) return;
-        const poly = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
-        poly.setAttribute("points", zone.points.map(p => `${p.x},${p.y}`).join(" "));
-        memberGroup.appendChild(poly);
+        const pts = zone.points.map(p => `${p.x},${p.y}`).join(" ");
+
+        const fillPoly = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
+        fillPoly.setAttribute("points", pts);
+        fillGroup.appendChild(fillPoly);
+
+        const strokePoly = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
+        strokePoly.setAttribute("points", pts);
+        strokeGroup.appendChild(strokePoly);
+
         hasMembers = true;
       });
-      if (hasMembers) svg.appendChild(memberGroup);
+
+      if (hasMembers) {
+        svg.appendChild(fillGroup);
+        svg.appendChild(strokeGroup);
+      }
     }
   }
 
@@ -1865,7 +1882,7 @@ function bindEntitySearch(zone) { bindDeviceSearch(zone, "entitySearchInput", "e
 function closestEdgeInfo(zone, fpX, fpY) {
   const pts = zone.points || [];
   if (pts.length < 2) return null;
-  let bestIdx = 0, bestDist = Infinity;
+  let bestIdx = 0, bestDist = Infinity, bestSnap = null;
   for (let i = 0; i < pts.length; i++) {
     const a = pts[i];
     const b = pts[(i + 1) % pts.length];
@@ -1873,10 +1890,11 @@ function closestEdgeInfo(zone, fpX, fpY) {
     const lenSq = dx * dx + dy * dy;
     if (!lenSq) continue;
     const t = Math.max(0, Math.min(1, ((fpX - a.x) * dx + (fpY - a.y) * dy) / lenSq));
-    const dist = Math.hypot(fpX - (a.x + t * dx), fpY - (a.y + t * dy));
-    if (dist < bestDist) { bestDist = dist; bestIdx = i; }
+    const snapX = a.x + t * dx, snapY = a.y + t * dy;
+    const dist = Math.hypot(fpX - snapX, fpY - snapY);
+    if (dist < bestDist) { bestDist = dist; bestIdx = i; bestSnap = { x: snapX, y: snapY }; }
   }
-  return { insertAfter: bestIdx, dist: bestDist };
+  return { insertAfter: bestIdx, dist: bestDist, snap: bestSnap };
 }
 
 function bindZonesSvgEvents() {
@@ -1897,14 +1915,17 @@ function bindZonesSvgEvents() {
       return;
     }
 
-    // 2) Inserting a point (Edit Points mode) — block pan
+    // 2) Inserting a point (Edit Points mode) — only near an edge, snapped to edge
     if (isEditingPoints && selectedZoneId && !isCreatingZone) {
       const zone = zones.find(z => z.id === selectedZoneId);
       if (zone && (zone.points || []).length >= 2) {
         const info = closestEdgeInfo(zone, fp.x, fp.y);
-        if (info) {
+        // Threshold: 20 floorplan units (~20px at 1x zoom), scaled for current zoom
+        const threshold = 20 / (zoom?.scale || 1);
+        if (info && info.dist < threshold) {
           pushUndo();
-          zone.points.splice(info.insertAfter + 1, 0, { x: fp.x, y: fp.y });
+          // Insert at the snapped point ON the edge, not where clicked
+          zone.points.splice(info.insertAfter + 1, 0, { x: Math.round(info.snap.x), y: Math.round(info.snap.y) });
           saveZone(zone);
           renderZones();
           renderZonesEditor();
@@ -1920,13 +1941,12 @@ function bindZonesSvgEvents() {
       const zoneId = target.dataset.zoneId;
       const zone   = zones.find(z => z.id === zoneId);
       if (zone?.hidden) { e.stopPropagation(); return; }
-      // Block switching to a different zone while editing points
       if (isEditingPoints && selectedZoneId && zoneId !== selectedZoneId) {
         e.stopPropagation(); return;
       }
       selectedZoneId  = zoneId;
       selectedGroupId = null;
-      // Only allow dragging whole zone when in edit points mode
+      // In edit points mode: clicking inside zone starts a drag of the whole zone
       if (isEditingPoints && zone) {
         draggingZone = { zoneId, startPoints: zone.points.map(p => ({ ...p })) };
         dragStart = { x: sx, y: sy };
