@@ -3741,6 +3741,13 @@ function bindStatusBar() {
 }
 
 /* ─── SEARCH UI BINDINGS ──────────────────────────────────── */
+function bindCommonSidebarButtons() {
+  const settingsBtn = document.getElementById("settingsBtn");
+  const logBtn      = document.getElementById("logBtn");
+  if (settingsBtn) settingsBtn.onclick = () => renderSettingsPanel();
+  if (logBtn)      logBtn.onclick      = () => renderLogPanel(true);
+}
+
 function bindSearchUI() {
   const searchPanelHtml = `
     <div class="search-panel" id="searchPanel" aria-hidden="true">
@@ -3761,12 +3768,8 @@ function bindSearchUI() {
   makeDraggable(panel, titlebar, "searchPanel");
 
   const searchBtn   = document.getElementById("searchBtn");
-  const settingsBtn = document.getElementById("settingsBtn");
-  const logBtn      = document.getElementById("logBtn");
 
   if (searchBtn)   searchBtn.onclick   = () => setSearchOpen(!searchOpen);
-  if (settingsBtn) settingsBtn.onclick = () => renderSettingsPanel();
-  if (logBtn)      logBtn.onclick      = () => renderLogPanel(true);
 
   document.getElementById("searchCloseBtn").onclick = () => setSearchOpen(false);
   panel.addEventListener("pointerdown", e => e.stopPropagation());
@@ -3877,6 +3880,8 @@ async function init() {
   }
 
   bindSidebarToggle();
+  // Settings + log buttons exist on both pages
+  bindCommonSidebarButtons();
 
   await loadZones();
   await loadGroups();
