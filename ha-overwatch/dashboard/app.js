@@ -693,7 +693,7 @@ function setGroupArmed(groupId, armed) {
   const group = groups.find(g => g.id === groupId);
   if (!group) return;
   (group.zone_ids || []).forEach(zoneId => setZoneEnabled(zoneId, armed));
-  renderStatusDropdown();
+  // setZoneEnabled already calls updateStatusDropdownInPlace for each zone
   renderZonesEditor();
 }
 
@@ -797,7 +797,7 @@ let masterEnabled = localStorage.getItem("masterEnabled") !== "false";
 function setMasterEnabled(val) {
   masterEnabled = !!val;
   localStorage.setItem("masterEnabled", masterEnabled);
-  renderStatusDropdown();
+  updateStatusDropdownInPlace();
   renderZones();
   logEvent("info", masterEnabled ? "Master alarm enabled." : "Master alarm disabled.", "system");
   syncMasterToHA(masterEnabled);
@@ -808,7 +808,7 @@ function setZoneEnabled(zoneId, val) {
   if (!zone) return;
   zone.enabled = !!val;
   saveZone(zone);
-  renderStatusDropdown();
+  updateStatusDropdownInPlace();
   renderZones();
   logEvent(
     "info",
@@ -825,7 +825,7 @@ function setZoneHidden(zoneId, hidden) {
   if (!zone) return;
   zone.hidden = !!hidden;
   saveZone(zone);
-  renderStatusDropdown();
+  updateStatusDropdownInPlace();
   renderZones();
   logEvent(
     "info",
@@ -3323,6 +3323,117 @@ function animateZoomTo(scale, x, y, durationMs) {
 }
 
 /* ─── STATUS BAR DROPDOWN (issue 20) ─────────────────────── */
+/* ─── IN-PLACE STATUS DROPDOWN UPDATE ────────────────────────
+ * Updates dots, toggles, eye buttons, and state labels without
+ * rebuilding the list — preserves scroll position.
+ * Falls back to full re-render if dropdown isn't open.
+ * ─────────────────────────────────────────────────────────── */
+function updateStatusDropdownInPlace() {
+  const dd = document.getElementById("statusDropdown");
+  if (!dd || dd.style.display === "none") return;
+  const body = document.getElementById("statusDropdownBody");
+  if (!body) return;
+
+  const eyeOpen   = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M1 12C1 12 5 5 12 5s11 7 11 7-4 7-11 7S1 12 1 12z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2"/></svg>`;
+  const eyeClosed = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M1 12C1 12 5 5 12 5s11 7 11 7-4 7-11 7S1 12 1 12z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M3 3l18 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>`;
+
+  // Master toggle
+  const masterChk = body.querySelector("#masterToggleChk");
+  if (masterChk) masterChk.checked = masterEnabled;
+
+  // Per-zone: toggle, eye, dot, state label
+  body.querySelectorAll(".zone-enabled-chk[data-zone-id]").forEach(chk => {
+    const zone = zones.find(z => z.id === chk.dataset.zoneId);
+    if (!zone) return;
+    chk.checked  = zone.enabled !== false;
+    chk.disabled = !masterEnabled;
+
+    const row = chk.closest(".status-dd-zone");
+    if (!row) return;
+    const isOff = zone.enabled === false || !masterEnabled;
+    const st    = getZoneState(zone);
+    const isTriggeredZone = st === "triggered";
+    const sensors = zone.sensors || [];
+    const anyActive = haConnected && sensors.some(isEntityTriggered);
+    const isDisarmedActive = isOff && anyActive;
+
+    const dotColour = isTriggeredZone ? "#ff3b30"
+      : isDisarmedActive ? resolveColour(entityTypeColourOff(detectEntityType(sensors.find(isEntityTriggered) || "")))
+      : st === "fault" ? "#ff9500"
+      : isOff ? (zone.colorHex || "#0096ff")
+      :          "#ff3b30";
+    const dotOpacity = (isOff && !isDisarmedActive) ? 0.3 : 1;
+    const stateLabel = isTriggeredZone ? "triggered" : st === "fault" ? "fault" : isOff ? "disarmed" : "armed";
+
+    const dot = row.querySelector(`.zone-list-dot[data-zone-id="${zone.id}"]`);
+    if (dot) { dot.style.background = dotColour; dot.style.opacity = String(dotOpacity); }
+
+    const stateEl = row.querySelector(".status-dd-state");
+    if (stateEl) { stateEl.textContent = stateLabel; stateEl.style.color = dotColour; stateEl.style.opacity = (isOff && !isDisarmedActive) ? "0.4" : "0.8"; }
+
+    const nameEl = row.querySelector(".status-dd-zname");
+    if (nameEl) nameEl.style.opacity = zone.hidden ? "0.35" : isOff && !isDisarmedActive ? "0.5" : "1";
+
+    const eyeBtn = row.querySelector(`.zone-eye-btn[data-zone-id="${zone.id}"]`);
+    if (eyeBtn) {
+      eyeBtn.innerHTML = zone.hidden ? eyeClosed : eyeOpen;
+      eyeBtn.style.color = zone.hidden ? "rgba(255,255,255,0.25)" : "rgba(255,255,255,0.65)";
+    }
+  });
+
+  // Per-group: toggle, eye, dot
+  body.querySelectorAll(".group-armed-chk[data-group-id]").forEach(chk => {
+    const group = groups.find(g => g.id === chk.dataset.groupId);
+    if (!group) return;
+    const members = (group.zone_ids || []).map(id => zones.find(z => z.id === id)).filter(Boolean);
+    const allArmed = members.length > 0 && members.every(z => z.enabled !== false && masterEnabled);
+    chk.checked = allArmed;
+
+    const hdr = chk.closest(".status-dd-group-header");
+    if (!hdr) return;
+    const allDisarmed  = members.every(z => z.enabled === false || !masterEnabled);
+    const someArmed    = !allArmed && !allDisarmed;
+    const anyTriggered = members.some(z => getZoneState(z) === "triggered");
+    const gHex  = group.colorHex || "#ff3b30";
+    const colour = allDisarmed ? gHex : someArmed ? "#ff9500" : "#ff3b30";
+    const opacity = allDisarmed ? 0.35 : 1;
+
+    const dot = hdr.querySelector(`.zone-list-dot[data-group-dot="${group.id}"]`);
+    if (dot) { dot.style.background = colour; dot.style.opacity = String(opacity); dot.classList.toggle("flashing", anyTriggered && !allDisarmed); }
+
+    const allMembHidden = members.length > 0 && members.every(z => z.hidden);
+    const eyeBtn = hdr.querySelector(".group-eye-btn");
+    if (eyeBtn) { eyeBtn.innerHTML = allMembHidden ? eyeClosed : eyeOpen; eyeBtn.style.color = allMembHidden ? "rgba(255,255,255,0.25)" : "rgba(255,255,255,0.65)"; }
+  });
+
+  // Ungrouped toggle + dot
+  const ungroupedChk = body.querySelector(".ungrouped-armed-chk");
+  if (ungroupedChk) {
+    const groupedIds = new Set(groups.flatMap(g => g.zone_ids || []));
+    const ung = zones.filter(z => !groupedIds.has(z.id));
+    const allArmed   = ung.length > 0 && ung.every(z => z.enabled !== false && masterEnabled);
+    const allDisarmed = ung.every(z => z.enabled === false || !masterEnabled);
+    const someArmed  = !allArmed && !allDisarmed;
+    const anyTriggered = ung.some(z => getZoneState(z) === "triggered");
+    ungroupedChk.checked = allArmed;
+    const hdr = ungroupedChk.closest(".status-dd-group-header");
+    if (hdr) {
+      const colour  = allDisarmed ? "#888" : someArmed ? "#ff9500" : "#ff3b30";
+      const opacity = allDisarmed ? 0.35 : 1;
+      const dot = hdr.querySelector(".zone-list-dot[data-group-dot='__ungrouped']");
+      if (dot) { dot.style.background = colour; dot.style.opacity = String(opacity); dot.classList.toggle("flashing", anyTriggered && !allDisarmed); }
+      const allHidn = ung.length > 0 && ung.every(z => z.hidden);
+      const eyeBtn  = hdr.querySelector(".ungrouped-eye-btn");
+      if (eyeBtn) { eyeBtn.innerHTML = allHidn ? eyeClosed : eyeOpen; eyeBtn.style.color = allHidn ? "rgba(255,255,255,0.25)" : "rgba(255,255,255,0.65)"; }
+    }
+  }
+
+  // Master eye
+  const allHidden = zones.length > 0 && zones.every(z => z.hidden);
+  const masterEye = body.querySelector("#masterEyeBtn");
+  if (masterEye) { masterEye.innerHTML = allHidden ? eyeClosed : eyeOpen; masterEye.style.color = allHidden ? "rgba(255,255,255,0.25)" : "rgba(255,255,255,0.65)"; }
+}
+
 function renderStatusDropdown() {
   const body = document.getElementById("statusDropdownBody");
   if (!body) return;
