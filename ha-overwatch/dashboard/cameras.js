@@ -40,15 +40,29 @@ function waitForOW(cb, attempts = 0) {
 
 /* ── HA camera snapshot URL ─────────────────────────────────── */
 function camSnapshotUrl(entityId) {
-  const base = window.OW.apiPath('').replace(/ow\/$/, '');
-  // HA camera proxy: /api/camera_proxy/<entity_id>?token=...&t=<cache bust>
-  // Through our server proxy → relative path works via ingress
-  return `${base}api/camera_proxy/${entityId}?t=${Date.now()}`;
+  // Camera proxy goes through HA ingress directly
+  // In add-on mode: BASE_PATH/api/camera_proxy/<entity>
+  // In standalone mode: <ha_url>/api/camera_proxy/<entity>
+  const OW = window.OW;
+  if (window.isAddonMode !== false) {
+    // Use BASE_PATH which is the ingress prefix
+    const base = OW.apiPath('').replace(/\/ow\/?$/, '').replace(/\/$/, '');
+    return `${base}/api/camera_proxy/${entityId}?t=${Date.now()}`;
+  } else {
+    const haUrl = (OW.uiConfig.ha_url || '').replace(/\/$/, '');
+    return `${haUrl}/api/camera_proxy/${entityId}?t=${Date.now()}`;
+  }
 }
 
 function camStreamUrl(entityId) {
-  const base = window.OW.apiPath('').replace(/ow\/$/, '');
-  return `${base}api/camera_proxy_stream/${entityId}`;
+  const OW = window.OW;
+  if (window.isAddonMode !== false) {
+    const base = OW.apiPath('').replace(/\/ow\/?$/, '').replace(/\/$/, '');
+    return `${base}/api/camera_proxy_stream/${entityId}`;
+  } else {
+    const haUrl = (OW.uiConfig.ha_url || '').replace(/\/$/, '');
+    return `${haUrl}/api/camera_proxy_stream/${entityId}`;
+  }
 }
 
 /* ── Tile entity resolution ──────────────────────────────────── */
@@ -539,11 +553,8 @@ function initCameraPage() {
       .then(r => r.text())
       .then(html => {
         sidebarContainer.innerHTML = html;
-        const collapseBtn = document.getElementById('collapseBtn');
-        const sidebar     = document.getElementById('sidebarEl');
-        if (collapseBtn && sidebar) {
-          collapseBtn.addEventListener('click', () => sidebar.classList.toggle('collapsed'));
-        }
+        // Rebind all sidebar controls now that the DOM exists
+        window.bindSidebarToggle && window.bindSidebarToggle();
         // Rebind settings + log now that sidebar DOM exists
         const settingsBtn = document.getElementById('settingsBtn');
         const logBtn      = document.getElementById('logBtn');

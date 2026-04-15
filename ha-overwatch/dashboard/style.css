@@ -1734,7 +1734,8 @@ body.page-cameras.sidebar-left  .cam-main  { padding-left:  var(--sidebar-width)
 .cam-status-dd {
   position: fixed;
   top: 48px;
-  left: 0;
+  left: 50%;
+  transform: translateX(-50%);
   min-width: 300px;
   max-width: 380px;
   max-height: calc(100vh - 60px);

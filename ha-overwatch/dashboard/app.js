@@ -3923,15 +3923,18 @@ async function init() {
     get haConnected()   { return haConnected; },
     get uiConfig()      { return uiConfig; },
     get masterEnabled() { return masterEnabled; },
+    get isAddonMode()   { return isAddonMode; },
     isEntityTriggered,
     apiPath,
     logEvent,
     renderSettingsPanel,
     renderLogPanel,
   };
-  // Also expose directly for camera-sidebar inline onclick fallback
-  window.renderSettingsPanel = renderSettingsPanel;
-  window.renderLogPanel      = renderLogPanel;
+  window.renderSettingsPanel  = renderSettingsPanel;
+  window.renderLogPanel       = renderLogPanel;
+  window.isAddonMode          = isAddonMode;
+  window.bindSidebarToggle    = bindSidebarToggle;
+  window.bindCommonSidebarButtons = bindCommonSidebarButtons;
 }
 
 window.addEventListener("DOMContentLoaded", init);
