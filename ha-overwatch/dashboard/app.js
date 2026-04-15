@@ -1019,7 +1019,8 @@ setInterval(() => {
           : isDisarmedActive
           ? resolveColour(entityTypeColourOff(detectEntityType(sensors.find(isEntityTriggered) || "")))
           : st === "fault" ? "#ff9500"
-          : (zone.colorHex || "#0096ff");
+          : isOff ? (zone.colorHex || "#0096ff")  // disarmed + clear → zone colour dimmed
+          :          "#ff3b30";                     // armed + clear → red
         dot.style.opacity = (isOff && !isDisarmedActive) ? "0.3" : "1";
       });
 
@@ -3342,7 +3343,8 @@ function renderStatusDropdown() {
     const dotColour = isTriggeredZone ? "#ff3b30"
       : isDisarmedActive ? resolveColour(entityTypeColourOff(detectEntityType(sensors.find(isEntityTriggered) || "")))
       : state === "fault" ? "#ff9500"
-      : (z.colorHex || "#0096ff");  // always zone colour; opacity dims when disarmed
+      : isOff ? (z.colorHex || "#0096ff")  // disarmed + clear → zone colour (dimmed by opacity)
+      :          "#ff3b30";                  // armed + clear → red
     const dotFlashing = isTriggeredZone || isDisarmedActive;
     const dotOpacity  = (isOff && !isDisarmedActive) ? 0.3 : 1;
     const stateLabel  = isTriggeredZone ? "triggered" : state === "fault" ? "fault" : isOff ? "disarmed" : "armed";
