@@ -40,11 +40,9 @@ function waitForOW(cb, attempts = 0) {
 
 /* ── HA camera snapshot URL ─────────────────────────────────── */
 function camSnapshotUrl(entityId) {
-  // Route through our server's /ow/camera_proxy which adds Bearer auth token.
-  // In add-on mode: use relative path (base tag handles ingress prefix).
-  // In standalone mode: use absolute path via ha_url.
+  // Use apiPath() same as all other server API calls — works in both addon and standalone mode
   if (window.OW.isAddonMode) {
-    return `ow/camera_proxy/${entityId}?t=${Date.now()}`;
+    return window.OW.apiPath(`ow/camera_proxy/${entityId}`) + `?t=${Date.now()}`;
   }
   const haUrl = (window.OW.uiConfig.ha_url || '').replace(/\/$/, '');
   return `${haUrl}/api/camera_proxy/${entityId}?t=${Date.now()}`;
@@ -52,7 +50,7 @@ function camSnapshotUrl(entityId) {
 
 function camStreamUrl(entityId) {
   if (window.OW.isAddonMode) {
-    return `ow/camera_proxy_stream/${entityId}`;
+    return window.OW.apiPath(`ow/camera_proxy_stream/${entityId}`);
   }
   const haUrl = (window.OW.uiConfig.ha_url || '').replace(/\/$/, '');
   return `${haUrl}/api/camera_proxy_stream/${entityId}`;
