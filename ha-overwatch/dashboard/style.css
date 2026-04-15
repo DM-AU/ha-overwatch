@@ -402,6 +402,7 @@ display: flex;
 }
 .zed-group-header:hover { background: rgba(255,255,255,0.04); }
 .zed-group-header.selected { background: rgba(255,255,255,0.07); }
+.zed-group-members { /* collapsible container for zone editor group members */ }
 
 /* Right panel */
 .zed-right {
@@ -473,7 +474,7 @@ display: flex;
   margin-bottom: 2px;
 }
 
-.zones-editor-row label {
+.zones-editor-row label:not(.zone-toggle-switch) {
   flex: 0 0 58px;
   color: #aaa;
   font-size: 12px;

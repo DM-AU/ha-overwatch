@@ -1015,8 +1015,7 @@ setInterval(() => {
           : isDisarmedActive
           ? resolveColour(entityTypeColourOff(detectEntityType(sensors.find(isEntityTriggered) || "")))
           : st === "fault" ? "#ff9500"
-          : isOff ? "#555"
-          : (zone.colorHex || "#0096ff");
+          : (zone.colorHex || "#0096ff");  // always zone colour, opacity handles dimming
         dot.style.opacity = (isOff && !isDisarmedActive) ? "0.3" : "1";
       });
     }
@@ -1127,12 +1126,13 @@ function renderZones() {
     } else if (editorMode) {
       const hex = zone.colorHex || "#0096ff";
       if (isSelected) {
-        poly.style.fill        = hexToRgba(hex, 0.35);
-        poly.style.stroke      = "#ffcc00";
-        poly.style.strokeWidth = String(2 / zoom.scale);
+        // Selected zone: strong highlight matching group member style
+        poly.style.fill        = hexToRgba(hex, 0.72);
+        poly.style.stroke      = hex;
+        poly.style.strokeWidth = String(2.5 / zoom.scale);
       } else {
-        poly.style.fill        = hexToRgba(hex, 0.22);
-        poly.style.stroke      = hexToRgba(hex, 0.45);
+        poly.style.fill        = hexToRgba(hex, 0.18);
+        poly.style.stroke      = hexToRgba(hex, 0.35);
         poly.style.strokeWidth = String(1 / zoom.scale);
       }
     } else {
@@ -1155,7 +1155,8 @@ function renderZones() {
 
     svg.appendChild(poly);
 
-    if (editorMode && isSelected) {
+    // Handles only shown when actively editing points, not just selected
+    if (editorMode && isSelected && isEditingPoints) {
       const handleR = 7 / zoom.scale;
       pts.forEach((p, idx) => {
         const c = document.createElementNS("http://www.w3.org/2000/svg", "circle");
@@ -1325,17 +1326,21 @@ function renderZonesEditor() {
       const gState = getGroupState(g);
       const gColour = gState.anyTriggered ? "#ff3b30" : gState.anyArmed ? "#ff3b30" : "#555";
       const gFlash  = gState.anyTriggered;
+      const storageKey = `zedGroup_${g.id}`;
+      const collapsed  = localStorage.getItem(storageKey) === "collapsed";
       html += `
-        <div class="zed-group-header ${gSel ? 'selected' : ''}" data-group-id="${g.id}">
+        <div class="zed-group-header ${gSel ? 'selected' : ''}" data-group-id="${g.id}" data-storage-key="${storageKey}">
           <div class="zone-list-dot${gFlash ? ' flashing' : ''}" style="background:${gColour};width:6px;height:6px;flex-shrink:0;"></div>
           <span style="flex:1;font-size:11px;font-weight:600;color:#999;text-transform:uppercase;letter-spacing:0.06em;">${escapeHtml(g.name || g.id)}</span>
-          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" style="opacity:0.4;flex-shrink:0;"><path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        </div>`;
+          <span class="zed-chevron" style="font-size:11px;color:#555;transition:transform 0.2s;display:inline-block;transform:rotate(${collapsed ? '-90' : '0'}deg);">▾</span>
+        </div>
+        <div class="zed-group-members" data-group-id="${g.id}" style="${collapsed ? 'display:none;' : ''}">`;
       const memberZones = (g.zone_ids || [])
         .map(id => zones.find(zz => zz.id === id))
         .filter(Boolean)
         .sort((a, b) => (a.name||a.id).localeCompare(b.name||b.id));
       memberZones.forEach(z => { html += buildZoneItem(z, true); });
+      html += `</div>`;
     });
 
     if (ungroupedZones.length > 0) {
@@ -1468,7 +1473,7 @@ function renderZonesEditor() {
       </div>
       <div class="zed-body">
         <!-- LEFT PANEL -->
-        <div class="zed-left">
+        <div class="zed-left" style="${(!selectedZone && !selectedGroup) ? 'border-right:none;width:100%;' : ''}">
           <div class="zed-list" id="zonesList">${buildZoneList()}</div>
           <div class="zed-actions">
             <button id="addGroupBtn">+ Group</button>
@@ -1478,8 +1483,8 @@ function renderZonesEditor() {
             ${(selectedZone || selectedGroup) ? `<button id="deleteZoneBtn" class="danger">Delete</button>` : ""}
           </div>
         </div>
-        <!-- RIGHT PANEL — hidden border when empty -->
-        <div class="zed-right" style="${(!selectedZone && !selectedGroup) ? 'border-left:none;' : ''}">${buildRightPanel()}</div>
+        <!-- RIGHT PANEL — completely hidden when nothing selected -->
+        <div class="zed-right" style="${(!selectedZone && !selectedGroup) ? 'display:none;' : ''}">${buildRightPanel()}</div>
       </div>
       <div class="zed-resize-handle" id="zedResizeHandle"></div>
     </div>
@@ -1498,9 +1503,24 @@ function renderZonesEditor() {
 
   // Group header clicks
   container.querySelectorAll(".zed-group-header[data-group-id]").forEach(hdr => {
-    hdr.onclick = () => {
-      selectedGroupId = hdr.dataset.groupId;
+    hdr.onclick = (e) => {
+      const gid = hdr.dataset.groupId;
+      const key = hdr.dataset.storageKey;
+      // If clicking the chevron area (right side), toggle collapse only
+      const chevron = hdr.querySelector(".zed-chevron");
+      const membersEl = container.querySelector(`.zed-group-members[data-group-id="${gid}"]`);
+      if (membersEl && key) {
+        const collapsed = membersEl.style.display === "none";
+        membersEl.style.display = collapsed ? "" : "none";
+        if (chevron) chevron.style.transform = `rotate(${collapsed ? "0" : "-90"}deg)`;
+        localStorage.setItem(key, collapsed ? "expanded" : "collapsed");
+      }
+      // Also select the group (show right panel)
+      selectedGroupId = gid;
       selectedZoneId  = null;
+      renderZones();
+      // Re-render only the left panel actions + right panel without blowing away the list
+      // Full re-render needed to show right panel
       renderZonesEditor();
     };
   });
@@ -3206,7 +3226,7 @@ function renderStatusDropdown() {
     const dotColour = isTriggeredZone ? "#ff3b30"
       : isDisarmedActive ? resolveColour(entityTypeColourOff(detectEntityType(sensors.find(isEntityTriggered) || "")))
       : state === "fault" ? "#ff9500"
-      : isOff ? "#555" : (z.colorHex || "#0096ff");
+      : (z.colorHex || "#0096ff");  // always zone colour; opacity dims when disarmed
     const dotFlashing = isTriggeredZone || isDisarmedActive;
     const dotOpacity  = (isOff && !isDisarmedActive) ? 0.3 : 1;
     const stateLabel  = isTriggeredZone ? "triggered" : state === "fault" ? "fault" : isOff ? "disarmed" : "armed";
