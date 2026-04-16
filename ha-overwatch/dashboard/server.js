@@ -450,20 +450,22 @@ const server = http.createServer(async (req, res) => {
   }
 
   /* ── Camera proxy ────────────────────────────────────────── */
-  // Pipes HA camera snapshots/streams through our server with Bearer token.
-  // Browser calls /ow/camera_proxy/<entity_id> or /ow/camera_proxy_stream/<entity_id>
   if (pathname.startsWith("/ow/camera_proxy")) {
     try {
       const cfg      = getHAConfig(loadConfig());
       if (!cfg.ha_url || !cfg.ha_token) { err(res, "HA not configured", 503); return; }
       const isStream = pathname.startsWith("/ow/camera_proxy_stream");
-      const entity   = pathname.replace(/\/ow\/camera_proxy(?:_stream)?\//, "").split("?")[0];
+      // Extract entity — strip prefix, keep everything up to ?
+      const prefix = isStream ? "/ow/camera_proxy_stream/" : "/ow/camera_proxy/";
+      const entity = pathname.slice(prefix.length).split("?")[0];
       if (!entity) { err(res, "Missing entity", 400); return; }
 
       const haUrl    = (cfg.ha_url || "").replace(/\/$/, "");
       const endpoint = isStream
         ? `/api/camera_proxy_stream/${entity}`
         : `/api/camera_proxy/${entity}`;
+
+      console.log(`[CAM PROXY] ${isStream ? "stream" : "snap"} → ${haUrl}${endpoint}`);
 
       let parsed;
       try { parsed = new URL(haUrl); } catch { err(res, "Invalid HA URL", 500); return; }
@@ -475,16 +477,19 @@ const server = http.createServer(async (req, res) => {
         port:     parsed.port || (isHttps ? 443 : 80),
         path:     endpoint,
         method:   "GET",
-        headers:  { "Authorization": `Bearer ${cfg.ha_token}` },
+        headers:  {
+          "Authorization": `Bearer ${cfg.ha_token}`,
+          "Accept":        "image/jpeg,image/*,*/*",
+        },
       }, haRes => {
-        // Forward status + content-type headers
+        console.log(`[CAM PROXY] HA responded ${haRes.statusCode} for ${entity}`);
         const fwdHeaders = { "Cache-Control": "no-cache", "Access-Control-Allow-Origin": "*" };
         if (haRes.headers["content-type"]) fwdHeaders["Content-Type"] = haRes.headers["content-type"];
         if (haRes.headers["content-length"]) fwdHeaders["Content-Length"] = haRes.headers["content-length"];
         res.writeHead(haRes.statusCode, fwdHeaders);
         haRes.pipe(res);
       });
-      haReq.on("error", e => { console.error("[CAM PROXY]", e.message); err(res, "Proxy error", 502); });
+      haReq.on("error", e => { console.error("[CAM PROXY] error:", e.message); err(res, "Proxy error", 502); });
       haReq.end();
     } catch (e) { err(res, e.message, 500); }
     return;
