@@ -81,7 +81,7 @@ let uiConfig = {
   cam_cooldown:           30,          // seconds camera stays visible after zone clears
   cam_max_visible:        0,           // 0 = unlimited
   cam_sort_order:         "recent_first",
-  cam_fail_hide_seconds:  5,
+  cam_fail_hide_seconds:  30,
   cam_low_res_map:        "{}",        // JSON: { "camera.high_res": "camera.low_res" }
   cam_pinned:             "[]",        // JSON: ["camera.entity_id", ...]
 };

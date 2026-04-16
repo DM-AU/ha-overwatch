@@ -274,22 +274,34 @@ function stopSnapshotRefresh() {
 
 /* ── Failure handling ───────────────────────────────────────── */
 function attachFailureHandler(img, entityId) {
-  let failStart = null;
-  const failHide = (parseInt(window.OW.uiConfig.cam_fail_hide_seconds) || 5) * 1000;
+  let failCount = 0;
+  const maxFails = Math.max(3, parseInt(window.OW.uiConfig.cam_fail_hide_seconds) || 5) * 2;
 
   img.onerror = () => {
-    if (!failStart) failStart = Date.now();
-    if (Date.now() - failStart >= failHide) {
+    failCount++;
+    if (camHidden.has(entityId)) return;
+    if (failCount >= maxFails) {
       camHidden.add(entityId);
       window.OW.logEvent('error', `Camera hidden after persistent failure: ${entityId}`, 'system');
       const tile = document.getElementById(`cam-tile-${entityId.replace(/\W/g, '_')}`);
       if (tile) tile.remove();
+      // Auto-retry after 60s in case it was a temporary auth/network issue
+      setTimeout(() => {
+        if (camHidden.has(entityId)) {
+          camHidden.delete(entityId);
+          camFailCount[entityId] = 0;
+          renderCameraGrid();
+        }
+      }, 60000);
     } else {
-      // Retry after 1s
-      setTimeout(() => { img.src = img.src; }, 1000);
+      // Retry with exponential backoff up to 5s
+      const delay = Math.min(1000 * failCount, 5000);
+      setTimeout(() => {
+        if (!camHidden.has(entityId)) img.src = camSnapshotUrl(entityId) ;
+      }, delay);
     }
   };
-  img.onload = () => { failStart = null; };
+  img.onload = () => { failCount = 0; };
 }
 
 /* ── Modal ───────────────────────────────────────────────────── */
@@ -411,10 +423,12 @@ function renderCameraStatusBar() {
 
   // Put mode buttons on opposite side from sidebar
   const sidebarOnRight = (window.OW.uiConfig.sidebar_position || 'right') !== 'left';
+  const hasHidden = camHidden.size > 0;
   const modeButtons = `
     <div class="cam-status-mode" style="${sidebarOnRight ? 'margin-right:auto;' : 'margin-left:auto;'}">
       <button class="cam-mode-btn ${camMode === 'snapshot' ? 'active' : ''}" id="camSnapBtn">Snapshot</button>
       <button class="cam-mode-btn ${camMode === 'live' ? 'active' : ''}" id="camLiveBtn">Live</button>
+      ${hasHidden ? `<button class="cam-mode-btn" id="camRetryBtn" style="color:#ff9500;border-color:rgba(255,149,0,0.3);" title="Retry ${camHidden.size} hidden camera(s)">↺ Retry</button>` : ''}
     </div>`;
 
   container.innerHTML = `
@@ -458,8 +472,10 @@ function renderCameraStatusBar() {
     });
   });
 
-  const snapBtn = document.getElementById('camSnapBtn');
-  const liveBtn = document.getElementById('camLiveBtn');
+  const snapBtn  = document.getElementById('camSnapBtn');
+  const liveBtn  = document.getElementById('camLiveBtn');
+  const retryBtn = document.getElementById('camRetryBtn');
+
   if (snapBtn) snapBtn.onclick = () => {
     camMode = 'snapshot';
     const grid = document.getElementById('cameraGrid');
@@ -471,6 +487,14 @@ function renderCameraStatusBar() {
   if (liveBtn) liveBtn.onclick = () => {
     camMode = 'live';
     stopSnapshotRefresh();
+    const grid = document.getElementById('cameraGrid');
+    if (grid) grid.innerHTML = '';
+    renderCameraGrid();
+    renderCameraStatusBar();
+  };
+  if (retryBtn) retryBtn.onclick = () => {
+    camHidden.clear();
+    camFailCount = {};
     const grid = document.getElementById('cameraGrid');
     if (grid) grid.innerHTML = '';
     renderCameraGrid();
