@@ -464,21 +464,31 @@ const server = http.createServer(async (req, res) => {
       let accessToken = "";
       try {
         const stateRes = await haRestCall("GET", `/api/states/${entity}`, null, cfg);
-        accessToken = stateRes?.body?.attributes?.access_token || "";
+        const attrs = stateRes?.body?.attributes || {};
+        accessToken = attrs.access_token || attrs.token || "";
+        console.log(`[CAM PROXY] state attrs keys: ${Object.keys(attrs).join(", ")}`);
+        console.log(`[CAM PROXY] state status: ${stateRes?.status}, body keys: ${Object.keys(stateRes?.body||{}).join(", ")}`);
       } catch (e) {
         console.warn(`[CAM PROXY] Could not fetch state for ${entity}: ${e.message}`);
       }
 
-      const haUrl      = (cfg.ha_url || "").replace(/\/$/, "");
+      // Camera proxy: use external HA URL + user long-lived token
+      // (supervisor internal token is blocked by some camera integrations like Unifi Protect)
+      const userCfg    = loadConfig();
+      const userToken  = userCfg.ha_token || "";
+      const userHaUrl  = (userCfg.ha_url || cfg.ha_url || "").replace(/\/$/, "");
+      const proxyHaUrl = userToken ? userHaUrl : (cfg.ha_url || "").replace(/\/$/, "");
+      const authToken  = userToken || cfg.ha_token;
+
       const tokenParam = accessToken ? `?token=${accessToken}` : "";
       const endpoint   = isStream
         ? `/api/camera_proxy_stream/${entity}${tokenParam}`
         : `/api/camera_proxy/${entity}${tokenParam}`;
 
-      console.log(`[CAM PROXY] ${isStream ? "stream" : "snap"} → ${entity} (token=${!!accessToken})`);
+      console.log(`[CAM PROXY] ${isStream ? "stream" : "snap"} → ${entity} via ${proxyHaUrl} (token=${!!accessToken}, userToken=${!!userToken})`);
 
       let parsed;
-      try { parsed = new URL(haUrl); } catch { err(res, "Invalid HA URL", 500); return; }
+      try { parsed = new URL(proxyHaUrl); } catch { err(res, "Invalid HA URL", 500); return; }
       const isHttps = parsed.protocol === "https:";
       const lib     = isHttps ? https : http;
 
@@ -488,7 +498,7 @@ const server = http.createServer(async (req, res) => {
         path:     endpoint,
         method:   "GET",
         headers:  {
-          "Authorization": `Bearer ${cfg.ha_token}`,
+          "Authorization": `Bearer ${authToken}`,
           "Accept":        "image/jpeg,image/*,*/*",
         },
       }, haRes => {
