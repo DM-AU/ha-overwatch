@@ -1758,6 +1758,30 @@ body.page-cameras.sidebar-left  .cam-main  { padding-left:  var(--sidebar-width)
   z-index: 1;
 }
 
+/* Group header row — top level, no toggle, just collapse */
+.cam-dd-group-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 14px;
+  background: rgba(255,255,255,0.04);
+  border-top: 1px solid rgba(255,255,255,0.07);
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.1s;
+}
+.cam-dd-group-header:hover { background: rgba(255,255,255,0.07); }
+
+.cam-dd-group-name {
+  flex: 1;
+  font-size: 12px;
+  font-weight: 600;
+  color: #ddd;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  font-size: 10px;
+}
+
 /* Zone header row — clickable to collapse */
 .cam-dd-zone-header {
   display: flex;

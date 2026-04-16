@@ -352,51 +352,90 @@ function camDotColour(isOn, isActive) {
   return { colour: '#ff3b30', flash: false };
 }
 
-function zoneDotState(zone) {
+// Aggregate dot state for a set of camera IDs
+function camsDotState(camIds, activeIds) {
+  if (!camIds.length) return { colour: '#555', flash: false, dim: true };
+  const anyOn     = camIds.some(id => localStorage.getItem(CAM_TOGGLE_PREFIX + id) !== 'false');
+  const allOn     = camIds.every(id => localStorage.getItem(CAM_TOGGLE_PREFIX + id) !== 'false');
+  const anyActive = camIds.some(id => activeIds.has(id));
+  if (!anyOn)  return { colour: '#555',    flash: false,     dim: true };
+  if (!allOn)  return { colour: '#ff9500', flash: anyActive, dim: false }; // orange = mixed
+  return             { colour: '#ff3b30',  flash: anyActive, dim: false }; // red = all on
+}
+
+// Aggregate dot for a zone (respects zone-level toggle)
+function zoneDotState(zone, activeIds) {
   const cameras = zone.cameras || [];
-  if (!cameras.length) return { colour: zone.colorHex || '#0096ff', flash: false };
-  const zoneOn   = localStorage.getItem(CAM_ZONE_PREFIX + zone.id) !== 'false';
-  if (!zoneOn) return { colour: zone.colorHex || '#0096ff', flash: false, dim: true };
+  const zoneOn  = localStorage.getItem(CAM_ZONE_PREFIX + zone.id) !== 'false';
+  if (!cameras.length || !zoneOn) return { colour: zone.colorHex || '#0096ff', flash: false, dim: true };
+  return camsDotState(cameras, activeIds);
+}
 
-  const allOn    = cameras.every(id => localStorage.getItem(CAM_TOGGLE_PREFIX + id) !== 'false');
-  const anyOn    = cameras.some(id  => localStorage.getItem(CAM_TOGGLE_PREFIX + id) !== 'false');
-  const anyActive = cameras.some(id => {
-    const active = getActiveCameras();
-    return active.some(c => c.id === id);
+// Aggregate dot for a group (respects zone-level toggles for member zones)
+function groupDotState(group, zones, activeIds) {
+  const memberZones = (group.zone_ids || []).map(id => zones.find(z => z.id === id)).filter(Boolean)
+    .filter(z => (z.cameras || []).length > 0);
+  if (!memberZones.length) return { colour: group.colorHex || '#0096ff', flash: false, dim: true };
+
+  // Collect all camera IDs that are in ON zones
+  const allCams = memberZones.flatMap(z => {
+    const zOn = localStorage.getItem(CAM_ZONE_PREFIX + z.id) !== 'false';
+    return zOn ? (z.cameras || []) : [];
   });
+  if (!allCams.length) return { colour: group.colorHex || '#0096ff', flash: false, dim: true };
+  return camsDotState(allCams, activeIds);
+}
 
-  if (!anyOn) return { colour: zone.colorHex || '#0096ff', flash: false, dim: true };
-  if (!allOn) return { colour: '#ff9500', flash: anyActive }; // orange = mixed
-  return { colour: '#ff3b30', flash: anyActive };             // red = all on
+// All camera IDs across all zones with cameras
+function allCameraIds(zones) {
+  return zones.flatMap(z => z.cameras || []);
 }
 
 function renderCameraStatusBar() {
   const container = document.getElementById('cameraStatusContainer');
   if (!container) return;
 
-  const OW     = window.OW;
-  const zones  = OW.zones;
-  const globalOn = localStorage.getItem(CAM_GLOBAL_KEY) !== 'false';
+  const OW       = window.OW;
+  const zones    = OW.zones;
+  const groups   = OW.groups;
   const activeCams = getActiveCameras();
   const activeIds  = new Set(activeCams.map(c => c.id));
 
+  // ── Compute master state: all on = checked, any off = unchecked ──
+  const allCams = allCameraIds(zones);
+  const masterOn = allCams.length > 0 &&
+    allCams.every(id => localStorage.getItem(CAM_TOGGLE_PREFIX + id) !== 'false') &&
+    zones.filter(z => (z.cameras||[]).length).every(z => localStorage.getItem(CAM_ZONE_PREFIX + z.id) !== 'false');
+  const masterDot = camsDotState(allCams, activeIds);
+
   const zonesWithCameras = zones.filter(z => (z.cameras || []).length > 0);
 
-  // Build zone rows with collapsible cameras
+  // ── Build 3-level tree: groups (sorted) → zones (sorted) → cameras (sorted) ──
   let zonesHtml = '';
   if (zonesWithCameras.length === 0) {
     zonesHtml = `<div class="cam-status-empty">No cameras configured in zones</div>`;
   } else {
-    zonesWithCameras.forEach(zone => {
+    const groupedZoneIds = new Set((groups || []).flatMap(g => g.zone_ids || []));
+
+    // Sort groups alphabetically
+    const sortedGroups = [...(groups || [])].sort((a, b) =>
+      (a.name || a.id).localeCompare(b.name || b.id));
+
+    // Render a single zone row + its cameras
+    const renderZoneRow = (zone, indent) => {
       const zoneOn   = localStorage.getItem(CAM_ZONE_PREFIX + zone.id) !== 'false';
       const colKey   = `cam_zone_collapsed_${zone.id}`;
       const collapsed = localStorage.getItem(colKey) !== 'expanded';
-      const cameras  = zone.cameras || [];
-      const dot      = zoneDotState(zone);
+      const cameras  = [...(zone.cameras || [])].sort((a, b) =>
+        friendlyName(a).localeCompare(friendlyName(b)));
+      const dot = zoneDotState(zone, activeIds);
+      const pl  = indent === 1 ? '28px' : '14px';
 
-      zonesHtml += `
-        <div class="cam-dd-zone-header${collapsed ? ' collapsed' : ''}" data-zone-id="${zone.id}" data-col-key="${colKey}">
-          <div class="zone-list-dot${dot.flash ? ' flashing' : ''}" data-cam-zone-dot="${zone.id}"
+      let html = `
+        <div class="cam-dd-zone-header${collapsed ? ' collapsed' : ''}"
+             data-zone-id="${zone.id}" data-col-key="${colKey}"
+             style="padding-left:${pl};">
+          <div class="zone-list-dot${dot.flash ? ' flashing' : ''}"
             style="background:${dot.colour};opacity:${dot.dim ? 0.35 : 1};width:8px;height:8px;border-radius:50%;flex-shrink:0;"></div>
           <span class="cam-dd-zone-name">${escapeHtml(zone.name || zone.id)}</span>
           <svg class="cam-dd-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none"
@@ -415,10 +454,11 @@ function renderCameraStatusBar() {
         const isActive = activeIds.has(camId);
         const isPinned = camPinned.has(camId);
         const dot      = camDotColour(camOn && zoneOn, isActive && camOn && zoneOn);
-        zonesHtml += `
-          <div class="cam-dd-cam-row">
-            <div class="zone-list-dot${dot.flash ? ' flashing' : ''}" data-cam-dot="${camId}"
-              style="background:${dot.colour};opacity:${camOn && zoneOn ? 1 : 0.3};width:6px;height:6px;border-radius:50%;flex-shrink:0;margin-left:10px;"></div>
+        const camPl    = indent === 1 ? '44px' : '28px';
+        html += `
+          <div class="cam-dd-cam-row" style="padding-left:${camPl};">
+            <div class="zone-list-dot${dot.flash ? ' flashing' : ''}"
+              style="background:${dot.colour};opacity:${camOn && zoneOn ? 1 : 0.3};width:6px;height:6px;border-radius:50%;flex-shrink:0;"></div>
             <span class="cam-dd-cam-name">${escapeHtml(friendlyName(camId))}${isPinned ? ' <span style="font-size:9px;color:#ff9500;">📌</span>' : ''}</span>
             <label class="zone-toggle-switch" style="flex-shrink:0;" onclick="event.stopPropagation()">
               <input type="checkbox" class="cam-entity-toggle" data-cam-id="${camId}" ${camOn ? 'checked' : ''}>
@@ -427,25 +467,65 @@ function renderCameraStatusBar() {
           </div>`;
       });
 
+      html += `</div>`;
+      return html;
+    };
+
+    // Render groups (with their member zones)
+    sortedGroups.forEach(group => {
+      const memberZones = (group.zone_ids || [])
+        .map(id => zones.find(z => z.id === id))
+        .filter(z => z && (z.cameras || []).length > 0)
+        .sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id));
+      if (!memberZones.length) return;
+
+      const gColKey   = `cam_grp_collapsed_${group.id}`;
+      const gCollapsed = localStorage.getItem(gColKey) !== 'expanded';
+      const gDot      = groupDotState(group, zones, activeIds);
+
+      zonesHtml += `
+        <div class="cam-dd-group-header${gCollapsed ? ' collapsed' : ''}"
+             data-group-id="${group.id}" data-col-key="${gColKey}">
+          <div class="zone-list-dot${gDot.flash ? ' flashing' : ''}"
+            style="background:${gDot.colour};opacity:${gDot.dim ? 0.35 : 1};width:9px;height:9px;border-radius:50%;flex-shrink:0;"></div>
+          <span class="cam-dd-group-name">${escapeHtml(group.name || group.id)}</span>
+          <svg class="cam-dd-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none"
+            style="opacity:0.4;flex-shrink:0;transition:transform 0.2s;transform:rotate(${gCollapsed ? '-90' : '0'}deg)">
+            <path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </div>
+        <div class="cam-dd-group-zones" data-group-id="${group.id}" style="display:${gCollapsed ? 'none' : ''};">`;
+
+      memberZones.forEach(zone => { zonesHtml += renderZoneRow(zone, 1); });
       zonesHtml += `</div>`;
     });
 
+    // Ungrouped zones (sorted alphabetically)
+    const ungroupedZones = zonesWithCameras
+      .filter(z => !groupedZoneIds.has(z.id))
+      .sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id));
+
+    if (ungroupedZones.length) {
+      ungroupedZones.forEach(zone => { zonesHtml += renderZoneRow(zone, 0); });
+    }
+
     // Pinned cameras not in any zone
     const allZoneCams = new Set(zones.flatMap(z => z.cameras || []));
-    const orphanPins  = [...camPinned].filter(id => !allZoneCams.has(id));
+    const orphanPins  = [...camPinned].filter(id => !allZoneCams.has(id))
+      .sort((a, b) => friendlyName(a).localeCompare(friendlyName(b)));
     if (orphanPins.length) {
       zonesHtml += `<div class="cam-dd-zone-header" style="border-top:1px solid rgba(255,255,255,0.06);cursor:default;">
         <div style="width:8px;height:8px;border-radius:50%;background:#ff9500;flex-shrink:0;"></div>
         <span class="cam-dd-zone-name" style="color:#777;">Pinned (no zone)</span>
       </div>`;
       orphanPins.forEach(camId => {
-        const camOn = localStorage.getItem(CAM_TOGGLE_PREFIX + camId) !== 'false';
+        const camOn    = localStorage.getItem(CAM_TOGGLE_PREFIX + camId) !== 'false';
         const isActive = activeIds.has(camId);
-        const dot = camDotColour(camOn, isActive && camOn);
+        const dot      = camDotColour(camOn, isActive && camOn);
         zonesHtml += `
-          <div class="cam-dd-cam-row">
-            <div class="zone-list-dot${dot.flash ? ' flashing' : ''}" data-cam-dot="${camId}"
-              style="background:${dot.colour};opacity:${camOn ? 1 : 0.3};width:6px;height:6px;border-radius:50%;flex-shrink:0;margin-left:10px;"></div>
+          <div class="cam-dd-cam-row" style="padding-left:28px;">
+            <div class="zone-list-dot${dot.flash ? ' flashing' : ''}"
+              style="background:${dot.colour};opacity:${camOn ? 1 : 0.3};width:6px;height:6px;border-radius:50%;flex-shrink:0;"></div>
             <span class="cam-dd-cam-name">${escapeHtml(friendlyName(camId))} <span style="font-size:9px;color:#ff9500;">📌</span></span>
             <label class="zone-toggle-switch" style="flex-shrink:0;">
               <input type="checkbox" class="cam-entity-toggle" data-cam-id="${camId}" ${camOn ? 'checked' : ''}>
@@ -456,9 +536,11 @@ function renderCameraStatusBar() {
     }
   }
 
-  // Global dot colour
-  const anyActive = activeCams.length > 0;
-  const globalDotClass = globalOn && anyActive ? 'active flashing' : globalOn ? 'active' : '';
+  // ── Status bar pill ────────────────────────────────────────
+  const anyActive    = activeCams.length > 0;
+  const masterLabel  = masterOn ? 'Cameras Active' : 'Cameras Off';
+  const masterColour = masterDot.dim ? '#555' : masterDot.colour;
+  const masterFlash  = !masterDot.dim && masterDot.flash;
 
   const sidebarOnRight = (OW.uiConfig.sidebar_position || 'right') !== 'left';
   const hasHidden = camHidden.size > 0;
@@ -473,8 +555,9 @@ function renderCameraStatusBar() {
     <div class="cam-status-bar" id="camStatusBar">
       ${sidebarOnRight ? modeButtons : ''}
       <div class="cam-status-inner" id="camStatusToggle">
-        <div class="zone-list-dot ${globalDotClass}" style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${globalOn ? '#32d74b' : '#555'};"></div>
-        <span class="cam-status-label">${globalOn ? 'Cameras Active' : 'Cameras Off'}</span>
+        <div class="zone-list-dot${masterFlash ? ' flashing' : ''}"
+          style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${masterColour};"></div>
+        <span class="cam-status-label">${masterLabel}</span>
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" style="opacity:0.5;margin-left:4px;transition:transform 0.2s;transform:rotate(${camStatusOpen ? '180' : '0'}deg)">
           <path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
@@ -483,9 +566,11 @@ function renderCameraStatusBar() {
     </div>
     <div class="cam-status-dd" id="camStatusDd" style="display:${camStatusOpen ? 'block' : 'none'};">
       <div class="cam-status-master">
-        <span style="flex:1;font-size:11px;font-weight:600;color:#aaa;">All Cameras</span>
+        <div class="zone-list-dot${masterFlash ? ' flashing' : ''}"
+          style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${masterColour};opacity:${masterDot.dim ? 0.35 : 1};"></div>
+        <span style="flex:1;font-size:11px;font-weight:600;color:#aaa;margin-left:6px;">All Cameras</span>
         <label class="zone-toggle-switch" style="flex-shrink:0;">
-          <input type="checkbox" id="camGlobalToggle" ${globalOn ? 'checked' : ''}>
+          <input type="checkbox" id="camGlobalToggle" ${masterOn ? 'checked' : ''}>
           <span class="zone-toggle-track"></span>
         </label>
       </div>
@@ -494,7 +579,7 @@ function renderCameraStatusBar() {
     </div>
   `;
 
-  // ── Bind events ──────────────────────────────────────────────
+  // ── Bind events ────────────────────────────────────────────
 
   document.getElementById('camStatusToggle')?.addEventListener('click', () => {
     camStatusOpen = !camStatusOpen;
@@ -502,46 +587,62 @@ function renderCameraStatusBar() {
     renderCameraStatusBar();
   });
 
+  // Master toggle → propagate to all zones and cameras
   document.getElementById('camGlobalToggle')?.addEventListener('change', e => {
-    localStorage.setItem(CAM_GLOBAL_KEY, e.target.checked ? 'true' : 'false');
+    const on = e.target.checked;
+    zonesWithCameras.forEach(zone => {
+      localStorage.setItem(CAM_ZONE_PREFIX + zone.id, on ? 'true' : 'false');
+      (zone.cameras || []).forEach(camId =>
+        localStorage.setItem(CAM_TOGGLE_PREFIX + camId, on ? 'true' : 'false'));
+    });
     renderCameraStatusBar();
     renderCameraGrid();
   });
 
-  // Zone header: click row = collapse/expand cameras; toggle = zone on/off
-  document.querySelectorAll('.cam-dd-zone-header').forEach(hdr => {
+  // Group header: collapse/expand
+  document.querySelectorAll('.cam-dd-group-header').forEach(hdr => {
     hdr.addEventListener('click', e => {
       if (e.target.closest('label,input')) return;
-      const zid    = hdr.dataset.zoneId;
-      const colKey = hdr.dataset.colKey;
-      if (!colKey) return;
-      const cameras = hdr.nextElementSibling;
-      const isCollapsed = cameras?.style.display === 'none';
-      if (cameras) cameras.style.display = isCollapsed ? '' : 'none';
-      const chevron = hdr.querySelector('.cam-dd-chevron');
-      if (chevron) chevron.style.transform = `rotate(${isCollapsed ? '0' : '-90'}deg)`;
-      localStorage.setItem(colKey, isCollapsed ? 'expanded' : 'collapsed');
-      hdr.classList.toggle('collapsed', !isCollapsed);
+      const colKey  = hdr.dataset.colKey;
+      const content = hdr.nextElementSibling;
+      const isCol   = content?.style.display === 'none';
+      if (content) content.style.display = isCol ? '' : 'none';
+      const chev = hdr.querySelector('.cam-dd-chevron');
+      if (chev) chev.style.transform = `rotate(${isCol ? '0' : '-90'}deg)`;
+      localStorage.setItem(colKey, isCol ? 'expanded' : 'collapsed');
     });
   });
 
-  // Zone toggles — toggle all cameras in zone too
+  // Zone header: collapse/expand cameras
+  document.querySelectorAll('.cam-dd-zone-header').forEach(hdr => {
+    hdr.addEventListener('click', e => {
+      if (e.target.closest('label,input')) return;
+      const colKey  = hdr.dataset.colKey;
+      if (!colKey) return;
+      const content = hdr.nextElementSibling;
+      const isCol   = content?.style.display === 'none';
+      if (content) content.style.display = isCol ? '' : 'none';
+      const chev = hdr.querySelector('.cam-dd-chevron');
+      if (chev) chev.style.transform = `rotate(${isCol ? '0' : '-90'}deg)`;
+      localStorage.setItem(colKey, isCol ? 'expanded' : 'collapsed');
+    });
+  });
+
+  // Zone toggles → propagate to member cameras
   document.querySelectorAll('.cam-zone-toggle').forEach(chk => {
     chk.addEventListener('change', e => {
       const zid = e.target.dataset.zoneId;
       const on  = e.target.checked;
       localStorage.setItem(CAM_ZONE_PREFIX + zid, on ? 'true' : 'false');
-      // Propagate to member cameras
       const zone = zones.find(z => z.id === zid);
-      (zone?.cameras || []).forEach(camId => {
-        localStorage.setItem(CAM_TOGGLE_PREFIX + camId, on ? 'true' : 'false');
-      });
+      (zone?.cameras || []).forEach(camId =>
+        localStorage.setItem(CAM_TOGGLE_PREFIX + camId, on ? 'true' : 'false'));
       renderCameraStatusBar();
       renderCameraGrid();
     });
   });
 
-  // Camera toggles — update parent zone dot
+  // Camera toggles
   document.querySelectorAll('.cam-entity-toggle').forEach(chk => {
     chk.addEventListener('change', e => {
       localStorage.setItem(CAM_TOGGLE_PREFIX + e.target.dataset.camId, e.target.checked ? 'true' : 'false');
