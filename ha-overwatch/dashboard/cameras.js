@@ -513,32 +513,15 @@ function bindModal() {
       camPinned.add(camModalEntityId);
       pinBtn.textContent = '📌 Unpin';
     }
-    // Persist pinned list back to uiConfig
+    // Update uiConfig in memory — persisted next time user hits Save Settings
     OW.uiConfig.cam_pinned = JSON.stringify([...camPinned]);
-    // Save to server
-    fetch(OW.apiPath('ow/save-config'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ filename: 'config/ui.yaml', content: buildCamYamlPatch(OW.uiConfig) })
-    }).catch(() => {});
     renderCameraStatusBar();
     renderCameraGrid();
   });
 }
 
-function buildCamYamlPatch(cfg) {
-  // Only save camera-related keys (others are owned by app.js)
-  return [
-    `cam_default_mode: "${cfg.cam_default_mode || 'snapshot'}"`,
-    `cam_snapshot_interval: ${cfg.cam_snapshot_interval || 2}`,
-    `cam_cooldown: ${cfg.cam_cooldown || 30}`,
-    `cam_max_visible: ${cfg.cam_max_visible || 0}`,
-    `cam_sort_order: "${cfg.cam_sort_order || 'recent_first'}"`,
-    `cam_fail_hide_seconds: ${cfg.cam_fail_hide_seconds || 5}`,
-    `cam_low_res_map: '${cfg.cam_low_res_map || "{}"}'`,
-    `cam_pinned: '${cfg.cam_pinned || "[]"}'`,
-  ].join('\n');
-}
+// buildCamYamlPatch removed — partial saves destroyed ui.yaml.
+// Camera config persists via app.js buildYamlContent() on full Settings save.
 
 /* ── Override sidebar loading for camera page ─────────────────── */
 // app.js loads modules/sidebar.html by default.
@@ -587,6 +570,13 @@ function initCameraPage() {
 
   // Expose update function for app.js to call on HA state changes
   window.camUpdate = camUpdate;
+
+  // Clear hidden cameras on HA reconnect (e.g. after token was restored)
+  window.camResetHidden = () => {
+    camHidden.clear();
+    camFailCount = {};
+    renderCameraGrid();
+  };
 
   OW.logEvent('info', 'Camera dashboard initialised.', 'system');
 }
