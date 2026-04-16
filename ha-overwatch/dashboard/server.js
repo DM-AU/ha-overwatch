@@ -455,17 +455,27 @@ const server = http.createServer(async (req, res) => {
       const cfg      = getHAConfig(loadConfig());
       if (!cfg.ha_url || !cfg.ha_token) { err(res, "HA not configured", 503); return; }
       const isStream = pathname.startsWith("/ow/camera_proxy_stream");
-      // Extract entity — strip prefix, keep everything up to ?
-      const prefix = isStream ? "/ow/camera_proxy_stream/" : "/ow/camera_proxy/";
-      const entity = pathname.slice(prefix.length).split("?")[0];
+      const prefix   = isStream ? "/ow/camera_proxy_stream/" : "/ow/camera_proxy/";
+      const entity   = pathname.slice(prefix.length).split("?")[0];
       if (!entity) { err(res, "Missing entity", 400); return; }
 
-      const haUrl    = (cfg.ha_url || "").replace(/\/$/, "");
-      const endpoint = isStream
-        ? `/api/camera_proxy_stream/${entity}`
-        : `/api/camera_proxy/${entity}`;
+      // HA camera_proxy requires ?token=<access_token> from the entity's attributes
+      // Fetch the entity state first to get the access_token
+      let accessToken = "";
+      try {
+        const stateRes = await haRestCall("GET", `/api/states/${entity}`, null, cfg);
+        accessToken = stateRes?.body?.attributes?.access_token || "";
+      } catch (e) {
+        console.warn(`[CAM PROXY] Could not fetch state for ${entity}: ${e.message}`);
+      }
 
-      console.log(`[CAM PROXY] ${isStream ? "stream" : "snap"} → ${haUrl}${endpoint}`);
+      const haUrl      = (cfg.ha_url || "").replace(/\/$/, "");
+      const tokenParam = accessToken ? `?token=${accessToken}` : "";
+      const endpoint   = isStream
+        ? `/api/camera_proxy_stream/${entity}${tokenParam}`
+        : `/api/camera_proxy/${entity}${tokenParam}`;
+
+      console.log(`[CAM PROXY] ${isStream ? "stream" : "snap"} → ${entity} (token=${!!accessToken})`);
 
       let parsed;
       try { parsed = new URL(haUrl); } catch { err(res, "Invalid HA URL", 500); return; }
@@ -484,14 +494,14 @@ const server = http.createServer(async (req, res) => {
       }, haRes => {
         console.log(`[CAM PROXY] HA responded ${haRes.statusCode} for ${entity}`);
         const fwdHeaders = { "Cache-Control": "no-cache", "Access-Control-Allow-Origin": "*" };
-        if (haRes.headers["content-type"]) fwdHeaders["Content-Type"] = haRes.headers["content-type"];
+        if (haRes.headers["content-type"])   fwdHeaders["Content-Type"]   = haRes.headers["content-type"];
         if (haRes.headers["content-length"]) fwdHeaders["Content-Length"] = haRes.headers["content-length"];
         res.writeHead(haRes.statusCode, fwdHeaders);
         haRes.pipe(res);
       });
       haReq.on("error", e => { console.error("[CAM PROXY] error:", e.message); err(res, "Proxy error", 502); });
       haReq.end();
-    } catch (e) { err(res, e.message, 500); }
+    } catch (e) { console.error("[CAM PROXY] exception:", e.message); err(res, e.message, 500); }
     return;
   }
 
