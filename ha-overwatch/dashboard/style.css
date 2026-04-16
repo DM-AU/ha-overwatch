@@ -1727,7 +1727,7 @@ body.page-cameras.sidebar-left  .cam-main  { padding-left:  var(--sidebar-width)
   border-color: rgba(255,255,255,0.2);
 }
 
-/* ── Status dropdown ───────────────────────────────────────── */
+/* ── Status dropdown — floats over camera grid ─────────────── */
 .cam-status-dd {
   position: fixed;
   top: 48px;
@@ -1741,9 +1741,10 @@ body.page-cameras.sidebar-left  .cam-main  { padding-left:  var(--sidebar-width)
   border: 1px solid rgba(255,255,255,0.1);
   border-top: none;
   border-radius: 0 0 12px 12px;
-  z-index: 379;
+  z-index: 390;   /* above cam-grid */
   backdrop-filter: blur(10px);
   scrollbar-gutter: stable;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.6);
 }
 
 .cam-status-master {
@@ -1757,20 +1758,40 @@ body.page-cameras.sidebar-left  .cam-main  { padding-left:  var(--sidebar-width)
   z-index: 1;
 }
 
-.cam-status-zone-header {
+/* Zone header row — clickable to collapse */
+.cam-dd-zone-header {
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 8px 14px;
   background: rgba(255,255,255,0.02);
   border-top: 1px solid rgba(255,255,255,0.05);
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.1s;
+}
+.cam-dd-zone-header:hover { background: rgba(255,255,255,0.05); }
+
+.cam-dd-zone-name {
+  flex: 1;
+  font-size: 12px;
+  color: #ccc;
 }
 
-.cam-status-cam-row {
+.cam-dd-chevron { flex-shrink: 0; }
+
+/* Camera row — indented under zone */
+.cam-dd-cam-row {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 14px 6px 28px;
+  padding: 6px 14px;
+}
+
+.cam-dd-cam-name {
+  flex: 1;
+  font-size: 11px;
+  color: #aaa;
 }
 
 .cam-status-empty {
