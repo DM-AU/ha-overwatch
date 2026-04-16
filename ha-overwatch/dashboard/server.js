@@ -459,33 +459,18 @@ const server = http.createServer(async (req, res) => {
       const entity   = pathname.slice(prefix.length).split("?")[0];
       if (!entity) { err(res, "Missing entity", 400); return; }
 
-      // HA camera_proxy requires ?token=<access_token> from the entity's attributes
-      // Fetch the entity state first to get the access_token
-      let accessToken = "";
-      try {
-        const stateRes = await haRestCall("GET", `/api/states/${entity}`, null, cfg);
-        const attrs = stateRes?.body?.attributes || {};
-        accessToken = attrs.access_token || attrs.token || "";
-        console.log(`[CAM PROXY] state attrs keys: ${Object.keys(attrs).join(", ")}`);
-        console.log(`[CAM PROXY] state status: ${stateRes?.status}, body keys: ${Object.keys(stateRes?.body||{}).join(", ")}`);
-      } catch (e) {
-        console.warn(`[CAM PROXY] Could not fetch state for ${entity}: ${e.message}`);
-      }
-
-      // Camera proxy: use external HA URL + user long-lived token
-      // (supervisor internal token is blocked by some camera integrations like Unifi Protect)
+      // Camera proxy uses external HA URL + user long-lived token
+      // (supervisor token blocked by Unifi Protect and some other integrations)
       const userCfg    = loadConfig();
       const userToken  = userCfg.ha_token || "";
-      const userHaUrl  = (userCfg.ha_url || cfg.ha_url || "").replace(/\/$/, "");
-      const proxyHaUrl = userToken ? userHaUrl : (cfg.ha_url || "").replace(/\/$/, "");
+      const proxyHaUrl = (userToken ? userCfg.ha_url : cfg.ha_url || "").replace(/\/$/, "");
       const authToken  = userToken || cfg.ha_token;
 
-      const tokenParam = accessToken ? `?token=${accessToken}` : "";
-      const endpoint   = isStream
-        ? `/api/camera_proxy_stream/${entity}${tokenParam}`
-        : `/api/camera_proxy/${entity}${tokenParam}`;
+      const endpoint = isStream
+        ? `/api/camera_proxy_stream/${entity}`
+        : `/api/camera_proxy/${entity}`;
 
-      console.log(`[CAM PROXY] ${isStream ? "stream" : "snap"} → ${entity} via ${proxyHaUrl} (token=${!!accessToken}, userToken=${!!userToken})`);
+      console.log(`[CAM PROXY] ${isStream ? "stream" : "snap"} → ${entity}`);
 
       let parsed;
       try { parsed = new URL(proxyHaUrl); } catch { err(res, "Invalid HA URL", 500); return; }

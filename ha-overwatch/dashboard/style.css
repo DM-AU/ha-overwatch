@@ -1643,12 +1643,11 @@ body.page-cameras {
 
 .cam-main {
   position: fixed;
-  top: 0; left: 0; right: 0; bottom: 0;
-  /* Account for sidebar + status bar */
-  padding-top: 52px;   /* cam status bar height */
-  transition: padding 0.2s;
+  top: 48px; left: 0; right: 0; bottom: 0;
   display: flex;
   align-items: stretch;
+  overflow: hidden;
+  background: #0a0a0a;
 }
 
 body.page-cameras .sidebar { z-index: 400; }
@@ -1788,7 +1787,11 @@ body.page-cameras.sidebar-left  .cam-main  { padding-left:  var(--sidebar-width)
   gap: 4px;
   padding: 4px;
   background: #0a0a0a;
+  /* Rows fill available height equally */
   align-content: stretch;
+  overflow: hidden;
+  min-height: 0;
+  min-width: 0;
 }
 
 .cam-empty {
@@ -1810,6 +1813,8 @@ body.page-cameras.sidebar-left  .cam-main  { padding-left:  var(--sidebar-width)
   flex-direction: column;
   border: 1px solid rgba(255,255,255,0.06);
   transition: border-color 0.15s;
+  min-height: 0;   /* allow shrinking inside grid */
+  min-width: 0;
 }
 .cam-tile:hover { border-color: rgba(255,255,255,0.18); }
 
@@ -1821,12 +1826,13 @@ body.page-cameras.sidebar-left  .cam-main  { padding-left:  var(--sidebar-width)
   display: flex;
   align-items: center;
   justify-content: center;
+  min-height: 0;
 }
 
 .cam-tile-img {
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  object-fit: contain;   /* show full image, no crop */
   display: block;
 }
 
