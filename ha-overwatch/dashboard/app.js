@@ -2479,10 +2479,11 @@ function checkOfflineZoneEntities() {
 /* ─── HOME ASSISTANT WEBSOCKET ────────────────────────────── */
 function setHAStatus(status) {
   const badge = document.getElementById("haStatusBadge");
+  const text  = document.getElementById("haStatusText");
   if (!badge) return;
   badge.classList.remove("connected", "disconnected", "error");
   badge.classList.add(status);
-  // haStatusText is now an SVG icon — no textContent needed
+  if (text) text.textContent = "HA";
 }
 
 function connectHA() {

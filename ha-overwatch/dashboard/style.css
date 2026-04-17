@@ -2125,22 +2125,21 @@ body[data-split-dir="v"] .split-handle::after { width: 40px; height: 2px; }
   transform: translateX(-50%);
 }
 
-/* Camera panel: flex column so status bar + grid stack vertically */
 .split-panel-cam {
-  display: flex;
-  flex-direction: column;
+  position: relative;
   background: #0a0a0a;
 }
 
+/* Status bar floats at top of camera panel — doesn't push grid down */
 #cameraStatusContainer {
-  flex-shrink: 0;
-  position: relative;
-  z-index: 200;  /* above cam-main */
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  z-index: 200;
+  pointer-events: none;
 }
+#cameraStatusContainer > * { pointer-events: all; }
 
 .cam-status-bar {
-  position: relative !important;
-  top: auto !important; left: auto !important; right: auto !important;
   width: 100%;
   box-sizing: border-box;
 }
@@ -2150,24 +2149,14 @@ body[data-split-dir="v"] .split-handle::after { width: 40px; height: 2px; }
   z-index: 9000;
 }
 
-/* Camera panel must NOT clip overflow so dropdown can escape */
-.split-panel-cam {
-  overflow: visible !important;
-}
-/* But cam-main itself clips its content */
+/* Camera grid fills full panel — status bar overlays on top */
 .cam-main {
-  overflow: hidden !important;
-}
-
-.cam-main {
-  flex: 1;
-  position: relative !important;
-  top: auto !important; left: auto !important; right: auto !important; bottom: auto !important;
+  position: absolute !important;
+  top: 0; left: 0; right: 0; bottom: 0;
   display: flex;
   align-items: stretch;
   overflow: hidden;
   background: #0a0a0a;
-  min-height: 0;
 }
 
 /* ── Floating view toggle widget ──────────────────────────────

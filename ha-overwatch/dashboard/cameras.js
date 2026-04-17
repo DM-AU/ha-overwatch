@@ -165,8 +165,8 @@ function renderCameraGrid() {
 
   const cameras = getActiveCameras();
   const cfg     = window.OW.uiConfig;
-  const snap    = (cfg.cam_default_mode || 'snapshot') === 'snapshot';
-  camMode       = snap ? 'snapshot' : 'live';
+  // camMode is set by user via Snapshot/Live buttons — do NOT override it here
+  // (initial value is set once in initCameraPage from uiConfig)
 
   if (cameras.length === 0) {
     grid.style.display  = 'none';
@@ -557,17 +557,21 @@ function renderCameraStatusBar() {
   const sidebarOnRight = (OW.uiConfig.sidebar_position || 'right') !== 'left';
   const hasHidden = camHidden.size > 0;
 
+  // Opposite the sidebar: sidebar right → buttons LEFT (margin-right:auto pushes left)
+  //                        sidebar left  → buttons RIGHT (margin-left:auto pushes right)
+  const modeSide = sidebarOnRight ? 'margin-right:auto;order:-1;' : 'margin-left:auto;order:1;';
+
   const modeButtons = `
-    <div class="cam-status-mode" style="${sidebarOnRight ? 'margin-right:auto;' : 'margin-left:auto;'}">
+    <div class="cam-status-mode" style="${modeSide}">
       <button class="cam-mode-btn ${camMode === 'snapshot' ? 'active' : ''}" id="camSnapBtn">Snapshot</button>
       <button class="cam-mode-btn ${camMode === 'live' ? 'active' : ''}" id="camLiveBtn">Live</button>
       ${hasHidden ? `<button class="cam-mode-btn" id="camRetryBtn" style="color:#ff9500;border-color:rgba(255,149,0,0.3);" title="Retry ${camHidden.size} hidden camera(s)">↺ Retry</button>` : ''}
     </div>`;
 
   container.innerHTML = `
-    <div class="cam-status-bar" id="camStatusBar">
-      ${sidebarOnRight ? modeButtons : ''}
-      <div class="cam-status-inner" id="camStatusToggle" style="cursor:pointer;">
+    <div class="cam-status-bar" id="camStatusBar" style="display:flex;align-items:center;position:relative;">
+      ${modeButtons}
+      <div class="cam-status-inner" id="camStatusToggle" style="cursor:pointer;position:absolute;left:50%;transform:translateX(-50%);">
         <div class="zone-list-dot${masterFlash ? ' flashing' : ''}"
           style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${masterColour};"></div>
         <span class="cam-status-label">${masterLabel}</span>
@@ -575,7 +579,6 @@ function renderCameraStatusBar() {
           <path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
       </div>
-      ${!sidebarOnRight ? modeButtons : ''}
     </div>
   `;
 
@@ -731,18 +734,21 @@ function renderCameraStatusBar() {
   const retryBtn = document.getElementById('camRetryBtn');
 
   if (snapBtn) snapBtn.onclick = () => {
+    if (camMode === 'snapshot') return;  // already in snapshot
     camMode = 'snapshot';
+    stopSnapshotRefresh();
     const grid = document.getElementById('cameraGrid');
-    if (grid) grid.innerHTML = '';
+    if (grid) grid.innerHTML = '';  // force full tile rebuild in new mode
     renderCameraGrid();
     startSnapshotRefresh();
     renderCameraStatusBar();
   };
   if (liveBtn) liveBtn.onclick = () => {
+    if (camMode === 'live') return;  // already live
     camMode = 'live';
     stopSnapshotRefresh();
     const grid = document.getElementById('cameraGrid');
-    if (grid) grid.innerHTML = '';
+    if (grid) grid.innerHTML = '';  // force full tile rebuild with stream URLs
     renderCameraGrid();
     renderCameraStatusBar();
   };
