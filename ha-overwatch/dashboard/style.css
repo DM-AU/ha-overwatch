@@ -1638,7 +1638,7 @@ display: flex;
 /* ── Layout ─────────────────────────────────────────────────── */
 .cam-main {
   position: absolute;
-  top: 48px; left: 0; right: 0; bottom: 0;
+  top: 0; left: 0; right: 0; bottom: 0;
   display: flex;
   align-items: stretch;
   overflow: hidden;
@@ -2150,14 +2150,7 @@ body[data-split-dir="v"] .split-handle::after { width: 40px; height: 2px; }
 }
 
 /* Camera grid fills full panel — status bar overlays on top */
-.cam-main {
-  position: absolute !important;
-  top: 0; left: 0; right: 0; bottom: 0;
-  display: flex;
-  align-items: stretch;
-  overflow: hidden;
-  background: #0a0a0a;
-}
+/* .cam-main defined above */
 
 /* ── Floating view toggle widget ──────────────────────────────
  * Sits horizontally at the same level as the sidebar collapse button.
