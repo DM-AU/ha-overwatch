@@ -555,7 +555,7 @@ function renderCameraStatusBar() {
   container.innerHTML = `
     <div class="cam-status-bar" id="camStatusBar">
       ${sidebarOnRight ? modeButtons : ''}
-      <div class="cam-status-inner" id="camStatusToggle">
+      <div class="cam-status-inner" id="camStatusToggle" style="cursor:pointer;">
         <div class="zone-list-dot${masterFlash ? ' flashing' : ''}"
           style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${masterColour};"></div>
         <span class="cam-status-label">${masterLabel}</span>
@@ -567,14 +567,15 @@ function renderCameraStatusBar() {
     </div>
   `;
 
-  // ── Portal dropdown to body so it escapes overflow:hidden on split panels ──
+  // ── Portal dropdown — lives on body, escapes overflow:hidden clipping ──
   let dd = document.getElementById('camStatusDd');
   if (!dd) {
     dd = document.createElement('div');
     dd.id = 'camStatusDd';
-    dd.className = 'cam-status-dd cam-status-dd-portal';
     document.body.appendChild(dd);
   }
+  // Always apply portal classes
+  dd.className = 'cam-status-dd cam-status-dd-portal';
   dd.innerHTML = `
     <div class="cam-status-master">
       <div class="zone-list-dot${masterFlash ? ' flashing' : ''}"
@@ -590,30 +591,35 @@ function renderCameraStatusBar() {
   `;
   dd.style.display = camStatusOpen ? 'block' : 'none';
 
-  // Position the portal dropdown below the status bar pill
+  // Position portal below the toggle pill — deferred so layout is complete
   function positionDropdown() {
     const toggle = document.getElementById('camStatusToggle');
-    if (!toggle || !dd) return;
+    if (!toggle) return;
     const r = toggle.getBoundingClientRect();
-    dd.style.position = 'fixed';
-    dd.style.top  = (r.bottom + 4) + 'px';
-    dd.style.left = (r.left + r.width / 2) + 'px';
+    if (r.width === 0) return;  // not yet painted, skip
+    dd.style.top       = (r.bottom + 6) + 'px';
+    dd.style.left      = (r.left + r.width / 2) + 'px';
     dd.style.transform = 'translateX(-50%)';
-    dd.style.zIndex = '9000';
   }
-  positionDropdown();
+  // Defer until after paint
+  requestAnimationFrame(positionDropdown);
 
-  // ── Bind events ────────────────────────────────────────────
+  // ── Bind events — use container delegation so re-renders don't lose listeners ──
 
-  document.getElementById('camStatusToggle')?.addEventListener('click', () => {
+  // Remove any previous delegated listener on this container to avoid stacking
+  if (container._camToggleBound) container.removeEventListener('click', container._camToggleBound);
+  container._camToggleBound = (e) => {
+    const toggle = e.target.closest('#camStatusToggle');
+    if (!toggle) return;
+    e.stopPropagation();
     camStatusOpen = !camStatusOpen;
     localStorage.setItem('cam_status_open', camStatusOpen ? 'true' : 'false');
     dd.style.display = camStatusOpen ? 'block' : 'none';
-    if (camStatusOpen) positionDropdown();
-    // Update chevron without full re-render
-    const chev = document.querySelector('#camStatusToggle svg');
+    const chev = toggle.querySelector('svg');
     if (chev) chev.style.transform = `rotate(${camStatusOpen ? '180' : '0'}deg)`;
-  });
+    if (camStatusOpen) requestAnimationFrame(positionDropdown);
+  };
+  container.addEventListener('click', container._camToggleBound);
 
   // Master toggle → propagate to all zones and cameras
   document.getElementById('camGlobalToggle')?.addEventListener('change', e => {
@@ -775,6 +781,18 @@ function initCameraPage() {
 
   // Poll every 2s for zone state changes
   camUpdateInterval = setInterval(camUpdate, 2000);
+
+  // Close camera dropdown when clicking outside it
+  document.addEventListener('pointerdown', e => {
+    const dd = document.getElementById('camStatusDd');
+    const bar = document.getElementById('camStatusToggle');
+    if (!dd || dd.style.display === 'none') return;
+    if (!dd.contains(e.target) && !bar?.contains(e.target)) {
+      camStatusOpen = false;
+      dd.style.display = 'none';
+      localStorage.setItem('cam_status_open', 'false');
+    }
+  });
 
   // Expose update function for app.js to call on HA state changes
   window.camUpdate = camUpdate;
