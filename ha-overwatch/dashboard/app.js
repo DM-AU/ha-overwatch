@@ -2825,72 +2825,98 @@ function renderSettingsPanel() {
   panel.className = "settings-panel open";
   panel.id = "settingsPanel";
 
-  const isAdmin = isAddonMode; // admin = running as add-on
+  const isAdmin = isAddonMode;
+
+  // Current split direction
+  const curDir   = localStorage.getItem('ow_split_dir') || 'h';
+  const curMode  = getViewMode();
+  const isSplitH = curMode === 'split' && curDir === 'h';
+  const isSplitV = curMode === 'split' && curDir === 'v';
+
+  const adminBox = `
+    <div class="settings-admin-notice">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" style="flex-shrink:0;margin-top:1px;">
+        <circle cx="12" cy="12" r="10" stroke="#ff9500" stroke-width="1.8"/>
+        <path d="M12 8v4m0 4h.01" stroke="#ff9500" stroke-width="2" stroke-linecap="round"/>
+      </svg>
+      These settings are managed by an admin via the HA Add-on panel and are read-only here.
+    </div>`;
 
   panel.innerHTML = `
     <div class="settings-titlebar">
       <span class="settings-title">Settings</span>
       <button class="zones-editor-close" id="settingsCloseBtn">✕</button>
     </div>
-
-    <!-- Tabs -->
     <div class="settings-tabs">
       <button class="settings-tab active" data-tab="ha">HA</button>
       <button class="settings-tab" data-tab="general">General</button>
+      <button class="settings-tab" data-tab="alarm">Alarm</button>
       <button class="settings-tab" data-tab="zones">Zones</button>
       <button class="settings-tab" data-tab="cameras">Cameras</button>
     </div>
-
     <div class="settings-body">
 
       <!-- ══ HA TAB ══════════════════════════════════════════════ -->
       <div class="settings-tab-panel active" data-panel="ha">
-
-        ${!isAdmin ? `
-        <div class="settings-admin-notice">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" style="flex-shrink:0;">
-            <circle cx="12" cy="12" r="10" stroke="#ff9500" stroke-width="1.8"/>
-            <path d="M12 8v4m0 4h.01" stroke="#ff9500" stroke-width="2" stroke-linecap="round"/>
-          </svg>
-          These settings are managed by an admin via the HA Add-on panel. View-only here.
-        </div>` : ""}
+        ${!isAdmin ? adminBox : ''}
 
         <div id="haConnectionStatus" class="settings-connection-box ${haConnected ? 'connected' : 'disconnected'}">
-          <div class="settings-connection-label">${haConnected ? '✓ Connected to Home Assistant' : '✗ Not connected to Home Assistant'}</div>
-          ${isAdmin
-            ? `<div class="settings-connection-sub">Running as HA Add-on — URL is automatic.</div>`
-            : `<div class="settings-connection-sub">Enter token below to connect.</div>`
-          }
+          <div class="settings-connection-label">${haConnected ? '✓ Connected to Home Assistant' : '✗ Not connected'}</div>
+          <div class="settings-connection-sub">${isAdmin ? 'Running as HA Add-on — URL is automatic.' : 'Token and URL managed via Add-on.'}</div>
         </div>
 
-        ${!isAdmin ? `
-        <div class="settings-field">
-          <label>HA URL</label>
-          <input type="text" id="cfgHaUrl" value="${escapeHtml(uiConfig.ha_url || "")}" placeholder="http://homeassistant.local:8123">
-        </div>` : `
-        <div class="settings-field">
-          <label>HA URL</label>
-          <div class="settings-readonly">${escapeHtml(uiConfig.ha_url || "Auto (add-on)")}</div>
-        </div>`}
-
-        <div class="settings-field">
-          <label>Long-Lived Access Token</label>
-          ${isAdmin
-            ? `<input type="password" id="cfgHaToken" placeholder="${uiConfig.ha_token ? "●●●●●●●● (saved)" : "eyJ…"}">`
-            : `<div class="settings-readonly settings-readonly-token">●●●●●●●● ${uiConfig.ha_token ? "(saved)" : "(not set)"}</div>
-               <div class="settings-admin-hint">To update: HA → Add-ons → Overwatch → Settings tab</div>`}
-        </div>
-
-        ${isAdmin ? `
-        <button class="settings-btn" id="settingsSaveHaBtn" style="${haConnected ? 'opacity:0.6;' : ''}">
-          ${haConnected ? '✓ Connected — click to reconnect' : 'Connect to Home Assistant'}
-        </button>
-        <div id="haConnectStatus" style="font-size:11px;color:#888;margin-top:5px;min-height:14px;text-align:center;"></div>` : ""}
-
-        <div class="settings-section" style="margin-top:16px;">
-          <div class="settings-section-title">Alarm Configuration
-            ${!isAdmin ? '<span class="settings-admin-badge">Admin only</span>' : ''}
+        <div class="settings-section">
+          <div class="settings-field">
+            <label>HA URL</label>
+            ${isAdmin
+              ? `<input type="text" id="cfgHaUrl" value="${escapeHtml(uiConfig.ha_url || "")}" placeholder="http://homeassistant.local:8123">`
+              : `<div class="settings-readonly">${escapeHtml(uiConfig.ha_url || 'Auto (add-on)')}</div>`}
           </div>
+          <div class="settings-field">
+            <label>Long-Lived Access Token</label>
+            ${isAdmin
+              ? `<input type="password" id="cfgHaToken" placeholder="${uiConfig.ha_token ? '●●●●●●●● (saved)' : 'eyJ…'}">`
+              : `<div class="settings-readonly">●●●●●●●● ${uiConfig.ha_token ? '(saved)' : '(not set)'}</div>
+                 <div class="settings-admin-hint">To update: HA → Add-ons → Overwatch → Settings tab</div>`}
+          </div>
+          ${isAdmin ? `
+          <button class="settings-btn" id="settingsSaveHaBtn" style="${haConnected ? 'opacity:0.6;' : ''}">
+            ${haConnected ? '✓ Connected — click to reconnect' : 'Connect to Home Assistant'}
+          </button>
+          <div id="haConnectStatus" style="font-size:11px;color:#888;margin-top:5px;min-height:14px;text-align:center;"></div>` : ''}
+        </div>
+      </div>
+
+      <!-- ══ GENERAL TAB ═════════════════════════════════════════ -->
+      <div class="settings-tab-panel" data-panel="general">
+        <div class="settings-section">
+          <div class="settings-section-title">Default View <span class="settings-browser-badge">Per device</span></div>
+          <div class="settings-field">
+            <div class="settings-toggle-row">
+              <button class="settings-toggle ${curMode === 'map'  ? 'active' : ''}" data-view="map">Floorplan</button>
+              <button class="settings-toggle ${isSplitH           ? 'active' : ''}" data-view="split-h">Split ↔</button>
+              <button class="settings-toggle ${isSplitV           ? 'active' : ''}" data-view="split-v">Split ↕</button>
+              <button class="settings-toggle ${curMode === 'cameras' ? 'active' : ''}" data-view="cameras">Cameras</button>
+            </div>
+            <div style="font-size:11px;color:#777;margin-top:4px;">Saved per browser/device in local storage.</div>
+          </div>
+        </div>
+        <div class="settings-section">
+          <div class="settings-section-title">Sidebar <span class="settings-browser-badge">Per device</span></div>
+          <div class="settings-field">
+            <label>Position</label>
+            <div class="settings-toggle-row">
+              <button class="settings-toggle ${uiConfig.sidebar_position !== 'left' ? 'active' : ''}" id="sidebarRight">Right</button>
+              <button class="settings-toggle ${uiConfig.sidebar_position === 'left'  ? 'active' : ''}" id="sidebarLeft">Left</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ══ ALARM TAB ════════════════════════════════════════════ -->
+      <div class="settings-tab-panel" data-panel="alarm">
+        ${!isAdmin ? adminBox : ''}
+        <div class="settings-section">
           <div class="settings-field">
             <label>Alarm Panel Entity</label>
             ${isAdmin ? `
@@ -2898,106 +2924,67 @@ function renderSettingsPanel() {
               <input type="text" id="cfgAlarmEntity" value="${escapeHtml(uiConfig.alarm_entity || "")}"
                 placeholder="alarm_control_panel.home_alarm" autocomplete="off">
               <div class="entity-search-results" id="alarmEntityResults" style="display:none;"></div>
-            </div>` : `<div class="settings-readonly">${escapeHtml(uiConfig.alarm_entity || "—")}</div>`}
+            </div>
+            <div style="font-size:11px;color:#777;margin-top:3px;">Supports alarm_control_panel, input_boolean, switch, etc.</div>
+            ` : `<div class="settings-readonly">${escapeHtml(uiConfig.alarm_entity || '—')}</div>`}
           </div>
           ${isAdmin ? `
           <div class="settings-field">
             <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
-              <input type="checkbox" id="cfgAlarmInverted" ${uiConfig.alarm_entity_inverted ? "checked" : ""}
+              <input type="checkbox" id="cfgAlarmInverted" ${uiConfig.alarm_entity_inverted ? 'checked' : ''}
                 style="width:16px;height:16px;cursor:pointer;accent-color:#ffcc00;">
               <span>Invert alarm entity (OFF = Armed)</span>
             </label>
           </div>
           <div class="settings-field">
             <label>Label when armed</label>
-            <input type="text" id="cfgLabelArmed" value="${escapeHtml(uiConfig.alarm_label_armed || "Armed")}" style="max-width:160px;">
+            <input type="text" id="cfgLabelArmed" value="${escapeHtml(uiConfig.alarm_label_armed || 'Armed')}" style="max-width:160px;">
           </div>
           <div class="settings-field">
             <label>Label when disarmed</label>
-            <input type="text" id="cfgLabelDisarmed" value="${escapeHtml(uiConfig.alarm_label_disarmed || "Disarmed")}" style="max-width:160px;">
-          </div>` : `
+            <input type="text" id="cfgLabelDisarmed" value="${escapeHtml(uiConfig.alarm_label_disarmed || 'Disarmed')}" style="max-width:160px;">
+          </div>
+          <button class="settings-btn" id="settingsSaveAlarmBtn">Save Alarm Settings</button>
+          <div id="alarmSaveStatus" style="font-size:11px;color:#888;margin-top:6px;text-align:center;"></div>
+          ` : `
           <div class="settings-field">
             <label>Armed label</label>
-            <div class="settings-readonly">${escapeHtml(uiConfig.alarm_label_armed || "Armed")}</div>
+            <div class="settings-readonly">${escapeHtml(uiConfig.alarm_label_armed || 'Armed')}</div>
+          </div>
+          <div class="settings-field">
+            <label>Disarmed label</label>
+            <div class="settings-readonly">${escapeHtml(uiConfig.alarm_label_disarmed || 'Disarmed')}</div>
           </div>`}
         </div>
-
-        ${isAdmin ? `
-        <div class="settings-section">
-          <button class="settings-btn" id="settingsSaveYamlBtn">Save Settings</button>
-          <div id="yamlSaveStatus" style="font-size:11px;color:#888;margin-top:6px;text-align:center;"></div>
-        </div>` : ""}
       </div>
 
-      <!-- ══ GENERAL TAB ═════════════════════════════════════════ -->
-      <div class="settings-tab-panel" data-panel="general">
-
-        <div class="settings-section">
-          <div class="settings-section-title">Default View
-            <span class="settings-browser-badge">Per device</span>
-          </div>
-          <div class="settings-field">
-            <label>Startup view mode</label>
-            <div class="settings-toggle-row">
-              <button class="settings-toggle ${getViewMode() === 'map'     ? 'active' : ''}" data-view="map">Floorplan</button>
-              <button class="settings-toggle ${getViewMode() === 'split'   ? 'active' : ''}" data-view="split">Split H</button>
-              <button class="settings-toggle ${(getViewMode() === 'split' && (localStorage.getItem('ow_split_dir')||'h') === 'v') ? 'active' : ''}" data-view="split-v">Split V</button>
-              <button class="settings-toggle ${getViewMode() === 'cameras' ? 'active' : ''}" data-view="cameras">Cameras</button>
-            </div>
-            <div style="font-size:11px;color:#777;margin-top:4px;">Saved per browser/device in local storage.</div>
-          </div>
-        </div>
-
-        <div class="settings-section">
-          <div class="settings-section-title">Sidebar
-            <span class="settings-browser-badge">Per device</span>
-          </div>
-          <div class="settings-field">
-            <label>Position</label>
-            <div class="settings-toggle-row">
-              <button class="settings-toggle ${uiConfig.sidebar_position !== "left" ? "active" : ""}" id="sidebarRight">Right</button>
-              <button class="settings-toggle ${uiConfig.sidebar_position === "left"  ? "active" : ""}" id="sidebarLeft">Left</button>
-            </div>
-          </div>
-        </div>
-
+      <!-- ══ ZONES TAB ════════════════════════════════════════════ -->
+      <div class="settings-tab-panel" data-panel="zones">
         <div class="settings-section">
           <div class="settings-section-title">Floor Plan Image
-            ${!isAdmin ? '<span class="settings-admin-badge">Admin only to change</span>' : ''}
+            ${!isAdmin ? '<span class="settings-admin-badge">Admin to change</span>' : ''}
           </div>
+          ${!isAdmin ? adminBox : ''}
           <div class="settings-field">
             <label>Image path</label>
             ${isAdmin ? `
             <div class="settings-floorplan-row">
-              <input type="text" id="cfgFloorplan" value="${escapeHtml(uiConfig.floorplan || "img/floorplan.png")}" placeholder="img/floorplan.png">
+              <input type="text" id="cfgFloorplan" value="${escapeHtml(uiConfig.floorplan || 'img/floorplan.png')}" placeholder="img/floorplan.png">
               <label class="settings-upload-btn" title="Upload new floor plan">↑
                 <input type="file" id="cfgFloorplanUpload" accept="image/*" style="display:none;">
               </label>
             </div>
             <div id="floorplanUploadStatus" style="font-size:11px;color:#888;margin-top:4px;"></div>
-            ` : `<div class="settings-readonly">${escapeHtml(uiConfig.floorplan || "img/floorplan.png")}</div>`}
+            ` : `<div class="settings-readonly">${escapeHtml(uiConfig.floorplan || 'img/floorplan.png')}</div>`}
           </div>
         </div>
 
-        ${isAdmin ? `
         <div class="settings-section">
-          <button class="settings-btn" id="settingsSaveGeneralBtn">Save</button>
-          <div id="generalSaveStatus" style="font-size:11px;color:#888;margin-top:6px;text-align:center;"></div>
-        </div>` : ""}
-      </div>
-
-      <!-- ══ ZONES TAB ════════════════════════════════════════════ -->
-      <div class="settings-tab-panel" data-panel="zones">
-
-        <div class="settings-section">
-          <div class="settings-section-title">Floorplan Behaviour
-            <span class="settings-browser-badge">Per device</span>
-          </div>
+          <div class="settings-section-title">Floorplan Behaviour <span class="settings-browser-badge">Per device</span></div>
           <div class="settings-field">
             <label>Zone fade-out (seconds)</label>
             <input type="number" id="cfgFadeDuration" value="${uiConfig.zone_fade_duration ?? 3}"
               min="0" max="30" step="0.5" style="width:80px;background:#0a0a0a;border:1px solid #2a2a2a;border-radius:8px;color:#fff;padding:6px 8px;font-size:13px;outline:none;">
-            <div style="font-size:11px;color:#777;margin-top:3px;">How long a zone fades out after trigger clears. 0 = instant.</div>
           </div>
           <div class="settings-field">
             <label>Flash behaviour when triggered</label>
@@ -3005,10 +2992,7 @@ function renderSettingsPanel() {
               <button class="settings-toggle ${(localStorage.getItem('ow_flash_mode')||'zone') === 'zone'  ? 'active' : ''}" data-flash="zone">Zone only</button>
               <button class="settings-toggle ${(localStorage.getItem('ow_flash_mode')||'zone') === 'group' ? 'active' : ''}" data-flash="group">Whole group</button>
             </div>
-            <div style="font-size:11px;color:#777;margin-top:4px;">
-              <b>Zone only:</b> just the triggered zone flashes.<br>
-              <b>Whole group:</b> all zones in the group flash when any member triggers.
-            </div>
+            <div style="font-size:11px;color:#777;margin-top:4px;"><b>Zone only:</b> just the triggered zone flashes.<br><b>Whole group:</b> all zones in the group flash.</div>
           </div>
         </div>
 
@@ -3016,57 +3000,50 @@ function renderSettingsPanel() {
           <div class="settings-section-title">Zone Colours — Armed
             ${!isAdmin ? '<span class="settings-admin-badge">Admin only</span>' : ''}
           </div>
+          ${!isAdmin ? adminBox : ''}
           ${isAdmin ? `
           <div class="settings-color-grid">
-            <div class="settings-color-item"><label>Person</label><input type="color" id="cfgColOnPerson" value="${uiConfig.color_on_person || "#ff3b30"}"></div>
-            <div class="settings-color-item"><label>Motion</label><input type="color" id="cfgColOnMotion" value="${uiConfig.color_on_motion || "#ff9500"}"></div>
-            <div class="settings-color-item"><label>Door</label><input type="color" id="cfgColOnDoor" value="${uiConfig.color_on_door || "#ff6b35"}"></div>
-            <div class="settings-color-item"><label>Window</label><input type="color" id="cfgColOnWindow" value="${uiConfig.color_on_window || "#ff9f0a"}"></div>
-            <div class="settings-color-item"><label>Animal</label><input type="color" id="cfgColOnAnimal" value="${uiConfig.color_on_animal || "#ff6b00"}"></div>
-            <div class="settings-color-item"><label>Vehicle</label><input type="color" id="cfgColOnVehicle" value="${uiConfig.color_on_vehicle || "#ff3b80"}"></div>
-            <div class="settings-color-item"><label>Smoke</label><input type="color" id="cfgColOnSmoke" value="${uiConfig.color_on_smoke || "#ff2d55"}"></div>
-            <div class="settings-color-item"><label>CO / Gas</label><input type="color" id="cfgColOnCo" value="${uiConfig.color_on_co || "#bf5af2"}"></div>
+            <div class="settings-color-item"><label>Person</label><input type="color" id="cfgColOnPerson" value="${uiConfig.color_on_person || '#ff3b30'}"></div>
+            <div class="settings-color-item"><label>Motion</label><input type="color" id="cfgColOnMotion" value="${uiConfig.color_on_motion || '#ff9500'}"></div>
+            <div class="settings-color-item"><label>Door</label><input type="color" id="cfgColOnDoor" value="${uiConfig.color_on_door || '#ff6b35'}"></div>
+            <div class="settings-color-item"><label>Window</label><input type="color" id="cfgColOnWindow" value="${uiConfig.color_on_window || '#ff9f0a'}"></div>
+            <div class="settings-color-item"><label>Animal</label><input type="color" id="cfgColOnAnimal" value="${uiConfig.color_on_animal || '#ff6b00'}"></div>
+            <div class="settings-color-item"><label>Vehicle</label><input type="color" id="cfgColOnVehicle" value="${uiConfig.color_on_vehicle || '#ff3b80'}"></div>
+            <div class="settings-color-item"><label>Smoke</label><input type="color" id="cfgColOnSmoke" value="${uiConfig.color_on_smoke || '#ff2d55'}"></div>
+            <div class="settings-color-item"><label>CO / Gas</label><input type="color" id="cfgColOnCo" value="${uiConfig.color_on_co || '#bf5af2'}"></div>
           </div>
           <div class="settings-section-title" style="margin-top:14px;">Zone Colours — Disarmed</div>
           <div class="settings-color-grid">
-            <div class="settings-color-item"><label>Person</label><input type="color" id="cfgColOffPerson" value="${uiConfig.color_off_person || "#4cd964"}"></div>
-            <div class="settings-color-item"><label>Motion</label><input type="color" id="cfgColOffMotion" value="${uiConfig.color_off_motion || "#5ac8fa"}"></div>
-            <div class="settings-color-item"><label>Door</label><input type="color" id="cfgColOffDoor" value="${uiConfig.color_off_door || "#ffcc00"}"></div>
-            <div class="settings-color-item"><label>Window</label><input type="color" id="cfgColOffWindow" value="${uiConfig.color_off_window || "#ffcc00"}"></div>
-            <div class="settings-color-item"><label>Animal</label><input type="color" id="cfgColOffAnimal" value="${uiConfig.color_off_animal || "#aad400"}"></div>
-            <div class="settings-color-item"><label>Vehicle</label><input type="color" id="cfgColOffVehicle" value="${uiConfig.color_off_vehicle || "#00c7be"}"></div>
-            <div class="settings-color-item"><label>Smoke</label><input type="color" id="cfgColOffSmoke" value="${uiConfig.color_off_smoke || "#ff6b6b"}"></div>
-            <div class="settings-color-item"><label>CO / Gas</label><input type="color" id="cfgColOffCo" value="${uiConfig.color_off_co || "#cc73f8"}"></div>
+            <div class="settings-color-item"><label>Person</label><input type="color" id="cfgColOffPerson" value="${uiConfig.color_off_person || '#4cd964'}"></div>
+            <div class="settings-color-item"><label>Motion</label><input type="color" id="cfgColOffMotion" value="${uiConfig.color_off_motion || '#5ac8fa'}"></div>
+            <div class="settings-color-item"><label>Door</label><input type="color" id="cfgColOffDoor" value="${uiConfig.color_off_door || '#ffcc00'}"></div>
+            <div class="settings-color-item"><label>Window</label><input type="color" id="cfgColOffWindow" value="${uiConfig.color_off_window || '#ffcc00'}"></div>
+            <div class="settings-color-item"><label>Animal</label><input type="color" id="cfgColOffAnimal" value="${uiConfig.color_off_animal || '#aad400'}"></div>
+            <div class="settings-color-item"><label>Vehicle</label><input type="color" id="cfgColOffVehicle" value="${uiConfig.color_off_vehicle || '#00c7be'}"></div>
+            <div class="settings-color-item"><label>Smoke</label><input type="color" id="cfgColOffSmoke" value="${uiConfig.color_off_smoke || '#ff6b6b'}"></div>
+            <div class="settings-color-item"><label>CO / Gas</label><input type="color" id="cfgColOffCo" value="${uiConfig.color_off_co || '#cc73f8'}"></div>
           </div>
-          <div class="settings-section" style="margin-top:12px;">
-            <button class="settings-btn" id="settingsSaveZonesBtn">Save Zone Settings</button>
-            <div id="zonesSaveStatus" style="font-size:11px;color:#888;margin-top:6px;text-align:center;"></div>
-          </div>` : `<div style="font-size:12px;color:#555;padding:8px 0;">Contact your admin to change zone colours.</div>`}
+          <button class="settings-btn" id="settingsSaveZonesBtn" style="margin-top:8px;">Save Zone Settings</button>
+          <div id="zonesSaveStatus" style="font-size:11px;color:#888;margin-top:6px;text-align:center;"></div>
+          ` : ''}
         </div>
       </div>
 
       <!-- ══ CAMERAS TAB ══════════════════════════════════════════ -->
       <div class="settings-tab-panel" data-panel="cameras">
-
         <div class="settings-section">
-          <div class="settings-section-title">Display
-            <span class="settings-browser-badge">Per device</span>
-          </div>
+          <div class="settings-section-title">Display <span class="settings-browser-badge">Per device</span></div>
           <div class="settings-field">
             <label>Default camera mode</label>
             <div class="settings-toggle-row">
-              <button class="settings-toggle ${(localStorage.getItem('ow_cam_mode') || uiConfig.cam_default_mode || 'snapshot') === 'snapshot' ? 'active' : ''}" data-cammode="snapshot">Snapshot</button>
-              <button class="settings-toggle ${(localStorage.getItem('ow_cam_mode') || uiConfig.cam_default_mode || 'snapshot') === 'live'     ? 'active' : ''}" data-cammode="live">Live</button>
+              <button class="settings-toggle ${(localStorage.getItem('ow_cam_mode') || uiConfig.cam_default_mode || 'snapshot') !== 'live' ? 'active' : ''}" data-cammode="snapshot">Snapshot</button>
+              <button class="settings-toggle ${(localStorage.getItem('ow_cam_mode') || uiConfig.cam_default_mode || 'snapshot') === 'live' ? 'active' : ''}" data-cammode="live">Live</button>
             </div>
-            <div style="font-size:11px;color:#777;margin-top:4px;">
-              <b>Snapshot:</b> refreshes every few seconds, lower bandwidth.<br>
-              <b>Live:</b> MJPEG stream, instant but uses more resources.
-            </div>
+            <div style="font-size:11px;color:#777;margin-top:4px;"><b>Snapshot:</b> lower bandwidth, refreshes periodically.<br><b>Live:</b> MJPEG stream, instant but higher resource use.</div>
           </div>
-          <div class="settings-field" style="margin-top:10px;">
+          <div class="settings-field" style="margin-top:6px;">
             <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
-              <input type="checkbox" id="cfgHideCamLabels"
-                ${localStorage.getItem('ow_hide_cam_labels') === 'true' ? 'checked' : ''}
+              <input type="checkbox" id="cfgHideCamLabels" ${localStorage.getItem('ow_hide_cam_labels') === 'true' ? 'checked' : ''}
                 style="width:16px;height:16px;accent-color:#0096ff;cursor:pointer;">
               <span>Hide camera name labels on tiles</span>
             </label>
@@ -3074,22 +3051,23 @@ function renderSettingsPanel() {
           </div>
         </div>
 
-        ${isAdmin ? `
-        <div class="settings-section">
-          <div class="settings-section-title">Performance <span class="settings-admin-badge">Admin</span></div>
+        <div class="settings-section" style="${!isAdmin ? 'opacity:0.4;pointer-events:none;' : ''}">
+          <div class="settings-section-title">Performance <span class="settings-admin-badge">Admin only</span></div>
+          ${!isAdmin ? `<div style="font-size:11px;color:#666;margin-bottom:4px;">These settings require admin access via the HA Add-on panel.</div>` : ''}
           <div class="settings-field">
             <label>Snapshot refresh interval (seconds)</label>
-            <input type="number" id="cfgSnapInterval" value="${uiConfig.cam_snapshot_interval || 2}" min="1" max="30"
+            <input type="number" id="cfgSnapInterval" value="${uiConfig.cam_snapshot_interval || 2}" min="1" max="30" ${!isAdmin ? 'disabled' : ''}
               style="width:70px;background:#0a0a0a;border:1px solid #2a2a2a;border-radius:8px;color:#fff;padding:6px 8px;font-size:13px;outline:none;">
           </div>
           <div class="settings-field">
             <label>Camera cooldown after zone clears (seconds)</label>
-            <input type="number" id="cfgCamCooldown" value="${uiConfig.cam_cooldown || 30}" min="0" max="300"
+            <input type="number" id="cfgCamCooldown" value="${uiConfig.cam_cooldown || 30}" min="0" max="300" ${!isAdmin ? 'disabled' : ''}
               style="width:70px;background:#0a0a0a;border:1px solid #2a2a2a;border-radius:8px;color:#fff;padding:6px 8px;font-size:13px;outline:none;">
           </div>
+          ${isAdmin ? `
           <button class="settings-btn" id="settingsSaveCamsBtn">Save Camera Settings</button>
-          <div id="camsSaveStatus" style="font-size:11px;color:#888;margin-top:6px;text-align:center;"></div>
-        </div>` : ""}
+          <div id="camsSaveStatus" style="font-size:11px;color:#888;margin-top:6px;text-align:center;"></div>` : ''}
+        </div>
       </div>
 
     </div>
@@ -3110,23 +3088,27 @@ function renderSettingsPanel() {
     };
   });
 
-  // ── View mode buttons (General tab) ─────────────────────────
+  // ── View mode buttons ────────────────────────────────────────
   panel.querySelectorAll(".settings-toggle[data-view]").forEach(btn => {
     btn.onclick = () => {
       panel.querySelectorAll(".settings-toggle[data-view]").forEach(b => b.classList.remove("active"));
       btn.classList.add("active");
-      if (btn.dataset.view === 'split-v') {
+      const v = btn.dataset.view;
+      if (v === 'split-h') {
+        localStorage.setItem('ow_split_dir', 'h');
+        document.body.setAttribute('data-split-dir', 'h');
+        setViewMode('split');
+      } else if (v === 'split-v') {
         localStorage.setItem('ow_split_dir', 'v');
         document.body.setAttribute('data-split-dir', 'v');
         setViewMode('split');
       } else {
-        if (btn.dataset.view === 'split') localStorage.setItem('ow_split_dir', 'h');
-        setViewMode(btn.dataset.view);
+        setViewMode(v);
       }
     };
   });
 
-  // ── Flash mode buttons (Zones tab) ──────────────────────────
+  // ── Flash mode buttons ───────────────────────────────────────
   panel.querySelectorAll(".settings-toggle[data-flash]").forEach(btn => {
     btn.onclick = () => {
       panel.querySelectorAll(".settings-toggle[data-flash]").forEach(b => b.classList.remove("active"));
@@ -3135,19 +3117,17 @@ function renderSettingsPanel() {
     };
   });
 
-  // ── Camera mode buttons (Cameras tab) ───────────────────────
+  // ── Camera mode buttons ──────────────────────────────────────
   panel.querySelectorAll(".settings-toggle[data-cammode]").forEach(btn => {
     btn.onclick = () => {
       panel.querySelectorAll(".settings-toggle[data-cammode]").forEach(b => b.classList.remove("active"));
       btn.classList.add("active");
-      const mode = btn.dataset.cammode;
-      localStorage.setItem('ow_cam_mode', mode);
-      // Apply immediately if cameras are active
-      if (window._camSetMode) window._camSetMode(mode);
+      localStorage.setItem('ow_cam_mode', btn.dataset.cammode);
+      if (window._camSetMode) window._camSetMode(btn.dataset.cammode);
     };
   });
 
-  // ── Hide camera labels toggle ────────────────────────────────
+  // ── Hide camera labels ───────────────────────────────────────
   const hideLabelsCb = document.getElementById("cfgHideCamLabels");
   if (hideLabelsCb) {
     hideLabelsCb.onchange = () => {
@@ -3159,20 +3139,20 @@ function renderSettingsPanel() {
   }
 
   // ── Sidebar position ─────────────────────────────────────────
-  const sidebarRightBtn = document.getElementById("sidebarRight");
-  const sidebarLeftBtn  = document.getElementById("sidebarLeft");
-  if (sidebarRightBtn) sidebarRightBtn.onclick = () => {
+  const sbRight = document.getElementById("sidebarRight");
+  const sbLeft  = document.getElementById("sidebarLeft");
+  if (sbRight) sbRight.onclick = () => {
     uiConfig.sidebar_position = "right";
     applyConfig(); updateExpandBtn(uiConfig.sidebar_collapsed);
-    sidebarRightBtn.classList.add("active"); sidebarLeftBtn?.classList.remove("active");
+    sbRight.classList.add("active"); sbLeft?.classList.remove("active");
   };
-  if (sidebarLeftBtn) sidebarLeftBtn.onclick = () => {
+  if (sbLeft) sbLeft.onclick = () => {
     uiConfig.sidebar_position = "left";
     applyConfig(); updateExpandBtn(uiConfig.sidebar_collapsed);
-    sidebarLeftBtn.classList.add("active"); sidebarRightBtn?.classList.remove("active");
+    sbLeft.classList.add("active"); sbRight?.classList.remove("active");
   };
 
-  if (!isAdmin) return;  // ── Below here: admin-only bindings ──
+  if (!isAdmin) return;  // ── Admin-only bindings below ─────────
 
   // ── Alarm entity live search ─────────────────────────────────
   const alarmEntityInput   = document.getElementById("cfgAlarmEntity");
@@ -3180,7 +3160,7 @@ function renderSettingsPanel() {
   if (alarmEntityInput && alarmEntityResults) {
     alarmEntityInput.oninput = () => {
       const q = alarmEntityInput.value.trim().toLowerCase();
-      if (!q || !haConnected || !Object.keys(haStates).length) { alarmEntityResults.style.display = "none"; return; }
+      if (!q || !haConnected) { alarmEntityResults.style.display = "none"; return; }
       const hits = Object.keys(haStates).filter(id => id.toLowerCase().includes(q)).slice(0, 20)
         .map(id => ({ id, state: haStates[id]?.state || "—", friendly: haStates[id]?.attributes?.friendly_name || "" }));
       if (!hits.length) { alarmEntityResults.style.display = "none"; return; }
@@ -3233,15 +3213,22 @@ function renderSettingsPanel() {
     };
   }
 
-  // ── Build ui.yaml content ────────────────────────────────────
+  const cfgFloorplanInput = document.getElementById("cfgFloorplan");
+  if (cfgFloorplanInput) {
+    cfgFloorplanInput.onblur = () => {
+      uiConfig.floorplan = cfgFloorplanInput.value.trim();
+      const fp = document.getElementById("floorplanImage");
+      if (fp && uiConfig.floorplan) { fp.src = apiPath(uiConfig.floorplan) + "?v=" + Date.now(); fp.onload = initFloorplan; }
+    };
+  }
+
+  // ── Build ui.yaml ────────────────────────────────────────────
   function buildYamlContent() {
     const g = id => document.getElementById(id)?.value || "";
-    const haUrl   = uiConfig.ha_url || "";
-    const haToken = g("cfgHaToken") || uiConfig.ha_token || "";
     return (
       `ui:\n` +
-      `  ha_url: "${haUrl}"\n` +
-      `  ha_token: "${haToken}"\n` +
+      `  ha_url: "${uiConfig.ha_url || ""}"\n` +
+      `  ha_token: "${g("cfgHaToken") || uiConfig.ha_token || ""}"\n` +
       `  alarm_entity: "${g("cfgAlarmEntity") || uiConfig.alarm_entity || ""}"\n` +
       `  alarm_entity_inverted: ${document.getElementById("cfgAlarmInverted")?.checked ?? false}\n` +
       `  alarm_label_armed: "${g("cfgLabelArmed") || uiConfig.alarm_label_armed || "Armed"}"\n` +
@@ -3277,26 +3264,25 @@ function renderSettingsPanel() {
   }
 
   async function saveYaml(statusId) {
-    const statusEl = document.getElementById(statusId);
-    if (statusEl) { statusEl.textContent = "Saving…"; statusEl.style.color = "#888"; }
+    const el = document.getElementById(statusId);
+    if (el) { el.textContent = "Saving…"; el.style.color = "#888"; }
     try {
       const res = await fetch(apiPath("ow/save-config"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
+        method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ filename: "config/ui.yaml", content: buildYamlContent() })
       });
       if (res.ok) {
-        if (statusEl) { statusEl.textContent = "✓ Saved"; statusEl.style.color = "#32d74b"; }
+        if (el) { el.textContent = "✓ Saved"; el.style.color = "#32d74b"; }
         await loadConfig();
       } else {
-        if (statusEl) { statusEl.textContent = "✗ Save failed"; statusEl.style.color = "#ff3b30"; }
+        if (el) { el.textContent = "✗ Save failed"; el.style.color = "#ff3b30"; }
       }
     } catch (e) {
-      if (statusEl) { statusEl.textContent = "✗ " + e.message; statusEl.style.color = "#ff3b30"; }
+      if (el) { el.textContent = "✗ " + e.message; el.style.color = "#ff3b30"; }
     }
   }
 
-  // ── HA connect button ────────────────────────────────────────
+  // ── HA connect ───────────────────────────────────────────────
   const connectBtn    = document.getElementById("settingsSaveHaBtn");
   const tokenField    = document.getElementById("cfgHaToken");
   const connectStatus = document.getElementById("haConnectStatus");
@@ -3328,19 +3314,9 @@ function renderSettingsPanel() {
     };
   }
 
-  document.getElementById("settingsSaveYamlBtn")?.addEventListener("click",  () => saveYaml("yamlSaveStatus"));
-  document.getElementById("settingsSaveGeneralBtn")?.addEventListener("click", () => saveYaml("generalSaveStatus"));
-  document.getElementById("settingsSaveZonesBtn")?.addEventListener("click",  () => saveYaml("zonesSaveStatus"));
-  document.getElementById("settingsSaveCamsBtn")?.addEventListener("click",   () => saveYaml("camsSaveStatus"));
-
-  const cfgFloorplanInput = document.getElementById("cfgFloorplan");
-  if (cfgFloorplanInput) {
-    cfgFloorplanInput.onblur = () => {
-      uiConfig.floorplan = cfgFloorplanInput.value.trim();
-      const fp = document.getElementById("floorplanImage");
-      if (fp && uiConfig.floorplan) { fp.src = apiPath(uiConfig.floorplan) + "?v=" + Date.now(); fp.onload = initFloorplan; }
-    };
-  }
+  document.getElementById("settingsSaveAlarmBtn")?.addEventListener("click", () => saveYaml("alarmSaveStatus"));
+  document.getElementById("settingsSaveZonesBtn")?.addEventListener("click", () => saveYaml("zonesSaveStatus"));
+  document.getElementById("settingsSaveCamsBtn")?.addEventListener("click",  () => saveYaml("camsSaveStatus"));
 }
 
 function makeDraggable(panel, titlebar, storageKey) {
