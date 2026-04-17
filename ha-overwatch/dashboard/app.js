@@ -323,6 +323,19 @@ function bindSidebarToggle() {
     sidebar.classList.add("collapsed");
     uiConfig.sidebar_collapsed = true;
     updateExpandBtn(true);
+    // Close any open overlays
+    setSearchOpen(false);
+    const logPanel = document.getElementById("logPanel");
+    if (logPanel) logPanel.classList.remove("open");
+    const settingsPanel = document.getElementById("settingsPanel");
+    if (settingsPanel) settingsPanel.remove();
+    if (editorMode) { editorMode = false; renderZonesEditor(); renderZones(); }
+    // Close camera dropdown if open
+    const camDd = document.getElementById("camStatusDd");
+    if (camDd && camDd.style.display !== "none") {
+      camDd.style.display = "none";
+      localStorage.setItem("cam_status_open", "false");
+    }
   }
 
   function expand() {
@@ -2466,11 +2479,10 @@ function checkOfflineZoneEntities() {
 /* ─── HOME ASSISTANT WEBSOCKET ────────────────────────────── */
 function setHAStatus(status) {
   const badge = document.getElementById("haStatusBadge");
-  const text = document.getElementById("haStatusText");
   if (!badge) return;
   badge.classList.remove("connected", "disconnected", "error");
   badge.classList.add(status);
-  if (text) text.textContent = "HA";
+  // haStatusText is now an SVG icon — no textContent needed
 }
 
 function connectHA() {
@@ -3322,14 +3334,20 @@ function runSearch(q) {
 
   const hits = [];
   for (const z of zones) {
-    const zid = (z.id || "").toLowerCase();
+    const zid   = (z.id || "").toLowerCase();
     const zname = (z.name || "").toLowerCase();
     if (zid.includes(query) || zname.includes(query)) {
-      hits.push({ type: "zone", zoneId: z.id, title: z.name || z.id, sub: `Zone (${z.id})` });
+      hits.push({ type: "zone", zoneId: z.id, title: z.name || z.id, sub: `Zone` });
     }
     for (const s of (z.sensors || [])) {
       if (String(s).toLowerCase().includes(query)) {
-        hits.push({ type: "entity", zoneId: z.id, title: s, sub: `Entity in ${z.name || z.id}` });
+        hits.push({ type: "entity", zoneId: z.id, title: s, sub: `Sensor in ${z.name || z.id}` });
+      }
+    }
+    for (const c of (z.cameras || [])) {
+      const friendly = haStates[c]?.attributes?.friendly_name || c;
+      if (String(c).toLowerCase().includes(query) || friendly.toLowerCase().includes(query)) {
+        hits.push({ type: "camera", zoneId: z.id, title: friendly, sub: `Camera in ${z.name || z.id}` });
       }
     }
   }
@@ -3341,7 +3359,8 @@ function runSearch(q) {
     seen.add(key);
     return true;
   }).sort((a, b) => {
-    if (a.type !== b.type) return a.type === "zone" ? -1 : 1;
+    const order = { zone: 0, camera: 1, entity: 2 };
+    if (a.type !== b.type) return (order[a.type] ?? 9) - (order[b.type] ?? 9);
     return a.title.localeCompare(b.title);
   });
 
