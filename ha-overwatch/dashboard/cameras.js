@@ -574,7 +574,6 @@ function renderCameraStatusBar() {
     dd.id = 'camStatusDd';
     document.body.appendChild(dd);
   }
-  // Always apply portal classes
   dd.className = 'cam-status-dd cam-status-dd-portal';
   dd.innerHTML = `
     <div class="cam-status-master">
@@ -591,35 +590,33 @@ function renderCameraStatusBar() {
   `;
   dd.style.display = camStatusOpen ? 'block' : 'none';
 
-  // Position portal below the toggle pill — deferred so layout is complete
   function positionDropdown() {
     const toggle = document.getElementById('camStatusToggle');
     if (!toggle) return;
     const r = toggle.getBoundingClientRect();
-    if (r.width === 0) return;  // not yet painted, skip
+    if (r.width === 0) return;
     dd.style.top       = (r.bottom + 6) + 'px';
     dd.style.left      = (r.left + r.width / 2) + 'px';
     dd.style.transform = 'translateX(-50%)';
   }
-  // Defer until after paint
   requestAnimationFrame(positionDropdown);
 
-  // ── Bind events — use container delegation so re-renders don't lose listeners ──
-
-  // Remove any previous delegated listener on this container to avoid stacking
-  if (container._camToggleBound) container.removeEventListener('click', container._camToggleBound);
-  container._camToggleBound = (e) => {
-    const toggle = e.target.closest('#camStatusToggle');
-    if (!toggle) return;
-    e.stopPropagation();
+  // Expose toggle function globally so the onclick attribute can reach it
+  window._camToggle = () => {
     camStatusOpen = !camStatusOpen;
     localStorage.setItem('cam_status_open', camStatusOpen ? 'true' : 'false');
-    dd.style.display = camStatusOpen ? 'block' : 'none';
-    const chev = toggle.querySelector('svg');
+    const d = document.getElementById('camStatusDd');
+    if (d) d.style.display = camStatusOpen ? 'block' : 'none';
+    const chev = document.querySelector('#camStatusToggle svg');
     if (chev) chev.style.transform = `rotate(${camStatusOpen ? '180' : '0'}deg)`;
     if (camStatusOpen) requestAnimationFrame(positionDropdown);
   };
-  container.addEventListener('click', container._camToggleBound);
+
+  // Wire the toggle via direct onclick on the element (survives re-renders)
+  requestAnimationFrame(() => {
+    const toggle = document.getElementById('camStatusToggle');
+    if (toggle) toggle.onclick = window._camToggle;
+  });
 
   // Master toggle → propagate to all zones and cameras
   document.getElementById('camGlobalToggle')?.addEventListener('change', e => {
@@ -725,6 +722,18 @@ let camUpdateInterval = null;
 
 function camUpdate() {
   renderCameraGrid();
+  // Live-update the status bar dot without full re-render
+  const activeCams = getActiveCameras();
+  const activeIds  = new Set(activeCams.map(c => c.id));
+  const dot = document.querySelector('#camStatusToggle .zone-list-dot');
+  if (dot) {
+    const allCams   = window.OW.zones.flatMap(z => z.cameras || []);
+    const masterDot = camsDotState(allCams, activeIds);
+    const colour    = masterDot.dim ? '#555' : masterDot.colour;
+    dot.style.background = colour;
+    dot.style.opacity    = masterDot.dim ? '0.35' : '1';
+    dot.classList.toggle('flashing', !masterDot.dim && masterDot.flash);
+  }
 }
 
 /* ── Modal bindings ─────────────────────────────────────────── */
