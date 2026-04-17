@@ -258,8 +258,8 @@ function applyConfig() {
 
   restartPolling();
 
-  // Re-connect HA if credentials changed — skip if already connected or add-on mode handling it
-  if (!haConnected && !isAddonMode && uiConfig.ha_url && uiConfig.ha_token) {
+  // Re-connect HA if credentials changed — skip if already connected, add-on mode, or mode not yet determined
+  if (!haConnected && isAddonMode === false && uiConfig.ha_url && uiConfig.ha_token) {
     connectHA();
   }
 
@@ -2496,6 +2496,21 @@ function setHAStatus(status) {
   badge.classList.remove("connected", "disconnected", "error");
   badge.classList.add(status);
   if (text) text.textContent = "HA";
+  // Live-update the connection box in settings panel if open
+  updateSettingsConnectionBox();
+}
+
+function updateSettingsConnectionBox() {
+  const box = document.getElementById("haConnectionStatus");
+  if (!box) return;
+  const connected = haConnected;
+  box.className = `settings-connection-box ${connected ? 'connected' : 'disconnected'}`;
+  const label = box.querySelector(".settings-connection-label");
+  const sub   = box.querySelector(".settings-connection-sub");
+  if (label) label.textContent = connected ? '✓ Connected to Home Assistant' : '✗ Not connected';
+  if (sub)   sub.textContent   = isAddonMode
+    ? (connected ? 'Running as HA Add-on.' : 'Attempting to connect via add-on proxy…')
+    : (connected ? 'Connected via WebSocket.' : 'Enter token and click Connect.');
 }
 
 function connectHA() {
@@ -2859,14 +2874,17 @@ function renderSettingsPanel() {
 
       <!-- ══ HA TAB ══════════════════════════════════════════════ -->
       <div class="settings-tab-panel active" data-panel="ha">
-        ${!isAdmin ? adminBox : ''}
+
+        ${!isAdmin ? `
+        <div class="settings-section-title">HOME ASSISTANT <span class="settings-admin-badge">ADMIN ONLY</span></div>
+        ${adminBox}` : ''}
 
         <div id="haConnectionStatus" class="settings-connection-box ${haConnected ? 'connected' : 'disconnected'}">
           <div class="settings-connection-label">${haConnected ? '✓ Connected to Home Assistant' : '✗ Not connected'}</div>
           <div class="settings-connection-sub">${isAdmin ? 'Running as HA Add-on. Enter token once to connect.' : 'Connection managed by admin via Add-on.'}</div>
         </div>
 
-        <div class="settings-section">
+        <div class="settings-section" ${!isAdmin ? 'style="opacity:0.45;pointer-events:none;"' : ''}>
           <div class="settings-field">
             <label>HA URL</label>
             ${isAdmin
@@ -2877,14 +2895,14 @@ function renderSettingsPanel() {
             <label>Long-Lived Access Token</label>
             ${isAdmin
               ? `<input type="password" id="cfgHaToken" placeholder="${uiConfig.ha_token ? '●●●●●●●● (saved)' : 'eyJ…'}">`
-              : `<div class="settings-readonly">●●●●●●●● ${uiConfig.ha_token ? '(saved)' : '(not set)'}</div>
-                 <div class="settings-admin-hint">Update via: HA → Add-ons → Overwatch → Settings</div>`}
+              : `<div class="settings-readonly">●●●●●●●● ${uiConfig.ha_token ? '(saved)' : '(not set)'}</div>`}
           </div>
           ${isAdmin ? `
           <button class="settings-btn" id="settingsSaveHaBtn" style="${haConnected ? 'opacity:0.6;' : ''}">
             ${haConnected ? '✓ Connected — click to reconnect' : 'Connect to Home Assistant'}
           </button>
-          <div id="haConnectStatus" style="font-size:11px;color:#888;margin-top:5px;min-height:14px;text-align:center;"></div>` : ''}
+          <div id="haConnectStatus" style="font-size:11px;color:#888;margin-top:5px;min-height:14px;text-align:center;"></div>` : `
+          <div class="settings-readonly" style="text-align:center;color:#555;font-size:11px;">To manage HA connection: open Overwatch in the HA Add-on panel as an admin.</div>`}
         </div>
       </div>
 
@@ -2919,50 +2937,52 @@ function renderSettingsPanel() {
 
       <!-- ══ ALARM TAB ════════════════════════════════════════════ -->
       <div class="settings-tab-panel" data-panel="alarm">
+        <div class="settings-section-title">ALARM CONFIGURATION <span class="settings-admin-badge">ADMIN ONLY</span></div>
         ${adminBox}
-        ${isAdmin ? `
-        <div class="settings-section">
+        <div class="settings-section" ${!isAdmin ? 'style="opacity:0.45;pointer-events:none;"' : ''}>
           <div class="settings-field">
             <label>Alarm Panel Entity</label>
+            ${isAdmin ? `
             <div class="entity-search-wrap" style="position:relative;">
               <input type="text" id="cfgAlarmEntity" value="${escapeHtml(uiConfig.alarm_entity || '')}"
                 placeholder="alarm_control_panel.home_alarm" autocomplete="off">
               <div class="entity-search-results" id="alarmEntityResults" style="display:none;"></div>
             </div>
             <div style="font-size:11px;color:#777;margin-top:3px;">Supports alarm_control_panel, input_boolean, switch, etc.</div>
+            ` : `<div class="settings-readonly">${escapeHtml(uiConfig.alarm_entity || '—')}</div>`}
           </div>
           <div class="settings-field">
-            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+            <label style="display:flex;align-items:center;gap:8px;">
               <input type="checkbox" id="cfgAlarmInverted" ${uiConfig.alarm_entity_inverted ? 'checked' : ''}
-                style="width:16px;height:16px;cursor:pointer;accent-color:#ffcc00;">
+                ${!isAdmin ? 'disabled' : ''} style="width:16px;height:16px;accent-color:#ffcc00;">
               <span>Invert alarm entity (OFF = Armed)</span>
             </label>
           </div>
           <div class="settings-field">
             <label>Label when armed</label>
-            <input type="text" id="cfgLabelArmed" value="${escapeHtml(uiConfig.alarm_label_armed || 'Armed')}" style="max-width:160px;">
+            ${isAdmin
+              ? `<input type="text" id="cfgLabelArmed" value="${escapeHtml(uiConfig.alarm_label_armed || 'Armed')}" style="max-width:160px;">`
+              : `<div class="settings-readonly">${escapeHtml(uiConfig.alarm_label_armed || 'Armed')}</div>`}
           </div>
           <div class="settings-field">
             <label>Label when disarmed</label>
-            <input type="text" id="cfgLabelDisarmed" value="${escapeHtml(uiConfig.alarm_label_disarmed || 'Disarmed')}" style="max-width:160px;">
+            ${isAdmin
+              ? `<input type="text" id="cfgLabelDisarmed" value="${escapeHtml(uiConfig.alarm_label_disarmed || 'Disarmed')}" style="max-width:160px;">`
+              : `<div class="settings-readonly">${escapeHtml(uiConfig.alarm_label_disarmed || 'Disarmed')}</div>`}
           </div>
+          ${isAdmin ? `
           <button class="settings-btn" id="settingsSaveAlarmBtn">Save Alarm Settings</button>
-          <div id="alarmSaveStatus" style="font-size:11px;color:#888;margin-top:6px;text-align:center;"></div>
-        </div>` : `
-        <div class="settings-section" style="color:#555;font-size:12px;">
-          <div><b>Alarm entity:</b> ${escapeHtml(uiConfig.alarm_entity || '—')}</div>
-          <div style="margin-top:6px;"><b>Armed label:</b> ${escapeHtml(uiConfig.alarm_label_armed || 'Armed')}</div>
-          <div><b>Disarmed label:</b> ${escapeHtml(uiConfig.alarm_label_disarmed || 'Disarmed')}</div>
-        </div>`}
+          <div id="alarmSaveStatus" style="font-size:11px;color:#888;margin-top:6px;text-align:center;"></div>` : ''}
+        </div>
       </div>
 
       <!-- ══ ZONES TAB ════════════════════════════════════════════ -->
       <div class="settings-tab-panel" data-panel="zones">
 
         <div class="settings-section">
-          <div class="settings-section-title">Floor Plan Image <span class="settings-admin-badge">Admin only</span></div>
+          <div class="settings-section-title">Floor Plan Image <span class="settings-admin-badge">ADMIN ONLY</span></div>
           ${!isAdmin ? adminBox : ''}
-          <div class="settings-field">
+          <div class="settings-field" ${!isAdmin ? 'style="opacity:0.45;pointer-events:none;"' : ''}>
             <label>Image path</label>
             ${isAdmin ? `
             <div class="settings-floorplan-row">
@@ -3078,6 +3098,12 @@ function renderSettingsPanel() {
   makeDraggable(panel, panel.querySelector(".settings-titlebar"), "settingsPanel");
   document.getElementById("settingsCloseBtn").onclick = () => panel.classList.remove("open");
   panel.addEventListener("pointerdown", e => e.stopPropagation());
+
+  // Live-update HA connection status every 2s while settings is open
+  const connPollTimer = setInterval(() => {
+    if (!panel.classList.contains("open")) { clearInterval(connPollTimer); return; }
+    updateSettingsConnectionBox();
+  }, 2000);
 
   // ── Tab switching ────────────────────────────────────────────
   panel.querySelectorAll(".settings-tab").forEach(tab => {
