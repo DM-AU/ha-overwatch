@@ -3979,62 +3979,87 @@ function setViewMode(mode) {
 }
 
 function initViewToggle() {
+  // Restore split direction
+  const savedDir = localStorage.getItem('ow_split_dir') || 'h';
+  document.body.setAttribute('data-split-dir', savedDir);
+
   const inject = () => {
     const group = document.getElementById('viewToggleGroup');
     if (!group) { setTimeout(inject, 200); return; }
 
+    const dirIcon = () => document.body.getAttribute('data-split-dir') === 'v'
+      ? `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" style="pointer-events:none;"><rect x="2" y="2" width="20" height="10" rx="1.5" stroke="currentColor" stroke-width="1.8"/><rect x="2" y="14" width="20" height="8" rx="1.5" stroke="currentColor" stroke-width="1.8"/></svg>`
+      : `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" style="pointer-events:none;"><rect x="2" y="2" width="9" height="20" rx="1.5" stroke="currentColor" stroke-width="1.8"/><rect x="13" y="2" width="9" height="20" rx="1.5" stroke="currentColor" stroke-width="1.8"/></svg>`;
+
     group.innerHTML = `
       <button class="view-toggle-btn" data-view="map" title="Floorplan only">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" style="vertical-align:middle;pointer-events:none;">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" style="pointer-events:none;">
           <polygon points="3,14 9,4 15,10 21,5 21,20 3,20" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" fill="none"/>
         </svg>
       </button>
-      <button class="view-toggle-btn" data-view="split" title="Split view">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" style="vertical-align:middle;pointer-events:none;">
-          <rect x="2" y="3" width="9" height="18" rx="1.5" stroke="currentColor" stroke-width="1.8"/>
-          <rect x="13" y="3" width="9" height="18" rx="1.5" stroke="currentColor" stroke-width="1.8"/>
+      <button class="view-toggle-btn" data-view="split" title="Split view" style="gap:4px;">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" style="pointer-events:none;">
+          <rect x="2" y="2" width="9" height="20" rx="1.5" stroke="currentColor" stroke-width="1.8"/>
+          <rect x="13" y="2" width="9" height="20" rx="1.5" stroke="currentColor" stroke-width="1.8"/>
         </svg>
       </button>
+      <button class="view-toggle-btn" id="splitDirBtn" title="Toggle split direction" style="padding:4px 6px;">
+        ${dirIcon()}
+      </button>
       <button class="view-toggle-btn" data-view="cameras" title="Cameras only">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" style="vertical-align:middle;pointer-events:none;">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" style="pointer-events:none;">
           <rect x="2" y="7" width="20" height="13" rx="2" stroke="currentColor" stroke-width="1.8"/>
           <circle cx="12" cy="13.5" r="3" stroke="currentColor" stroke-width="1.8"/>
           <path d="M8 7l1.5-2.5h5L16 7" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
         </svg>
       </button>`;
 
-    group.querySelectorAll('.view-toggle-btn').forEach(btn => {
-      btn.addEventListener('click', e => {
-        e.stopPropagation();
-        setViewMode(btn.dataset.view);
-      });
+    group.querySelectorAll('.view-toggle-btn[data-view]').forEach(btn => {
+      btn.addEventListener('click', e => { e.stopPropagation(); setViewMode(btn.dataset.view); });
+    });
+
+    document.getElementById('splitDirBtn')?.addEventListener('click', e => {
+      e.stopPropagation();
+      const cur = document.body.getAttribute('data-split-dir') || 'h';
+      const next = cur === 'h' ? 'v' : 'h';
+      document.body.setAttribute('data-split-dir', next);
+      localStorage.setItem('ow_split_dir', next);
+      document.getElementById('splitDirBtn').innerHTML = dirIcon();
+      // Re-apply split pct on direction change
+      applySplitPct(parseFloat(localStorage.getItem('ow_split_pos') || '50'));
+      if (window.camUpdate) window.camUpdate();
+      setTimeout(() => { initFloorplan(); renderZones(); }, 50);
     });
 
     setViewMode(getViewMode());
+    applySplitPct(parseFloat(localStorage.getItem('ow_split_pos') || '50'));
   };
   inject();
 
-  // Split handle drag
+  // Split handle drag — works for both H and V
   const handle = document.getElementById('splitHandle');
   if (handle) {
-    let dragging = false, startX = 0, startW = 0;
+    let dragging = false, startPos = 0, startPct = 50;
 
     handle.addEventListener('pointerdown', e => {
       dragging = true;
       handle.classList.add('dragging');
-      startX = e.clientX;
-      const mapPanel = document.getElementById('mapPanel');
-      startW = mapPanel ? mapPanel.offsetWidth : window.innerWidth * 0.5;
+      const isV = document.body.getAttribute('data-split-dir') === 'v';
+      startPos  = isV ? e.clientY : e.clientX;
+      startPct  = parseFloat(localStorage.getItem('ow_split_pos') || '50');
       handle.setPointerCapture(e.pointerId);
+      e.preventDefault();
     });
 
     handle.addEventListener('pointermove', e => {
       if (!dragging) return;
-      const root  = document.getElementById('splitRoot');
-      const totalW = root ? root.offsetWidth : window.innerWidth;
-      const newW  = Math.max(totalW * 0.2, Math.min(totalW * 0.8, startW + (e.clientX - startX)));
-      const pct   = (newW / totalW * 100).toFixed(1);
-      root.style.setProperty('--split-left', `${pct}%`);
+      const root = document.getElementById('splitRoot');
+      if (!root) return;
+      const isV  = document.body.getAttribute('data-split-dir') === 'v';
+      const total = isV ? root.offsetHeight : root.offsetWidth;
+      const delta = isV ? e.clientY - startPos : e.clientX - startPos;
+      const pct   = Math.max(20, Math.min(80, startPct + (delta / total * 100)));
+      applySplitPct(pct);
     });
 
     handle.addEventListener('pointerup', () => {
@@ -4042,17 +4067,17 @@ function initViewToggle() {
       dragging = false;
       handle.classList.remove('dragging');
       const root = document.getElementById('splitRoot');
-      const pct  = root?.style.getPropertyValue('--split-left')?.replace('%', '') || '50';
-      localStorage.setItem('ow_split_pos', pct);
+      const pct  = parseFloat(root?.style.getPropertyValue('--split-pct') || '50');
+      localStorage.setItem('ow_split_pos', pct.toFixed(1));
+      setTimeout(() => { initFloorplan(); renderZones(); }, 30);
     });
   }
-
-  // Restore saved split position
-  const savedPct = localStorage.getItem('ow_split_pos');
-  if (savedPct) {
-    const root = document.getElementById('splitRoot');
-    if (root) root.style.setProperty('--split-left', `${savedPct}%`);
-  }
 }
+
+function applySplitPct(pct) {
+  const root = document.getElementById('splitRoot');
+  if (root) root.style.setProperty('--split-pct', `${pct.toFixed(1)}%`);
+}
+
 
 window.addEventListener("DOMContentLoaded", init);

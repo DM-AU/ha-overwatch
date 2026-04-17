@@ -1988,16 +1988,10 @@ display: flex;
 
 /* ============================================================
  * SPLIT VIEW LAYOUT
- * body class controls mode: view-map | view-cameras | view-split
+ * body class: view-map | view-cameras | view-split
+ * body attr:  data-split-dir="h" or "v"
  * ============================================================ */
 
-.split-panel {
-  position: relative;
-  overflow: hidden;
-  flex-shrink: 0;
-}
-
-/* Ensure splitRoot fills the viewport behind sidebar */
 .split-root {
   position: fixed;
   top: 0; left: 0; right: 0; bottom: 0;
@@ -2005,49 +1999,77 @@ display: flex;
   flex-direction: row;
   z-index: 0;
 }
+body[data-split-dir="v"] .split-root { flex-direction: column; }
 
-/* ── Map-only mode ──────────────────────────────────────────── */
-body.view-map .split-panel-map  { flex: 1; }
-body.view-map .split-panel-cam  { display: none; }
-body.view-map .split-handle     { display: none; }
+.split-panel {
+  position: relative;
+  overflow: hidden;
+  min-width: 0;
+  min-height: 0;
+}
 
-/* ── Camera-only mode ───────────────────────────────────────── */
-body.view-cameras .split-panel-map  { display: none; }
-body.view-cameras .split-panel-cam  { flex: 1; }
-body.view-cameras .split-handle     { display: none; }
+/* ── Map-only ─────────────────────────────────────── */
+body.view-map .split-panel-map { flex: 1; }
+body.view-map .split-panel-cam { display: none; }
+body.view-map .split-handle    { display: none; }
 
-/* ── Split mode ─────────────────────────────────────────────── */
-body.view-split .split-panel-map    { width: var(--split-left, 50%); }
-body.view-split .split-panel-cam    { flex: 1; }
-body.view-split .split-handle       { display: flex; }
+/* ── Camera-only ──────────────────────────────────── */
+body.view-cameras .split-panel-map { display: none; }
+body.view-cameras .split-panel-cam { flex: 1; }
+body.view-cameras .split-handle    { display: none; }
 
-/* Drag handle */
+/* ── Split: horizontal (side by side, default) ────── */
+body.view-split .split-panel-map {
+  flex: 0 0 var(--split-pct, 50%);
+  width: var(--split-pct, 50%);
+}
+body.view-split .split-panel-cam { flex: 1; }
+body.view-split .split-handle    { display: flex; }
+
+/* ── Split: vertical (top/bottom) ────────────────── */
+body.view-split[data-split-dir="v"] .split-panel-map {
+  flex: 0 0 var(--split-pct, 50%);
+  width: 100%;
+  height: var(--split-pct, 50%);
+}
+body.view-split[data-split-dir="v"] .split-panel-cam { flex: 1; width: 100%; }
+
+/* ── Drag handle ──────────────────────────────────── */
 .split-handle {
-  width: 6px;
   background: rgba(255,255,255,0.06);
-  cursor: col-resize;
   flex-shrink: 0;
   display: none;
   align-items: center;
   justify-content: center;
   transition: background 0.15s;
   z-index: 50;
+  cursor: col-resize;
+  width: 6px;
+  height: auto;
+}
+body[data-split-dir="v"] .split-handle {
+  cursor: row-resize;
+  height: 6px;
+  width: auto;
 }
 .split-handle:hover,
-.split-handle.dragging { background: rgba(0,150,255,0.45); }
+.split-handle.dragging { background: rgba(0,150,255,0.5); }
 .split-handle::after {
   content: '';
+  border-radius: 2px;
+  background: rgba(255,255,255,0.25);
   width: 2px;
   height: 40px;
-  border-radius: 2px;
-  background: rgba(255,255,255,0.2);
 }
+body[data-split-dir="v"] .split-handle::after { width: 40px; height: 2px; }
 
-/* ── View toggle buttons (in status bar) ────────────────────── */
+/* ── View toggle buttons ──────────────────────────── */
 .view-toggle-group {
   display: flex;
   gap: 3px;
   padding: 0 8px;
+  flex-shrink: 0;
+  align-items: center;
 }
 .view-toggle-btn {
   background: transparent;
@@ -2055,10 +2077,13 @@ body.view-split .split-handle       { display: flex; }
   border-radius: 7px;
   color: rgba(255,255,255,0.45);
   font-size: 11px;
-  padding: 4px 9px;
+  padding: 4px 8px;
   cursor: pointer;
   transition: all 0.15s;
-  white-space: nowrap;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 .view-toggle-btn:hover { background: rgba(255,255,255,0.06); color: rgba(255,255,255,0.75); }
 .view-toggle-btn.active {
@@ -2067,21 +2092,62 @@ body.view-split .split-handle       { display: flex; }
   color: #fff;
 }
 
-/* Map panel fills its container */
+/* ── Panel contents ───────────────────────────────── */
 .split-panel-map .main {
   position: absolute;
   top: 0; left: 0; right: 0; bottom: 0;
 }
 
-/* cameraStatusContainer sits at top of camera panel */
-#cameraStatusContainer {
+/* Centre the floorplan status bar within its panel */
+.split-panel-map #statusContainer {
   position: absolute;
   top: 0; left: 0; right: 0;
-  z-index: 10;
+  pointer-events: none;
+}
+.split-panel-map .status-bar {
+  position: relative !important;
+  left: auto !important;
+  right: auto !important;
+  transform: none !important;
+  margin: 0 auto;
+  pointer-events: all;
 }
 
-/* Camera panel needs to be full-height */
+/* Camera panel: flex column so status bar + grid stack vertically */
 .split-panel-cam {
   display: flex;
   flex-direction: column;
+  background: #0a0a0a;
+}
+
+#cameraStatusContainer {
+  flex-shrink: 0;
+  position: relative;
+  z-index: 10;
+}
+
+.cam-status-bar {
+  position: relative !important;
+  top: auto !important; left: auto !important; right: auto !important;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.cam-status-dd {
+  position: absolute !important;
+  top: 100% !important;
+  left: 50% !important;
+  transform: translateX(-50%) !important;
+  z-index: 390;
+}
+
+.cam-main {
+  flex: 1;
+  position: relative !important;
+  top: auto !important; left: auto !important; right: auto !important; bottom: auto !important;
+  display: flex;
+  align-items: stretch;
+  overflow: hidden;
+  background: #0a0a0a;
+  min-height: 0;
 }
