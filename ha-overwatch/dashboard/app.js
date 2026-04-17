@@ -371,9 +371,10 @@ function bindZoomControls() {
   if (!zoomIn) return;
 
   function zoomAroundCenter(factor) {
-    const vw = window.innerWidth, vh = window.innerHeight;
+    const panel = document.getElementById("mapPanel");
+    const vw = (panel && panel.offsetWidth > 0) ? panel.offsetWidth : window.innerWidth;
+    const vh = (panel && panel.offsetHeight > 0) ? panel.offsetHeight : window.innerHeight;
     const cx = vw / 2, cy = vh / 2;
-    // Keep the center point fixed while scaling
     zoom.x = cx - (cx - zoom.x) * factor;
     zoom.y = cy - (cy - zoom.y) * factor;
     zoom.scale = Math.min(10, Math.max(0.1, zoom.scale * factor));
@@ -386,8 +387,9 @@ function bindZoomControls() {
     const wrapper = document.getElementById("floorplanWrapper");
     const img     = document.getElementById("floorplanImage");
     if (wrapper && img) {
-      // Reset: fit image to viewport
-      const vw = window.innerWidth, vh = window.innerHeight;
+      const panel = document.getElementById("mapPanel");
+      const vw = (panel && panel.offsetWidth > 0) ? panel.offsetWidth : window.innerWidth;
+      const vh = (panel && panel.offsetHeight > 0) ? panel.offsetHeight : window.innerHeight;
       const iw = img.naturalWidth  || img.offsetWidth;
       const ih = img.naturalHeight || img.offsetHeight;
       zoom.scale = Math.min(vw / iw, vh / ih, 1);
@@ -3859,21 +3861,28 @@ function initFloorplan() {
   const svg     = document.getElementById("zonesSvg");
   if (!img || !wrapper || !svg) return;
 
+  function getPanelSize() {
+    // Use the map panel dimensions — not the full viewport
+    const panel = document.getElementById("mapPanel") || document.querySelector(".split-panel-map");
+    if (panel && panel.offsetWidth > 0) {
+      return { vw: panel.offsetWidth, vh: panel.offsetHeight };
+    }
+    return { vw: window.innerWidth, vh: window.innerHeight };
+  }
+
   function onLoad() {
     const iw = img.naturalWidth;
     const ih = img.naturalHeight;
     if (!iw || !ih) return;
 
-    // Size the wrapper and SVG to the image's natural pixel dimensions
     wrapper.style.width  = iw + "px";
     wrapper.style.height = ih + "px";
     svg.setAttribute("width",  iw);
     svg.setAttribute("height", ih);
     svg.setAttribute("viewBox", `0 0 ${iw} ${ih}`);
 
-    // Fit to viewport if no saved zoom
     if (!localStorage.getItem("zoomScale")) {
-      const vw = window.innerWidth, vh = window.innerHeight;
+      const { vw, vh } = getPanelSize();
       zoom.scale = Math.min(vw / iw, vh / ih, 1);
       zoom.x = (vw - iw * zoom.scale) / 2;
       zoom.y = (vh - ih * zoom.scale) / 2;

@@ -2099,18 +2099,30 @@ body[data-split-dir="v"] .split-handle::after { width: 40px; height: 2px; }
 }
 
 /* Centre the floorplan status bar within its panel */
-.split-panel-map #statusContainer {
+#statusContainer {
   position: absolute;
   top: 0; left: 0; right: 0;
+  z-index: 100;
   pointer-events: none;
+  display: flex;
+  justify-content: center;
+  padding-top: 10px;
 }
-.split-panel-map .status-bar {
-  position: relative !important;
-  left: auto !important;
-  right: auto !important;
-  transform: none !important;
-  margin: 0 auto;
+#statusContainer > * {
   pointer-events: all;
+}
+/* Override the fixed positioning of status-bar when inside the panel */
+#statusContainer .status-bar {
+  position: relative !important;
+  top: auto !important;
+  left: auto !important;
+  transform: none !important;
+}
+#statusContainer .status-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
 }
 
 /* Camera panel: flex column so status bar + grid stack vertically */

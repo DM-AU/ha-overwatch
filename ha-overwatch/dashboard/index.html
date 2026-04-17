@@ -9,8 +9,7 @@
 
 <body class="view-map">
 
-    <!-- Shared UI chrome -->
-    <div id="statusContainer"></div>
+    <!-- Shared sidebar + expand btn (fixed, float above everything) -->
     <div id="sidebarContainer"></div>
     <div id="expandBtnContainer"></div>
 
@@ -19,6 +18,8 @@
 
         <!-- Left / full panel: floorplan -->
         <div id="mapPanel" class="split-panel split-panel-map">
+            <!-- Status bar lives inside the map panel so it centres to it -->
+            <div id="statusContainer"></div>
             <div id="main" class="main">
                 <div id="floorplanWrapper" class="floorplan-wrapper">
                     <img id="floorplanImage" src="img/floorplan.png" />
@@ -50,7 +51,7 @@
 
     </div>
 
-    <!-- Camera modal overlay -->
+    <!-- Camera modal overlay (outside split so it covers both panels) -->
     <div id="cameraModal" class="cam-modal" style="display:none;">
         <div class="cam-modal-backdrop" id="camModalBackdrop"></div>
         <div class="cam-modal-panel">
@@ -68,7 +69,7 @@
         </div>
     </div>
 
-    <!-- Zones editor -->
+    <!-- Zones editor (fixed overlay, outside split) -->
     <div id="zonesEditorContainer"></div>
 
     <script src="app.js"></script>
