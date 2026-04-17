@@ -2508,9 +2508,9 @@ function updateSettingsConnectionBox() {
   const label = box.querySelector(".settings-connection-label");
   const sub   = box.querySelector(".settings-connection-sub");
   if (label) label.textContent = connected ? '✓ Connected to Home Assistant' : '✗ Not connected';
-  if (sub)   sub.textContent   = isAddonMode
+  if (sub)   sub.textContent   = !IS_DIRECT_MODE
     ? (connected ? 'Running as HA Add-on.' : 'Attempting to connect via add-on proxy…')
-    : (connected ? 'Connected via WebSocket.' : 'Enter token and click Connect.');
+    : (connected ? 'Connected via WebSocket.' : 'Connecting via add-on proxy…');
 }
 
 function connectHA() {
@@ -2835,7 +2835,9 @@ function renderSettingsPanel() {
   panel.className = "settings-panel open";
   panel.id = "settingsPanel";
 
-  const isAdmin = isAddonMode;
+  // isAdmin = came through HA ingress (authenticated), not direct LAN port
+  // IS_DIRECT_MODE = accessed via http://ha-ip:8099 directly (no HA auth = browser/public user)
+  const isAdmin = !IS_DIRECT_MODE;
 
   // Effective value: localStorage first, then ui.yaml default, then hard default
   const eff = (lsKey, cfgKey, def) =>
@@ -2881,7 +2883,7 @@ function renderSettingsPanel() {
 
         <div id="haConnectionStatus" class="settings-connection-box ${haConnected ? 'connected' : 'disconnected'}">
           <div class="settings-connection-label">${haConnected ? '✓ Connected to Home Assistant' : '✗ Not connected'}</div>
-          <div class="settings-connection-sub">${isAdmin ? 'Running as HA Add-on. Enter token once to connect.' : 'Connection managed by admin via Add-on.'}</div>
+          <div class="settings-connection-sub">${!IS_DIRECT_MODE ? 'Running as HA Add-on. Enter token once to connect.' : 'Connection managed by admin via Add-on.'}</div>
         </div>
 
         <div class="settings-section" ${!isAdmin ? 'style="opacity:0.45;pointer-events:none;"' : ''}>
