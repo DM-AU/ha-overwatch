@@ -2130,27 +2130,14 @@ body[data-split-dir="v"] .split-handle::after { width: 40px; height: 2px; }
   background: #0a0a0a;
 }
 
-/* Status bar floats at top of camera panel — doesn't push grid down */
+/* cameraStatusContainer is now inside cam-main — no positioning needed here */
 #cameraStatusContainer {
-  position: absolute;
-  top: 0; left: 0; right: 0;
-  z-index: 200;
-  pointer-events: none;
-}
-#cameraStatusContainer > * { pointer-events: all; }
-
-.cam-status-bar {
-  width: 100%;
-  box-sizing: border-box;
+  position: static;
 }
 
 .cam-status-dd {
-  /* Position set by JS for portal pattern */
   z-index: 9000;
 }
-
-/* Camera grid fills full panel — status bar overlays on top */
-/* .cam-main defined above */
 
 /* ── Floating view toggle widget ──────────────────────────────
  * Sits horizontally at the same level as the sidebar collapse button.

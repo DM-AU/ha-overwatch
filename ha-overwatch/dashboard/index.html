@@ -18,7 +18,7 @@
 
         <!-- Left / full panel: floorplan -->
         <div id="mapPanel" class="split-panel split-panel-map">
-            <!-- Status bar lives inside the map panel so it centres to it -->
+            <!-- Status bar floats inside the map panel -->
             <div id="statusContainer"></div>
             <div id="main" class="main">
                 <div id="floorplanWrapper" class="floorplan-wrapper">
@@ -34,8 +34,9 @@
 
         <!-- Right / full panel: cameras -->
         <div id="cameraPanel" class="split-panel split-panel-cam">
-            <div id="cameraStatusContainer"></div>
             <div id="cameraMain" class="cam-main">
+                <!-- Status bar floats INSIDE cam-main, overlaying the grid -->
+                <div id="cameraStatusContainer"></div>
                 <div id="cameraGrid" class="cam-grid"></div>
                 <div id="cameraEmpty" class="cam-empty" style="display:none;">
                     <svg width="64" height="64" viewBox="0 0 24 24" fill="none" style="opacity:0.15;margin-bottom:16px;">
