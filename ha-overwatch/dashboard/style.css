@@ -1661,22 +1661,14 @@ display: flex;
 }
 
 .cam-status-inner {
-  position: absolute;
-  left: 50%;
-  transform: translateX(-50%);
   display: flex;
   align-items: center;
   gap: 8px;
   cursor: pointer;
-  padding: 4px 14px;
-  border-radius: 20px;
-  background: rgba(255,255,255,0.05);
-  border: 1px solid rgba(255,255,255,0.08);
-  transition: background 0.15s;
   user-select: none;
   white-space: nowrap;
 }
-.cam-status-inner:hover { background: rgba(255,255,255,0.09); }
+.cam-status-inner:hover { opacity: 0.8; }
 
 .cam-status-dot {
   width: 8px; height: 8px;
@@ -2130,13 +2122,42 @@ body[data-split-dir="v"] .split-handle::after { width: 40px; height: 2px; }
   background: #0a0a0a;
 }
 
-/* cameraStatusContainer is now inside cam-main — no positioning needed here */
+/* Camera status container — floats at top of cam-main, same pattern as #statusContainer */
 #cameraStatusContainer {
-  position: static;
+  position: absolute;
+  top: 10px; left: 0; right: 0;
+  z-index: 390;
+  pointer-events: none;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  height: 40px;  /* enough height for absolutely-positioned mode buttons */
+}
+#cameraStatusContainer > * {
+  pointer-events: all;
 }
 
-.cam-status-dd {
-  z-index: 9000;
+.cam-status-bar {
+  /* Render as an inline pill, not a full-width bar */
+  position: relative !important;
+  top: auto !important; left: auto !important; right: auto !important;
+  height: auto;
+  width: auto;
+  background: rgba(14,14,14,0.88);
+  border: 1px solid rgba(255,255,255,0.12);
+  border-bottom: 1px solid rgba(255,255,255,0.12);
+  border-radius: 10px;
+  padding: 6px 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+  z-index: 390;
+  white-space: nowrap;
 }
 
 /* ── Floating view toggle widget ──────────────────────────────

@@ -557,21 +557,22 @@ function renderCameraStatusBar() {
   const sidebarOnRight = (OW.uiConfig.sidebar_position || 'right') !== 'left';
   const hasHidden = camHidden.size > 0;
 
-  // Opposite the sidebar: sidebar right → buttons LEFT (margin-right:auto pushes left)
-  //                        sidebar left  → buttons RIGHT (margin-left:auto pushes right)
-  const modeSide = sidebarOnRight ? 'margin-right:auto;order:-1;' : 'margin-left:auto;order:1;';
+  // Mode buttons: absolutely positioned within #cameraStatusContainer, opposite the sidebar
+  const modeSideStyle = sidebarOnRight
+    ? 'position:absolute;left:12px;top:0;display:flex;gap:4px;align-items:center;'
+    : 'position:absolute;right:12px;top:0;display:flex;gap:4px;align-items:center;';
 
   const modeButtons = `
-    <div class="cam-status-mode" style="${modeSide}">
+    <div class="cam-status-mode" style="${modeSideStyle}">
       <button class="cam-mode-btn ${camMode === 'snapshot' ? 'active' : ''}" id="camSnapBtn">Snapshot</button>
       <button class="cam-mode-btn ${camMode === 'live' ? 'active' : ''}" id="camLiveBtn">Live</button>
       ${hasHidden ? `<button class="cam-mode-btn" id="camRetryBtn" style="color:#ff9500;border-color:rgba(255,149,0,0.3);" title="Retry ${camHidden.size} hidden camera(s)">↺ Retry</button>` : ''}
     </div>`;
 
   container.innerHTML = `
-    <div class="cam-status-bar" id="camStatusBar" style="display:flex;align-items:center;position:relative;">
-      ${modeButtons}
-      <div class="cam-status-inner" id="camStatusToggle" style="cursor:pointer;position:absolute;left:50%;transform:translateX(-50%);">
+    ${modeButtons}
+    <div class="cam-status-bar" id="camStatusBar">
+      <div class="cam-status-inner" id="camStatusToggle">
         <div class="zone-list-dot${masterFlash ? ' flashing' : ''}"
           style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${masterColour};"></div>
         <span class="cam-status-label">${masterLabel}</span>
