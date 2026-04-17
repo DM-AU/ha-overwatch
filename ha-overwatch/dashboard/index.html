@@ -7,22 +7,71 @@
     <link rel="stylesheet" href="style.css" />
 </head>
 
-<body>
+<body class="view-map">
 
+    <!-- Shared UI chrome -->
     <div id="statusContainer"></div>
     <div id="sidebarContainer"></div>
     <div id="expandBtnContainer"></div>
 
-    <div id="main" class="main">
-        <div id="floorplanWrapper" class="floorplan-wrapper">
-            <img id="floorplanImage" src="img/floorplan.png" />
-            <svg id="zonesSvg" class="zones-svg"></svg>
-            <div id="deviceLayer"></div>
+    <!-- Split layout root -->
+    <div id="splitRoot" class="split-root">
+
+        <!-- Left / full panel: floorplan -->
+        <div id="mapPanel" class="split-panel split-panel-map">
+            <div id="main" class="main">
+                <div id="floorplanWrapper" class="floorplan-wrapper">
+                    <img id="floorplanImage" src="img/floorplan.png" />
+                    <svg id="zonesSvg" class="zones-svg"></svg>
+                    <div id="deviceLayer"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Drag handle (only visible in split mode) -->
+        <div id="splitHandle" class="split-handle"></div>
+
+        <!-- Right / full panel: cameras -->
+        <div id="cameraPanel" class="split-panel split-panel-cam">
+            <div id="cameraStatusContainer"></div>
+            <div id="cameraMain" class="cam-main">
+                <div id="cameraGrid" class="cam-grid"></div>
+                <div id="cameraEmpty" class="cam-empty" style="display:none;">
+                    <svg width="64" height="64" viewBox="0 0 24 24" fill="none" style="opacity:0.15;margin-bottom:16px;">
+                        <rect x="2" y="7" width="20" height="13" rx="2" stroke="white" stroke-width="1.5"/>
+                        <circle cx="12" cy="13.5" r="3" stroke="white" stroke-width="1.5"/>
+                        <path d="M8 7l1.5-2.5h5L16 7" stroke="white" stroke-width="1.5" stroke-linejoin="round"/>
+                    </svg>
+                    <div style="color:rgba(255,255,255,0.2);font-size:14px;">No active cameras</div>
+                    <div style="color:rgba(255,255,255,0.1);font-size:12px;margin-top:6px;">Triggers automatically when zones are active</div>
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    <!-- Camera modal overlay -->
+    <div id="cameraModal" class="cam-modal" style="display:none;">
+        <div class="cam-modal-backdrop" id="camModalBackdrop"></div>
+        <div class="cam-modal-panel">
+            <div class="cam-modal-header">
+                <span id="camModalTitle" class="cam-modal-title"></span>
+                <div class="cam-modal-actions">
+                    <button id="camModalModeBtn" class="cam-modal-btn" title="Toggle live/snapshot">Live</button>
+                    <button id="camModalPinBtn" class="cam-modal-btn" title="Pin camera">📌 Pin</button>
+                    <button id="camModalClose" class="cam-modal-close">✕</button>
+                </div>
+            </div>
+            <div class="cam-modal-content">
+                <img id="camModalImg" class="cam-modal-img" src="" alt="" />
+            </div>
         </div>
     </div>
 
+    <!-- Zones editor -->
     <div id="zonesEditorContainer"></div>
 
     <script src="app.js"></script>
+    <script src="cameras.js"></script>
 </body>
 </html>

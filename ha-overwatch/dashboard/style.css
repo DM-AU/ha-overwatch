@@ -61,7 +61,7 @@ body {
 
 /* MAIN CONTENT */
 .main {
-  position: fixed;
+  position: absolute;
   inset: 0;
   overflow: hidden;
 }
@@ -95,7 +95,7 @@ body {
 
 /* Outer clip container — prevents transformed content overflowing viewport */
 .main {
-  position: fixed;
+  position: absolute;
   inset: 0;
   overflow: hidden;
 }
@@ -1636,13 +1636,8 @@ display: flex;
  * ============================================================ */
 
 /* ── Layout ─────────────────────────────────────────────────── */
-body.page-cameras {
-  background: #0a0a0a;
-  overflow: hidden;
-}
-
 .cam-main {
-  position: fixed;
+  position: absolute;
   top: 48px; left: 0; right: 0; bottom: 0;
   display: flex;
   align-items: stretch;
@@ -1650,15 +1645,9 @@ body.page-cameras {
   background: #0a0a0a;
 }
 
-body.page-cameras .sidebar { z-index: 400; }
-
-/* Push grid right of sidebar */
-body.page-cameras.sidebar-right .cam-main  { padding-right: var(--sidebar-width); }
-body.page-cameras.sidebar-left  .cam-main  { padding-left:  var(--sidebar-width); }
-
 /* ── Camera status bar ─────────────────────────────────────── */
 .cam-status-bar {
-  position: fixed;
+  position: absolute;
   top: 0; left: 0; right: 0;
   height: 48px;
   background: rgba(10,10,10,0.95);
@@ -1729,19 +1718,19 @@ body.page-cameras.sidebar-left  .cam-main  { padding-left:  var(--sidebar-width)
 
 /* ── Status dropdown — floats over camera grid ─────────────── */
 .cam-status-dd {
-  position: fixed;
+  position: absolute;
   top: 48px;
   left: 50%;
   transform: translateX(-50%);
-  min-width: 300px;
-  max-width: 380px;
-  max-height: calc(100vh - 60px);
+  min-width: 280px;
+  max-width: 360px;
+  max-height: calc(100% - 60px);
   overflow-y: auto;
   background: rgba(14,14,14,0.97);
   border: 1px solid rgba(255,255,255,0.1);
   border-top: none;
   border-radius: 0 0 12px 12px;
-  z-index: 390;   /* above cam-grid */
+  z-index: 390;
   backdrop-filter: blur(10px);
   scrollbar-gutter: stable;
   box-shadow: 0 8px 32px rgba(0,0,0,0.6);
@@ -1995,4 +1984,104 @@ body.page-cameras.sidebar-left  .cam-main  { padding-left:  var(--sidebar-width)
   max-height: 100%;
   object-fit: contain;
   display: block;
+}
+
+/* ============================================================
+ * SPLIT VIEW LAYOUT
+ * body class controls mode: view-map | view-cameras | view-split
+ * ============================================================ */
+
+.split-panel {
+  position: relative;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+/* Ensure splitRoot fills the viewport behind sidebar */
+.split-root {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  display: flex;
+  flex-direction: row;
+  z-index: 0;
+}
+
+/* ── Map-only mode ──────────────────────────────────────────── */
+body.view-map .split-panel-map  { flex: 1; }
+body.view-map .split-panel-cam  { display: none; }
+body.view-map .split-handle     { display: none; }
+
+/* ── Camera-only mode ───────────────────────────────────────── */
+body.view-cameras .split-panel-map  { display: none; }
+body.view-cameras .split-panel-cam  { flex: 1; }
+body.view-cameras .split-handle     { display: none; }
+
+/* ── Split mode ─────────────────────────────────────────────── */
+body.view-split .split-panel-map    { width: var(--split-left, 50%); }
+body.view-split .split-panel-cam    { flex: 1; }
+body.view-split .split-handle       { display: flex; }
+
+/* Drag handle */
+.split-handle {
+  width: 6px;
+  background: rgba(255,255,255,0.06);
+  cursor: col-resize;
+  flex-shrink: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s;
+  z-index: 50;
+}
+.split-handle:hover,
+.split-handle.dragging { background: rgba(0,150,255,0.45); }
+.split-handle::after {
+  content: '';
+  width: 2px;
+  height: 40px;
+  border-radius: 2px;
+  background: rgba(255,255,255,0.2);
+}
+
+/* ── View toggle buttons (in status bar) ────────────────────── */
+.view-toggle-group {
+  display: flex;
+  gap: 3px;
+  padding: 0 8px;
+}
+.view-toggle-btn {
+  background: transparent;
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 7px;
+  color: rgba(255,255,255,0.45);
+  font-size: 11px;
+  padding: 4px 9px;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.view-toggle-btn:hover { background: rgba(255,255,255,0.06); color: rgba(255,255,255,0.75); }
+.view-toggle-btn.active {
+  background: rgba(0,150,255,0.18);
+  border-color: rgba(0,150,255,0.45);
+  color: #fff;
+}
+
+/* Map panel fills its container */
+.split-panel-map .main {
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+}
+
+/* cameraStatusContainer sits at top of camera panel */
+#cameraStatusContainer {
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  z-index: 10;
+}
+
+/* Camera panel needs to be full-height */
+.split-panel-cam {
+  display: flex;
+  flex-direction: column;
 }

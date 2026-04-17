@@ -732,35 +732,12 @@ function bindModal() {
 function initCameraPage() {
   const OW = window.OW;
 
-  // Load camera sidebar and rebind buttons after injection
-  const sidebarContainer = document.getElementById('sidebarContainer');
-  if (sidebarContainer) {
-    fetch(`modules/camera-sidebar.html?v=${Date.now()}`)
-      .then(r => r.text())
-      .then(html => {
-        sidebarContainer.innerHTML = html;
-        // Rebind all sidebar controls now that the DOM exists
-        window.bindSidebarToggle && window.bindSidebarToggle();
-        // Rebind settings + log now that sidebar DOM exists
-        const settingsBtn = document.getElementById('settingsBtn');
-        const logBtn      = document.getElementById('logBtn');
-        if (settingsBtn) settingsBtn.onclick = () => window.renderSettingsPanel && window.renderSettingsPanel();
-        if (logBtn)      logBtn.onclick      = () => window.renderLogPanel    && window.renderLogPanel(true);
-      });
-  }
-
-  // Remove floorplan-only containers from layout
-  ['expandBtnContainer', 'zonesEditorContainer'].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) el.style.display = 'none';
-  });
-
   // Parse config
   camMode = (OW.uiConfig.cam_default_mode || 'snapshot') === 'live' ? 'live' : 'snapshot';
   try { camLowResMap = JSON.parse(OW.uiConfig.cam_low_res_map || '{}'); } catch {}
   try { camPinned = new Set(JSON.parse(OW.uiConfig.cam_pinned || '[]')); } catch {}
 
-  // Initial renders
+  // Initial renders into their panels (already in the DOM via index.html)
   renderCameraStatusBar();
   renderCameraGrid();
   bindModal();
@@ -774,7 +751,7 @@ function initCameraPage() {
   // Expose update function for app.js to call on HA state changes
   window.camUpdate = camUpdate;
 
-  // Clear hidden cameras on HA reconnect (e.g. after token was restored)
+  // Clear hidden cameras on HA reconnect
   window.camResetHidden = () => {
     camHidden.clear();
     camFailCount = {};

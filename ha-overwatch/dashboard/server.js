@@ -527,13 +527,20 @@ const server = http.createServer(async (req, res) => {
     const ext  = path.extname(filePath).toLowerCase();
     const mime = MIME[ext] || "application/octet-stream";
 
-    // For HTML pages: inject <base> tag so relative URLs resolve through ingress correctly
+    // For HTML pages: inject <base> tag for ingress routing, or a data attribute for direct access
     if (ext === ".html") {
       let html = fs.readFileSync(filePath, "utf8");
       const ingressPath = req.headers["x-ingress-path"] || "";
-      const base = ingressPath ? ingressPath.replace(/\/?$/, "/") : "./";
-      html = html.replace("<head>", `<head>\n    <base href="${base}" />`);
-      res.writeHead(200, { "Content-Type": "text/html", "Cache-Control": "no-cache" });
+      if (ingressPath) {
+        // Ingress: inject base tag so relative URLs route through HA ingress proxy
+        const base = ingressPath.replace(/\/?$/, "/");
+        html = html.replace("<head>", `<head>\n    <base href="${base}" />`);
+      } else {
+        // Direct LAN access: no base tag — relative URLs resolve to ha-ip:8099 directly
+        // Mark the document so app.js knows it's in direct mode
+        html = html.replace("<head>", `<head>\n    <meta name="ow-direct" content="true" />`);
+      }
+      res.writeHead(200, { "Content-Type": "text/html", "Cache-Control": "no-cache", "Access-Control-Allow-Origin": "*" });
       res.end(html);
       return;
     }

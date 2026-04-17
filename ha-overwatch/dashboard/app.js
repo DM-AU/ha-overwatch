@@ -121,6 +121,7 @@ let haStates = {};        // entity_id -> state object
 let haMsgId = 1;
 let haPendingCmds = {};
 let haReconnectTimer = null;
+let haReconnectDelay = 1000;   // exponential backoff: 1s→2s→4s→8s→30s max
 let haSubscribedEntities = new Set();
 
 /* ─── MODULE LOADER ───────────────────────────────────────── */
@@ -2377,18 +2378,19 @@ function buildLogBody(panel) {
 }
 
 /* ─── SERVER HEALTH CHECK ────────────────────────────────── */
-// Detect the ingress base path from the <base> tag injected by server.js.
-// fetch() ignores <base> tags — we must prefix all API calls manually.
-// In standalone mode base tag is "./" so BASE_PATH becomes empty string.
+// Detect access mode:
+// - Ingress: <base href="/api/hassio_ingress/<token>/"> injected by server.js
+// - Direct LAN: <meta name="ow-direct"> injected, no base tag — relative URLs work as-is
+const IS_DIRECT_MODE = !!document.querySelector('meta[name="ow-direct"]');
 const BASE_PATH = (() => {
+  if (IS_DIRECT_MODE) return "";   // direct LAN — all paths are relative to ha-ip:8099
   const base = document.querySelector("base");
   if (!base) return "";
   const href = base.getAttribute("href") || "";
-  // If it's a full ingress URL like /api/hassio_ingress/<token>/ use it as prefix
   return href === "./" || href === "/" ? "" : href.replace(/\/$/, "");
 })();
 
-// Prefix a relative API path with the ingress base path
+// Prefix a relative API path with the ingress base path (no-op in direct mode)
 function apiPath(rel) {
   return BASE_PATH ? `${BASE_PATH}/${rel}` : rel;
 }
@@ -2477,12 +2479,15 @@ function connectHA() {
   const pageIsHttps = window.location.protocol === "https:";
 
   if (isAddonMode) {
-    // In add-on mode: connect to our own server's WebSocket proxy.
-    // The proxy handles auth server-side — browser sends dummy token which gets replaced.
+    // Add-on / direct LAN mode: connect to our own server's WebSocket proxy.
+    // The proxy handles auth server-side.
     const proto = pageIsHttps ? "wss:" : "ws:";
     const host  = window.location.host;
+    // Direct mode has no BASE_PATH — just use the host directly
     wsUrl = `${proto}//${host}${BASE_PATH}/ws/api/websocket`;
-    logEvent("info", "Connecting to HA via add-on WebSocket proxy…", "ha");
+    logEvent("info", IS_DIRECT_MODE
+      ? "Connecting to HA via direct WebSocket proxy…"
+      : "Connecting to HA via add-on WebSocket proxy…", "ha");
   } else {
     // Standalone mode: connect directly to HA WebSocket
     if (!uiConfig.ha_url) return;
@@ -2490,11 +2495,9 @@ function connectHA() {
       logEvent("warn", "HA token required in standalone mode. Enter it in Settings.", "ha");
       return;
     }
-    // Upgrade ws:// → wss:// if page is served over HTTPS (mixed content block)
     let haUrl = uiConfig.ha_url.replace(/\/$/, "");
     if (pageIsHttps && haUrl.startsWith("http://")) {
       haUrl = haUrl.replace("http://", "https://");
-      logEvent("info", "Upgrading HA connection to HTTPS to match page protocol.", "ha");
     }
     wsUrl = haUrl.replace(/^http/, "ws") + "/api/websocket";
     logEvent("info", `Connecting to HA at ${haUrl}…`, "ha");
@@ -2505,7 +2508,7 @@ function connectHA() {
   } catch (e) {
     logEvent("error", "WebSocket creation failed: " + e.message, "ha");
     setHAStatus("error");
-    haReconnectTimer = setTimeout(connectHA, 15000);
+    scheduleReconnect();
     return;
   }
 
@@ -2530,6 +2533,8 @@ function connectHA() {
     if (msg.type === "auth_ok") {
       haConnected = true;
       haEverConnected = true;
+      haReconnectDelay = 1000;     // reset exponential backoff
+      showReconnectBanner(false);
       setHAStatus("connected");
       logEvent("ok", "Connected to Home Assistant (" + (msg.ha_version || "?") + ")", "ha");
       fetchAllStates();
@@ -2623,21 +2628,44 @@ function connectHA() {
   haSocket.onclose = (ev) => {
     haConnected = false;
     setHAStatus("disconnected");
+    showReconnectBanner(true);
     const reason = ev.reason ? ` (${ev.reason})` : "";
-    // Only show disconnect warning if we had a working connection before
     if (haEverConnected) {
-      logEvent("warn", `HA WebSocket disconnected (code ${ev.code})${reason}. Retrying in 10s…`, "ha");
+      logEvent("warn", `HA WebSocket disconnected (code ${ev.code})${reason}. Retrying in ${Math.round(haReconnectDelay/1000)}s…`, "ha");
     }
-    haReconnectTimer = setTimeout(connectHA, 10000);
+    scheduleReconnect();
   };
 
   haSocket.onerror = () => {
     setHAStatus("error");
-    // Only show error if we've connected before — suppresses noise on first load
     if (haEverConnected) {
       logEvent("error", "HA WebSocket error. Is the HA URL correct and reachable?", "ha");
     }
   };
+}
+
+function scheduleReconnect() {
+  if (haReconnectTimer) clearTimeout(haReconnectTimer);
+  haReconnectTimer = setTimeout(() => {
+    connectHA();
+    // Exponential backoff: double delay up to 30s
+    haReconnectDelay = Math.min(haReconnectDelay * 2, 30000);
+  }, haReconnectDelay);
+}
+
+function showReconnectBanner(show) {
+  let banner = document.getElementById("owReconnectBanner");
+  if (show) {
+    if (!banner) {
+      banner = document.createElement("div");
+      banner.id = "owReconnectBanner";
+      banner.style.cssText = "position:fixed;top:0;left:0;right:0;z-index:9999;background:rgba(255,149,0,0.92);color:#000;font-size:12px;font-weight:600;text-align:center;padding:4px 8px;pointer-events:none;";
+      banner.textContent = "⚡ Reconnecting to Home Assistant…";
+      document.body.appendChild(banner);
+    }
+  } else {
+    if (banner) banner.remove();
+  }
 }
 
 function sendHA(payload) {
@@ -3864,62 +3892,42 @@ function initFloorplan() {
 }
 
 async function init() {
-  const isCameraPage = document.body.classList.contains("page-cameras");
-
-  // Load appropriate sidebar
-  if (isCameraPage) {
-    await loadModule("sidebarContainer", "camera-sidebar.html");
-  } else {
-    await loadModule("sidebarContainer", "sidebar.html");
-  }
+  // Unified page — always load floorplan sidebar
+  await loadModule("sidebarContainer", "sidebar.html");
 
   if (!document.getElementById("sidebarEl")) {
     console.warn('[HA-Overwatch] sidebarEl not found — check module paths');
   }
 
-  // Camera page only needs sidebar + expand btn + HA connection — skip floorplan modules
-  if (!isCameraPage) {
-    await loadModule("expandBtnContainer", "expand-btn.html");
-    await loadModule("statusContainer", "status.html");
-    await loadModule("zonesEditorContainer", "zones-editor.html");
+  await loadModule("expandBtnContainer", "expand-btn.html");
+  await loadModule("statusContainer", "status.html");
+  await loadModule("zonesEditorContainer", "zones-editor.html");
 
-    bindZoomControls();
-    bindPan();
-    initFloorplan();
-    bindZonesButton();
-    bindStatusBar();
-    bindSearchUI();
-  } else {
-    // Camera page still needs expand button
-    await loadModule("expandBtnContainer", "expand-btn.html");
-    document.getElementById("expandBtnContainer") &&
-      (document.getElementById("expandBtnContainer").style.display = "");
-  }
+  bindZoomControls();
+  bindPan();
+  initFloorplan();
+  bindZonesButton();
+  bindStatusBar();
+  bindSearchUI();
 
   bindSidebarToggle();
-  // Settings + log buttons exist on both pages
   bindCommonSidebarButtons();
+  initViewToggle();   // view mode switcher (Map / Split / Cameras)
 
   await loadZones();
   await loadGroups();
-  if (!isCameraPage) {
-    bindZonesSvgEvents();
-    renderZonesEditor();
-    renderZones();
-  }
+  bindZonesSvgEvents();
+  renderZonesEditor();
+  renderZones();
   await loadConfig();
 
-  // Wait for the first health check to complete so isAddonMode is set
-  // before connectHA() fires — prevents spurious standalone WS attempts
   await startServerHealthCheck();
 
-  // Connect to HA — by now isAddonMode is known so the right path is taken
   if (!haConnected) connectHA();
 
   startLiveRefresh();
   logEvent("info", "HA-Overwatch initialised.", "system");
 
-  // Subscribe entities once zones are loaded (if HA already connected)
   subscribeHAEntities();
 
   // ── Expose shared state for cameras.js ─────────────────────
@@ -3943,6 +3951,108 @@ async function init() {
   window.isAddonMode          = isAddonMode;
   window.bindSidebarToggle    = bindSidebarToggle;
   window.bindCommonSidebarButtons = bindCommonSidebarButtons;
+}
+
+/* ─── VIEW MODE (Map / Split / Cameras) ───────────────────── */
+const VIEW_MODES = ['map', 'split', 'cameras'];
+
+function getViewMode() {
+  const saved = localStorage.getItem('ow_view_mode') || 'map';
+  return VIEW_MODES.includes(saved) ? saved : 'map';
+}
+
+function setViewMode(mode) {
+  localStorage.setItem('ow_view_mode', mode);
+  // Remove all view classes, add the right one
+  document.body.classList.remove('view-map', 'view-cameras', 'view-split');
+  document.body.classList.add(`view-${mode}`);
+  // Update toggle button states
+  document.querySelectorAll('.view-toggle-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.view === mode);
+  });
+  // Resize floorplan if switching to map or split
+  if (mode === 'map' || mode === 'split') {
+    setTimeout(() => { initFloorplan(); renderZones(); }, 50);
+  }
+  // Notify cameras.js
+  if (window.camUpdate) window.camUpdate();
+}
+
+function initViewToggle() {
+  const inject = () => {
+    const group = document.getElementById('viewToggleGroup');
+    if (!group) { setTimeout(inject, 200); return; }
+
+    group.innerHTML = `
+      <button class="view-toggle-btn" data-view="map" title="Floorplan only">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" style="vertical-align:middle;pointer-events:none;">
+          <polygon points="3,14 9,4 15,10 21,5 21,20 3,20" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" fill="none"/>
+        </svg>
+      </button>
+      <button class="view-toggle-btn" data-view="split" title="Split view">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" style="vertical-align:middle;pointer-events:none;">
+          <rect x="2" y="3" width="9" height="18" rx="1.5" stroke="currentColor" stroke-width="1.8"/>
+          <rect x="13" y="3" width="9" height="18" rx="1.5" stroke="currentColor" stroke-width="1.8"/>
+        </svg>
+      </button>
+      <button class="view-toggle-btn" data-view="cameras" title="Cameras only">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" style="vertical-align:middle;pointer-events:none;">
+          <rect x="2" y="7" width="20" height="13" rx="2" stroke="currentColor" stroke-width="1.8"/>
+          <circle cx="12" cy="13.5" r="3" stroke="currentColor" stroke-width="1.8"/>
+          <path d="M8 7l1.5-2.5h5L16 7" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+        </svg>
+      </button>`;
+
+    group.querySelectorAll('.view-toggle-btn').forEach(btn => {
+      btn.addEventListener('click', e => {
+        e.stopPropagation();
+        setViewMode(btn.dataset.view);
+      });
+    });
+
+    setViewMode(getViewMode());
+  };
+  inject();
+
+  // Split handle drag
+  const handle = document.getElementById('splitHandle');
+  if (handle) {
+    let dragging = false, startX = 0, startW = 0;
+
+    handle.addEventListener('pointerdown', e => {
+      dragging = true;
+      handle.classList.add('dragging');
+      startX = e.clientX;
+      const mapPanel = document.getElementById('mapPanel');
+      startW = mapPanel ? mapPanel.offsetWidth : window.innerWidth * 0.5;
+      handle.setPointerCapture(e.pointerId);
+    });
+
+    handle.addEventListener('pointermove', e => {
+      if (!dragging) return;
+      const root  = document.getElementById('splitRoot');
+      const totalW = root ? root.offsetWidth : window.innerWidth;
+      const newW  = Math.max(totalW * 0.2, Math.min(totalW * 0.8, startW + (e.clientX - startX)));
+      const pct   = (newW / totalW * 100).toFixed(1);
+      root.style.setProperty('--split-left', `${pct}%`);
+    });
+
+    handle.addEventListener('pointerup', () => {
+      if (!dragging) return;
+      dragging = false;
+      handle.classList.remove('dragging');
+      const root = document.getElementById('splitRoot');
+      const pct  = root?.style.getPropertyValue('--split-left')?.replace('%', '') || '50';
+      localStorage.setItem('ow_split_pos', pct);
+    });
+  }
+
+  // Restore saved split position
+  const savedPct = localStorage.getItem('ow_split_pos');
+  if (savedPct) {
+    const root = document.getElementById('splitRoot');
+    if (root) root.style.setProperty('--split-left', `${savedPct}%`);
+  }
 }
 
 window.addEventListener("DOMContentLoaded", init);
