@@ -2174,24 +2174,37 @@ body[data-split-dir="v"] .split-handle::after { width: 40px; height: 2px; }
 }
 
 /* ── Floating view toggle widget ──────────────────────────────
- * Sits above the sidebar expand/collapse button.
- * Position matches sidebar side (right by default).
+ * Sits horizontally at the same level as the sidebar collapse button.
+ * On the right sidebar: extends to the LEFT of the sidebar.
+ * On the left sidebar: extends to the RIGHT of the sidebar.
+ * Moves with the sidebar collapse/expand state.
  * ─────────────────────────────────────────────────────────── */
 .view-toggle-widget {
   position: fixed;
-  top: 72px;   /* below the expand button (which is at top:16px, height:52px) */
-  right: 10px; /* default: sidebar on right */
+  top: 16px;        /* same as expand button / collapse button top */
+  right: 76px;      /* 72px sidebar + 4px gap */
   z-index: 350;
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   gap: 4px;
   align-items: center;
+  transition: right 0.25s ease, left 0.25s ease;
 }
 
-/* Mirror sidebar side */
 body.sidebar-left .view-toggle-widget {
   right: auto;
+  left: 76px;
+}
+
+/* Slide with sidebar when it collapses */
+body.sidebar-collapsed .view-toggle-widget {
+  right: 10px;   /* align with expand button when sidebar is hidden */
+  top: 76px;     /* below expand button when sidebar collapsed */
+}
+body.sidebar-collapsed.sidebar-left .view-toggle-widget {
+  right: auto;
   left: 10px;
+  top: 76px;
 }
 
 .view-toggle-widget .view-toggle-btn {
@@ -2218,4 +2231,21 @@ body.sidebar-left .view-toggle-widget {
   background: rgba(0,150,255,0.2);
   border-color: rgba(0,150,255,0.5);
   color: #fff;
+}
+
+/* Camera dropdown portal — appended to body, positioned by JS, escapes all overflow:hidden */
+.cam-status-dd-portal {
+  position: fixed !important;
+  transform: translateX(-50%);
+  min-width: 280px;
+  max-width: 360px;
+  max-height: calc(100vh - 120px);
+  overflow-y: auto;
+  background: rgba(14,14,14,0.97);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 12px;
+  z-index: 9000 !important;
+  backdrop-filter: blur(10px);
+  scrollbar-gutter: stable;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.6);
 }

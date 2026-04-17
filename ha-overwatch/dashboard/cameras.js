@@ -565,27 +565,54 @@ function renderCameraStatusBar() {
       </div>
       ${!sidebarOnRight ? modeButtons : ''}
     </div>
-    <div class="cam-status-dd" id="camStatusDd" style="display:${camStatusOpen ? 'block' : 'none'};">
-      <div class="cam-status-master">
-        <div class="zone-list-dot${masterFlash ? ' flashing' : ''}"
-          style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${masterColour};opacity:${masterDot.dim ? 0.35 : 1};"></div>
-        <span style="flex:1;font-size:11px;font-weight:600;color:#aaa;margin-left:6px;">All Cameras</span>
-        <label class="zone-toggle-switch" style="flex-shrink:0;">
-          <input type="checkbox" id="camGlobalToggle" ${masterOn ? 'checked' : ''}>
-          <span class="zone-toggle-track"></span>
-        </label>
-      </div>
-      <div style="height:1px;background:rgba(255,255,255,0.06);margin:0 14px 4px;"></div>
-      ${zonesHtml}
-    </div>
   `;
+
+  // ── Portal dropdown to body so it escapes overflow:hidden on split panels ──
+  let dd = document.getElementById('camStatusDd');
+  if (!dd) {
+    dd = document.createElement('div');
+    dd.id = 'camStatusDd';
+    dd.className = 'cam-status-dd cam-status-dd-portal';
+    document.body.appendChild(dd);
+  }
+  dd.innerHTML = `
+    <div class="cam-status-master">
+      <div class="zone-list-dot${masterFlash ? ' flashing' : ''}"
+        style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${masterColour};opacity:${masterDot.dim ? 0.35 : 1};"></div>
+      <span style="flex:1;font-size:11px;font-weight:600;color:#aaa;margin-left:6px;">All Cameras</span>
+      <label class="zone-toggle-switch" style="flex-shrink:0;">
+        <input type="checkbox" id="camGlobalToggle" ${masterOn ? 'checked' : ''}>
+        <span class="zone-toggle-track"></span>
+      </label>
+    </div>
+    <div style="height:1px;background:rgba(255,255,255,0.06);margin:0 14px 4px;"></div>
+    ${zonesHtml}
+  `;
+  dd.style.display = camStatusOpen ? 'block' : 'none';
+
+  // Position the portal dropdown below the status bar pill
+  function positionDropdown() {
+    const toggle = document.getElementById('camStatusToggle');
+    if (!toggle || !dd) return;
+    const r = toggle.getBoundingClientRect();
+    dd.style.position = 'fixed';
+    dd.style.top  = (r.bottom + 4) + 'px';
+    dd.style.left = (r.left + r.width / 2) + 'px';
+    dd.style.transform = 'translateX(-50%)';
+    dd.style.zIndex = '9000';
+  }
+  positionDropdown();
 
   // ── Bind events ────────────────────────────────────────────
 
   document.getElementById('camStatusToggle')?.addEventListener('click', () => {
     camStatusOpen = !camStatusOpen;
     localStorage.setItem('cam_status_open', camStatusOpen ? 'true' : 'false');
-    renderCameraStatusBar();
+    dd.style.display = camStatusOpen ? 'block' : 'none';
+    if (camStatusOpen) positionDropdown();
+    // Update chevron without full re-render
+    const chev = document.querySelector('#camStatusToggle svg');
+    if (chev) chev.style.transform = `rotate(${camStatusOpen ? '180' : '0'}deg)`;
   });
 
   // Master toggle → propagate to all zones and cameras
