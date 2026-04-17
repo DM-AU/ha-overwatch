@@ -599,9 +599,13 @@ function renderCameraStatusBar() {
     dd.style.left      = (r.left + r.width / 2) + 'px';
     dd.style.transform = 'translateX(-50%)';
   }
-  requestAnimationFrame(positionDropdown);
+  requestAnimationFrame(() => {
+    positionDropdown();
+    // Second attempt in case panel hasn't laid out yet
+    setTimeout(positionDropdown, 100);
+  });
 
-  // Expose toggle function globally so the onclick attribute can reach it
+  // Expose toggle function globally
   window._camToggle = () => {
     camStatusOpen = !camStatusOpen;
     localStorage.setItem('cam_status_open', camStatusOpen ? 'true' : 'false');
@@ -609,14 +613,12 @@ function renderCameraStatusBar() {
     if (d) d.style.display = camStatusOpen ? 'block' : 'none';
     const chev = document.querySelector('#camStatusToggle svg');
     if (chev) chev.style.transform = `rotate(${camStatusOpen ? '180' : '0'}deg)`;
-    if (camStatusOpen) requestAnimationFrame(positionDropdown);
+    if (camStatusOpen) positionDropdown();
   };
 
-  // Wire the toggle via direct onclick on the element (survives re-renders)
-  requestAnimationFrame(() => {
-    const toggle = document.getElementById('camStatusToggle');
-    if (toggle) toggle.onclick = window._camToggle;
-  });
+  // Wire onclick synchronously — element exists immediately after innerHTML
+  const toggleEl = document.getElementById('camStatusToggle');
+  if (toggleEl) toggleEl.onclick = window._camToggle;
 
   // Master toggle → propagate to all zones and cameras
   document.getElementById('camGlobalToggle')?.addEventListener('change', e => {
@@ -722,17 +724,16 @@ let camUpdateInterval = null;
 
 function camUpdate() {
   renderCameraGrid();
-  // Live-update the status bar dot without full re-render
+  // Update the status bar dot live (colour + flash) without rebuilding the whole bar
   const activeCams = getActiveCameras();
   const activeIds  = new Set(activeCams.map(c => c.id));
-  const dot = document.querySelector('#camStatusToggle .zone-list-dot');
-  if (dot) {
-    const allCams   = window.OW.zones.flatMap(z => z.cameras || []);
-    const masterDot = camsDotState(allCams, activeIds);
-    const colour    = masterDot.dim ? '#555' : masterDot.colour;
-    dot.style.background = colour;
-    dot.style.opacity    = masterDot.dim ? '0.35' : '1';
-    dot.classList.toggle('flashing', !masterDot.dim && masterDot.flash);
+  const allCams    = (window.OW?.zones || []).flatMap(z => z.cameras || []);
+  const mDot       = camsDotState(allCams, activeIds);
+  const dotEl      = document.querySelector('#camStatusToggle .zone-list-dot');
+  if (dotEl) {
+    dotEl.style.background = mDot.dim ? '#555' : mDot.colour;
+    dotEl.style.opacity    = mDot.dim ? '0.35' : '1';
+    dotEl.classList.toggle('flashing', !mDot.dim && mDot.flash);
   }
 }
 
