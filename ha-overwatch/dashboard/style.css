@@ -919,6 +919,9 @@ display: flex;
   letter-spacing: 0.08em;
   font-weight: 600;
   margin-bottom: 2px;
+  display: flex;
+  align-items: center;
+  gap: 0;
 }
 
 .settings-field {
@@ -2056,13 +2059,6 @@ body[data-split-dir="v"] .split-handle {
 body[data-split-dir="v"] .split-handle::after { width: 40px; height: 2px; }
 
 /* ── View toggle buttons ──────────────────────────── */
-.view-toggle-group {
-  display: flex;
-  gap: 3px;
-  padding: 0 8px;
-  flex-shrink: 0;
-  align-items: center;
-}
 .view-toggle-btn {
   background: transparent;
   border: 1px solid rgba(255,255,255,0.12);
@@ -2166,59 +2162,15 @@ body[data-split-dir="v"] .split-handle::after { width: 40px; height: 2px; }
  * On the left sidebar: extends to the RIGHT of the sidebar.
  * Moves with the sidebar collapse/expand state.
  * ─────────────────────────────────────────────────────────── */
-.view-toggle-widget {
-  position: fixed;
-  top: 16px;        /* same as expand button / collapse button top */
-  right: 76px;      /* 72px sidebar + 4px gap */
-  z-index: 350;
-  display: flex;
-  flex-direction: row;
-  gap: 4px;
-  align-items: center;
-  transition: right 0.25s ease, left 0.25s ease;
-}
 
-body.sidebar-left .view-toggle-widget {
-  right: auto;
-  left: 76px;
-}
 
 /* Slide with sidebar when it collapses */
-body.sidebar-collapsed .view-toggle-widget {
-  right: 10px;   /* align with expand button when sidebar is hidden */
-  top: 76px;     /* below expand button when sidebar collapsed */
-}
 body.sidebar-collapsed.sidebar-left .view-toggle-widget {
   right: auto;
   left: 10px;
   top: 76px;
 }
 
-.view-toggle-widget .view-toggle-btn {
-  width: 40px;
-  height: 40px;
-  border-radius: 10px;
-  padding: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--color-icon-plate, rgba(30,30,30,0.92));
-  border: 1px solid var(--color-icon-plate-border, rgba(255,255,255,0.1));
-  color: rgba(255,255,255,0.55);
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s, border-color 0.15s;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.35);
-}
-.view-toggle-widget .view-toggle-btn:hover {
-  background: rgba(50,50,50,0.98);
-  color: rgba(255,255,255,0.9);
-  border-color: rgba(255,255,255,0.2);
-}
-.view-toggle-widget .view-toggle-btn.active {
-  background: rgba(0,150,255,0.2);
-  border-color: rgba(0,150,255,0.5);
-  color: #fff;
-}
 
 /* Camera dropdown portal — appended to body, positioned by JS, escapes all overflow:hidden */
 .cam-status-dd-portal {
@@ -2235,4 +2187,136 @@ body.sidebar-collapsed.sidebar-left .view-toggle-widget {
   backdrop-filter: blur(10px);
   scrollbar-gutter: stable;
   box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+}
+
+/* ── Settings tabs ──────────────────────────────────────────── */
+.settings-tabs {
+  display: flex;
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+  background: rgba(0,0,0,0.3);
+  flex-shrink: 0;
+}
+.settings-tab {
+  flex: 1;
+  padding: 10px 4px;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: rgba(255,255,255,0.4);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+  letter-spacing: 0.03em;
+}
+.settings-tab:hover { color: rgba(255,255,255,0.7); }
+.settings-tab.active {
+  color: #fff;
+  border-bottom-color: #0096ff;
+}
+.settings-tab-panel { display: none; }
+.settings-tab-panel.active { display: block; }
+
+/* Admin / browser badges */
+.settings-admin-badge {
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(255,149,0,0.18);
+  color: #ff9500;
+  border: 1px solid rgba(255,149,0,0.3);
+  margin-left: 6px;
+  vertical-align: middle;
+  letter-spacing: 0.04em;
+}
+.settings-browser-badge {
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(0,150,255,0.15);
+  color: #0096ff;
+  border: 1px solid rgba(0,150,255,0.3);
+  margin-left: 6px;
+  vertical-align: middle;
+  letter-spacing: 0.04em;
+}
+
+/* Admin notice banner */
+.settings-admin-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  background: rgba(255,149,0,0.08);
+  border: 1px solid rgba(255,149,0,0.2);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 11px;
+  color: #aaa;
+  margin-bottom: 14px;
+  line-height: 1.5;
+}
+
+/* Read-only field display */
+.settings-readonly {
+  font-size: 13px;
+  color: rgba(255,255,255,0.5);
+  padding: 7px 10px;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.07);
+  border-radius: 8px;
+  font-family: monospace;
+  word-break: break-all;
+}
+.settings-readonly-token { letter-spacing: 0.1em; }
+.settings-admin-hint {
+  font-size: 10px;
+  color: #555;
+  margin-top: 3px;
+}
+
+/* Connection status box */
+.settings-connection-box {
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 14px;
+  border: 1px solid;
+}
+.settings-connection-box.connected {
+  background: rgba(50,215,75,0.08);
+  border-color: rgba(50,215,75,0.25);
+}
+.settings-connection-box.disconnected {
+  background: rgba(255,59,48,0.07);
+  border-color: rgba(255,59,48,0.2);
+}
+.settings-connection-label {
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 3px;
+}
+.settings-connection-box.connected .settings-connection-label { color: #32d74b; }
+.settings-connection-box.disconnected .settings-connection-label { color: #ff453a; }
+.settings-connection-sub { font-size: 11px; color: #666; }
+
+/* Settings tab panels fill the body — each is a flex column with gap */
+.settings-tab-panel {
+  display: none;
+  flex-direction: column;
+  gap: 14px;
+}
+.settings-tab-panel.active {
+  display: flex;
+}
+
+/* Settings body gap handled by tab panels */
+.settings-body {
+  gap: 0;
+  padding: 0;
+}
+.settings-tab-panel {
+  padding: 14px;
+  overflow-y: auto;
+  max-height: calc(100vh - 120px);
 }

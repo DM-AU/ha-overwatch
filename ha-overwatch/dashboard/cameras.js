@@ -204,6 +204,7 @@ function renderCameraGrid() {
       const label = document.createElement('div');
       label.className = 'cam-tile-label';
       label.textContent = friendlyName(cam.id);
+      if (localStorage.getItem('ow_hide_cam_labels') === 'true') label.style.display = 'none';
 
       const media = document.createElement('div');
       media.className = 'cam-tile-media';
@@ -557,20 +558,18 @@ function renderCameraStatusBar() {
   const sidebarOnRight = (OW.uiConfig.sidebar_position || 'right') !== 'left';
   const hasHidden = camHidden.size > 0;
 
-  // Mode buttons: absolutely positioned within #cameraStatusContainer, opposite the sidebar
-  const modeSideStyle = sidebarOnRight
+  // Retry button (only shown when cameras are hidden due to failures)
+  const retrySide = sidebarOnRight
     ? 'position:absolute;left:12px;top:0;display:flex;gap:4px;align-items:center;'
     : 'position:absolute;right:12px;top:0;display:flex;gap:4px;align-items:center;';
 
-  const modeButtons = `
-    <div class="cam-status-mode" style="${modeSideStyle}">
-      <button class="cam-mode-btn ${camMode === 'snapshot' ? 'active' : ''}" id="camSnapBtn">Snapshot</button>
-      <button class="cam-mode-btn ${camMode === 'live' ? 'active' : ''}" id="camLiveBtn">Live</button>
-      ${hasHidden ? `<button class="cam-mode-btn" id="camRetryBtn" style="color:#ff9500;border-color:rgba(255,149,0,0.3);" title="Retry ${camHidden.size} hidden camera(s)">↺ Retry</button>` : ''}
-    </div>`;
+  const retryButton = hasHidden ? `
+    <div style="${retrySide}">
+      <button class="cam-mode-btn" id="camRetryBtn" style="color:#ff9500;border-color:rgba(255,149,0,0.3);" title="Retry ${camHidden.size} hidden camera(s)">↺ Retry</button>
+    </div>` : '';
 
   container.innerHTML = `
-    ${modeButtons}
+    ${retryButton}
     <div class="cam-status-bar" id="camStatusBar">
       <div class="cam-status-inner" id="camStatusToggle">
         <div class="zone-list-dot${masterFlash ? ' flashing' : ''}"
@@ -730,29 +729,7 @@ function renderCameraStatusBar() {
     });
   });
 
-  const snapBtn  = document.getElementById('camSnapBtn');
-  const liveBtn  = document.getElementById('camLiveBtn');
   const retryBtn = document.getElementById('camRetryBtn');
-
-  if (snapBtn) snapBtn.onclick = () => {
-    if (camMode === 'snapshot') return;  // already in snapshot
-    camMode = 'snapshot';
-    stopSnapshotRefresh();
-    const grid = document.getElementById('cameraGrid');
-    if (grid) grid.innerHTML = '';  // force full tile rebuild in new mode
-    renderCameraGrid();
-    startSnapshotRefresh();
-    renderCameraStatusBar();
-  };
-  if (liveBtn) liveBtn.onclick = () => {
-    if (camMode === 'live') return;  // already live
-    camMode = 'live';
-    stopSnapshotRefresh();
-    const grid = document.getElementById('cameraGrid');
-    if (grid) grid.innerHTML = '';  // force full tile rebuild with stream URLs
-    renderCameraGrid();
-    renderCameraStatusBar();
-  };
   if (retryBtn) retryBtn.onclick = () => {
     camHidden.clear();
     camFailCount = {};
@@ -887,8 +864,8 @@ function bindModal() {
 function initCameraPage() {
   const OW = window.OW;
 
-  // Parse config
-  camMode = (OW.uiConfig.cam_default_mode || 'snapshot') === 'live' ? 'live' : 'snapshot';
+  // Parse config — localStorage overrides uiConfig for per-device settings
+  camMode = (localStorage.getItem('ow_cam_mode') || OW.uiConfig.cam_default_mode || 'snapshot') === 'live' ? 'live' : 'snapshot';
   try { camLowResMap = JSON.parse(OW.uiConfig.cam_low_res_map || '{}'); } catch {}
   try { camPinned = new Set(JSON.parse(OW.uiConfig.cam_pinned || '[]')); } catch {}
 
@@ -917,6 +894,17 @@ function initCameraPage() {
 
   // Expose update function for app.js to call on HA state changes
   window.camUpdate = camUpdate;
+
+  // Allow settings panel to change mode live
+  window._camSetMode = (mode) => {
+    if (camMode === mode) return;
+    camMode = mode;
+    if (mode === 'live') { stopSnapshotRefresh(); } else { startSnapshotRefresh(); }
+    const grid = document.getElementById('cameraGrid');
+    if (grid) grid.innerHTML = '';
+    renderCameraGrid();
+    renderCameraStatusBar();
+  };
 
   // Clear hidden cameras on HA reconnect
   window.camResetHidden = () => {
