@@ -2135,7 +2135,7 @@ body[data-split-dir="v"] .split-handle::after { width: 40px; height: 2px; }
 #cameraStatusContainer {
   flex-shrink: 0;
   position: relative;
-  z-index: 10;
+  z-index: 200;  /* above cam-main */
 }
 
 .cam-status-bar {
@@ -2151,6 +2151,15 @@ body[data-split-dir="v"] .split-handle::after { width: 40px; height: 2px; }
   left: 50% !important;
   transform: translateX(-50%) !important;
   z-index: 390;
+}
+
+/* Camera panel must NOT clip overflow so dropdown can escape */
+.split-panel-cam {
+  overflow: visible !important;
+}
+/* But cam-main itself clips its content */
+.cam-main {
+  overflow: hidden !important;
 }
 
 .cam-main {

@@ -3955,11 +3955,12 @@ async function init() {
     renderSettingsPanel,
     renderLogPanel,
   };
-  window.renderSettingsPanel  = renderSettingsPanel;
-  window.renderLogPanel       = renderLogPanel;
-  window.isAddonMode          = isAddonMode;
-  window.bindSidebarToggle    = bindSidebarToggle;
+  window.renderSettingsPanel      = renderSettingsPanel;
+  window.renderLogPanel           = renderLogPanel;
+  window.isAddonMode              = isAddonMode;
+  window.bindSidebarToggle        = bindSidebarToggle;
   window.bindCommonSidebarButtons = bindCommonSidebarButtons;
+  window.setViewMode              = setViewMode;   // so cameras.js view buttons work
 }
 
 /* ─── VIEW MODE (Map / Split / Cameras) ───────────────────── */
@@ -3981,7 +3982,7 @@ function setViewMode(mode) {
   });
   // Resize floorplan if switching to map or split
   if (mode === 'map' || mode === 'split') {
-    setTimeout(() => { initFloorplan(); renderZones(); }, 50);
+    setTimeout(() => fitFloorplanToPanel(), 50);
   }
   // Notify cameras.js
   if (window.camUpdate) window.camUpdate();
@@ -4060,6 +4061,7 @@ function initViewToggle() {
       e.preventDefault();
     });
 
+    let rafPending = false;
     handle.addEventListener('pointermove', e => {
       if (!dragging) return;
       const root = document.getElementById('splitRoot');
@@ -4069,6 +4071,14 @@ function initViewToggle() {
       const delta = isV ? e.clientY - startPos : e.clientX - startPos;
       const pct   = Math.max(20, Math.min(80, startPct + (delta / total * 100)));
       applySplitPct(pct);
+      // Re-fit floorplan live (throttled to animation frames)
+      if (!rafPending) {
+        rafPending = true;
+        requestAnimationFrame(() => {
+          rafPending = false;
+          fitFloorplanToPanel();
+        });
+      }
     });
 
     handle.addEventListener('pointerup', () => {
@@ -4078,9 +4088,24 @@ function initViewToggle() {
       const root = document.getElementById('splitRoot');
       const pct  = parseFloat(root?.style.getPropertyValue('--split-pct') || '50');
       localStorage.setItem('ow_split_pos', pct.toFixed(1));
-      setTimeout(() => { initFloorplan(); renderZones(); }, 30);
+      fitFloorplanToPanel();
     });
   }
+}
+
+// Fit the floorplan to its current panel size without resetting zoom state
+function fitFloorplanToPanel() {
+  const img = document.getElementById('floorplanImage');
+  if (!img || !img.naturalWidth) return;
+  const panel = document.getElementById('mapPanel');
+  const vw = (panel && panel.offsetWidth  > 0) ? panel.offsetWidth  : window.innerWidth;
+  const vh = (panel && panel.offsetHeight > 0) ? panel.offsetHeight : window.innerHeight;
+  const iw = img.naturalWidth, ih = img.naturalHeight;
+  zoom.scale = Math.min(vw / iw, vh / ih, 1);
+  zoom.x = (vw - iw * zoom.scale) / 2;
+  zoom.y = (vh - ih * zoom.scale) / 2;
+  applyTransform();
+  renderZones();
 }
 
 function applySplitPct(pct) {
