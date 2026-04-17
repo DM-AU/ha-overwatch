@@ -545,22 +545,6 @@ function renderCameraStatusBar() {
   const sidebarOnRight = (OW.uiConfig.sidebar_position || 'right') !== 'left';
   const hasHidden = camHidden.size > 0;
 
-  // View mode switcher — mirrors the floorplan status bar buttons
-  const viewBtns = `
-    <div class="cam-status-mode" style="${sidebarOnRight ? '' : 'margin-right:auto;'}">
-      <button class="cam-mode-btn" onclick="window.setViewMode&&window.setViewMode('map')" title="Floorplan view">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" style="vertical-align:middle;pointer-events:none;">
-          <polygon points="3,14 9,4 15,10 21,5 21,20 3,20" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" fill="none"/>
-        </svg>
-      </button>
-      <button class="cam-mode-btn" onclick="window.setViewMode&&window.setViewMode('split')" title="Split view">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" style="vertical-align:middle;pointer-events:none;">
-          <rect x="2" y="2" width="9" height="20" rx="1.5" stroke="currentColor" stroke-width="1.8"/>
-          <rect x="13" y="2" width="9" height="20" rx="1.5" stroke="currentColor" stroke-width="1.8"/>
-        </svg>
-      </button>
-    </div>`;
-
   const modeButtons = `
     <div class="cam-status-mode" style="${sidebarOnRight ? 'margin-right:auto;' : 'margin-left:auto;'}">
       <button class="cam-mode-btn ${camMode === 'snapshot' ? 'active' : ''}" id="camSnapBtn">Snapshot</button>
@@ -570,7 +554,7 @@ function renderCameraStatusBar() {
 
   container.innerHTML = `
     <div class="cam-status-bar" id="camStatusBar">
-      ${sidebarOnRight ? modeButtons : viewBtns}
+      ${sidebarOnRight ? modeButtons : ''}
       <div class="cam-status-inner" id="camStatusToggle">
         <div class="zone-list-dot${masterFlash ? ' flashing' : ''}"
           style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${masterColour};"></div>
@@ -579,7 +563,7 @@ function renderCameraStatusBar() {
           <path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
       </div>
-      ${sidebarOnRight ? viewBtns : modeButtons}
+      ${!sidebarOnRight ? modeButtons : ''}
     </div>
     <div class="cam-status-dd" id="camStatusDd" style="display:${camStatusOpen ? 'block' : 'none'};">
       <div class="cam-status-master">

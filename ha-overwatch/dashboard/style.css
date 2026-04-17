@@ -2172,3 +2172,50 @@ body[data-split-dir="v"] .split-handle::after { width: 40px; height: 2px; }
   background: #0a0a0a;
   min-height: 0;
 }
+
+/* ── Floating view toggle widget ──────────────────────────────
+ * Sits above the sidebar expand/collapse button.
+ * Position matches sidebar side (right by default).
+ * ─────────────────────────────────────────────────────────── */
+.view-toggle-widget {
+  position: fixed;
+  top: 72px;   /* below the expand button (which is at top:16px, height:52px) */
+  right: 10px; /* default: sidebar on right */
+  z-index: 350;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: center;
+}
+
+/* Mirror sidebar side */
+body.sidebar-left .view-toggle-widget {
+  right: auto;
+  left: 10px;
+}
+
+.view-toggle-widget .view-toggle-btn {
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-icon-plate, rgba(30,30,30,0.92));
+  border: 1px solid var(--color-icon-plate-border, rgba(255,255,255,0.1));
+  color: rgba(255,255,255,0.55);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.35);
+}
+.view-toggle-widget .view-toggle-btn:hover {
+  background: rgba(50,50,50,0.98);
+  color: rgba(255,255,255,0.9);
+  border-color: rgba(255,255,255,0.2);
+}
+.view-toggle-widget .view-toggle-btn.active {
+  background: rgba(0,150,255,0.2);
+  border-color: rgba(0,150,255,0.5);
+  color: #fff;
+}

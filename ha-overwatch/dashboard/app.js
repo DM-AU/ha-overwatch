@@ -3993,63 +3993,88 @@ function initViewToggle() {
   const savedDir = localStorage.getItem('ow_split_dir') || 'h';
   document.body.setAttribute('data-split-dir', savedDir);
 
+  // Create a floating view toggle widget — sits above the expand/collapse button
+  // Independent of both status bars
+  const widget = document.createElement('div');
+  widget.id = 'viewToggleWidget';
+  widget.className = 'view-toggle-widget';
+  document.body.appendChild(widget);
+
+  function updateWidget() {
+    const mode   = getViewMode();
+    const dir    = document.body.getAttribute('data-split-dir') || 'h';
+    const inSplit = mode === 'split';
+
+    // SVG icons
+    const mapIcon = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" style="pointer-events:none;">
+      <polygon points="3,14 9,4 15,10 21,5 21,20 3,20" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round" fill="none"/>
+    </svg>`;
+    const splitHIcon = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" style="pointer-events:none;">
+      <rect x="2" y="2" width="9" height="20" rx="1.5" stroke="currentColor" stroke-width="1.9"/>
+      <rect x="13" y="2" width="9" height="20" rx="1.5" stroke="currentColor" stroke-width="1.9"/>
+    </svg>`;
+    const splitVIcon = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" style="pointer-events:none;">
+      <rect x="2" y="2" width="20" height="9" rx="1.5" stroke="currentColor" stroke-width="1.9"/>
+      <rect x="2" y="13" width="20" height="9" rx="1.5" stroke="currentColor" stroke-width="1.9"/>
+    </svg>`;
+    const camIcon = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" style="pointer-events:none;">
+      <rect x="2" y="7" width="20" height="13" rx="2" stroke="currentColor" stroke-width="1.9"/>
+      <circle cx="12" cy="13.5" r="3" stroke="currentColor" stroke-width="1.9"/>
+      <path d="M8 7l1.5-2.5h5L16 7" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"/>
+    </svg>`;
+
+    // Direction flip icon: show the OTHER direction (what clicking will switch TO)
+    const flipIcon   = dir === 'h' ? splitVIcon : splitHIcon;
+    const flipTitle  = dir === 'h' ? 'Switch to vertical split' : 'Switch to horizontal split';
+
+    widget.innerHTML = `
+      <button class="view-toggle-btn${mode === 'map'     ? ' active' : ''}" data-action="map"     title="Switch to Floorplan only">${mapIcon}</button>
+      <button class="view-toggle-btn${mode === 'split'   ? ' active' : ''}" data-action="split"   title="Switch to Split view">${dir === 'h' ? splitHIcon : splitVIcon}</button>
+      ${inSplit ? `<button class="view-toggle-btn" data-action="flipdir" title="${flipTitle}" style="font-size:10px;">${flipIcon}</button>` : ''}
+      <button class="view-toggle-btn${mode === 'cameras' ? ' active' : ''}" data-action="cameras" title="Switch to Cameras only">${camIcon}</button>`;
+
+    widget.querySelectorAll('.view-toggle-btn').forEach(btn => {
+      btn.addEventListener('click', e => {
+        e.stopPropagation();
+        const action = btn.dataset.action;
+        if (action === 'flipdir') {
+          const cur  = document.body.getAttribute('data-split-dir') || 'h';
+          const next = cur === 'h' ? 'v' : 'h';
+          document.body.setAttribute('data-split-dir', next);
+          localStorage.setItem('ow_split_dir', next);
+          applySplitPct(parseFloat(localStorage.getItem('ow_split_pos') || '50'));
+          if (window.camUpdate) window.camUpdate();
+          setTimeout(() => fitFloorplanToPanel(), 50);
+          updateWidget();
+        } else {
+          setViewMode(action);
+        }
+      });
+    });
+  }
+
+  // Call updateWidget after setViewMode so active state refreshes
+  const _origSetViewMode = setViewMode;
+  window.setViewMode = (mode) => {
+    _origSetViewMode(mode);
+    updateWidget();
+  };
+
+  // Inject into status.html group (now empty — just keep the container for layout)
   const inject = () => {
     const group = document.getElementById('viewToggleGroup');
-    if (!group) { setTimeout(inject, 200); return; }
-
-    const dirIcon = () => document.body.getAttribute('data-split-dir') === 'v'
-      ? `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" style="pointer-events:none;"><rect x="2" y="2" width="20" height="10" rx="1.5" stroke="currentColor" stroke-width="1.8"/><rect x="2" y="14" width="20" height="8" rx="1.5" stroke="currentColor" stroke-width="1.8"/></svg>`
-      : `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" style="pointer-events:none;"><rect x="2" y="2" width="9" height="20" rx="1.5" stroke="currentColor" stroke-width="1.8"/><rect x="13" y="2" width="9" height="20" rx="1.5" stroke="currentColor" stroke-width="1.8"/></svg>`;
-
-    group.innerHTML = `
-      <button class="view-toggle-btn" data-view="map" title="Floorplan only">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" style="pointer-events:none;">
-          <polygon points="3,14 9,4 15,10 21,5 21,20 3,20" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" fill="none"/>
-        </svg>
-      </button>
-      <button class="view-toggle-btn" data-view="split" title="Split view" style="gap:4px;">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" style="pointer-events:none;">
-          <rect x="2" y="2" width="9" height="20" rx="1.5" stroke="currentColor" stroke-width="1.8"/>
-          <rect x="13" y="2" width="9" height="20" rx="1.5" stroke="currentColor" stroke-width="1.8"/>
-        </svg>
-      </button>
-      <button class="view-toggle-btn" id="splitDirBtn" title="Toggle split direction" style="padding:4px 6px;">
-        ${dirIcon()}
-      </button>
-      <button class="view-toggle-btn" data-view="cameras" title="Cameras only">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" style="pointer-events:none;">
-          <rect x="2" y="7" width="20" height="13" rx="2" stroke="currentColor" stroke-width="1.8"/>
-          <circle cx="12" cy="13.5" r="3" stroke="currentColor" stroke-width="1.8"/>
-          <path d="M8 7l1.5-2.5h5L16 7" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
-        </svg>
-      </button>`;
-
-    group.querySelectorAll('.view-toggle-btn[data-view]').forEach(btn => {
-      btn.addEventListener('click', e => { e.stopPropagation(); setViewMode(btn.dataset.view); });
-    });
-
-    document.getElementById('splitDirBtn')?.addEventListener('click', e => {
-      e.stopPropagation();
-      const cur = document.body.getAttribute('data-split-dir') || 'h';
-      const next = cur === 'h' ? 'v' : 'h';
-      document.body.setAttribute('data-split-dir', next);
-      localStorage.setItem('ow_split_dir', next);
-      document.getElementById('splitDirBtn').innerHTML = dirIcon();
-      // Re-apply split pct on direction change
-      applySplitPct(parseFloat(localStorage.getItem('ow_split_pos') || '50'));
-      if (window.camUpdate) window.camUpdate();
-      setTimeout(() => { initFloorplan(); renderZones(); }, 50);
-    });
-
+    if (group) group.style.display = 'none';  // hide from status bar
+    updateWidget();
     setViewMode(getViewMode());
     applySplitPct(parseFloat(localStorage.getItem('ow_split_pos') || '50'));
   };
-  inject();
+  setTimeout(inject, 300);  // after status.html loads
 
   // Split handle drag — works for both H and V
   const handle = document.getElementById('splitHandle');
   if (handle) {
     let dragging = false, startPos = 0, startPct = 50;
+    let rafPending = false;
 
     handle.addEventListener('pointerdown', e => {
       dragging = true;
@@ -4061,7 +4086,6 @@ function initViewToggle() {
       e.preventDefault();
     });
 
-    let rafPending = false;
     handle.addEventListener('pointermove', e => {
       if (!dragging) return;
       const root = document.getElementById('splitRoot');
@@ -4071,13 +4095,9 @@ function initViewToggle() {
       const delta = isV ? e.clientY - startPos : e.clientX - startPos;
       const pct   = Math.max(20, Math.min(80, startPct + (delta / total * 100)));
       applySplitPct(pct);
-      // Re-fit floorplan live (throttled to animation frames)
       if (!rafPending) {
         rafPending = true;
-        requestAnimationFrame(() => {
-          rafPending = false;
-          fitFloorplanToPanel();
-        });
+        requestAnimationFrame(() => { rafPending = false; fitFloorplanToPanel(); });
       }
     });
 
