@@ -595,9 +595,11 @@ function renderCameraStatusBar() {
     if (!toggle) return;
     const r = toggle.getBoundingClientRect();
     if (r.width === 0) return;
+    dd.style.position  = 'fixed';
     dd.style.top       = (r.bottom + 6) + 'px';
     dd.style.left      = (r.left + r.width / 2) + 'px';
     dd.style.transform = 'translateX(-50%)';
+    dd.style.zIndex    = '9000';
   }
   requestAnimationFrame(() => {
     positionDropdown();

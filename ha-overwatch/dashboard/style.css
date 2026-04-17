@@ -2146,11 +2146,8 @@ body[data-split-dir="v"] .split-handle::after { width: 40px; height: 2px; }
 }
 
 .cam-status-dd {
-  position: absolute !important;
-  top: 100% !important;
-  left: 50% !important;
-  transform: translateX(-50%) !important;
-  z-index: 390;
+  /* Position set by JS for portal pattern */
+  z-index: 9000;
 }
 
 /* Camera panel must NOT clip overflow so dropdown can escape */
