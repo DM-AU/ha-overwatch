@@ -766,17 +766,79 @@ let camUpdateInterval = null;
 
 function camUpdate() {
   renderCameraGrid();
-  // Update the status bar dot live (colour + flash) without rebuilding the whole bar
+
+  const OW       = window.OW;
+  if (!OW) return;
+  const zones    = OW.zones || [];
+  const groups   = OW.groups || [];
   const activeCams = getActiveCameras();
   const activeIds  = new Set(activeCams.map(c => c.id));
-  const allCams    = (window.OW?.zones || []).flatMap(z => z.cameras || []);
-  const mDot       = camsDotState(allCams, activeIds);
-  const dotEl      = document.querySelector('#camStatusToggle .zone-list-dot');
-  if (dotEl) {
-    dotEl.style.background = mDot.dim ? '#555' : mDot.colour;
-    dotEl.style.opacity    = mDot.dim ? '0.35' : '1';
-    dotEl.classList.toggle('flashing', !mDot.dim && mDot.flash);
+
+  // ── Master dot (in status pill) ────────────────────────────
+  const allCams = zones.flatMap(z => z.cameras || []);
+  const mDot    = camsDotState(allCams, activeIds);
+  const masterDotEl = document.querySelector('#camStatusToggle .zone-list-dot');
+  if (masterDotEl) {
+    masterDotEl.style.background = mDot.dim ? '#555' : mDot.colour;
+    masterDotEl.style.opacity    = mDot.dim ? '0.35' : '1';
+    masterDotEl.classList.toggle('flashing', !mDot.dim && mDot.flash);
   }
+
+  // ── Dropdown dots (only if open) ───────────────────────────
+  const dd = document.getElementById('camStatusDd');
+  if (!dd || dd.style.display === 'none') return;
+
+  // Master dot inside dropdown
+  const ddMasterDot = dd.querySelector('.cam-status-master .zone-list-dot');
+  if (ddMasterDot) {
+    ddMasterDot.style.background = mDot.dim ? '#555' : mDot.colour;
+    ddMasterDot.style.opacity    = mDot.dim ? '0.35' : '1';
+    ddMasterDot.classList.toggle('flashing', !mDot.dim && mDot.flash);
+  }
+
+  // Group dots
+  dd.querySelectorAll('.cam-dd-group-header').forEach(hdr => {
+    const gid   = hdr.dataset.groupId;
+    const group = groups.find(g => g.id === gid);
+    if (!group) return;
+    const gDot  = groupDotState(group, zones, activeIds);
+    const dot   = hdr.querySelector('.zone-list-dot');
+    if (dot) {
+      dot.style.background = gDot.dim ? '#555' : gDot.colour;
+      dot.style.opacity    = gDot.dim ? '0.35' : '1';
+      dot.classList.toggle('flashing', !gDot.dim && gDot.flash);
+    }
+  });
+
+  // Zone dots
+  dd.querySelectorAll('.cam-dd-zone-header').forEach(hdr => {
+    const zid  = hdr.dataset.zoneId;
+    const zone = zones.find(z => z.id === zid);
+    if (!zone) return;
+    const zDot = zoneDotState(zone, activeIds);
+    const dot  = hdr.querySelector('.zone-list-dot');
+    if (dot) {
+      dot.style.background = zDot.dim ? (zone.colorHex || '#0096ff') : zDot.colour;
+      dot.style.opacity    = zDot.dim ? '0.35' : '1';
+      dot.classList.toggle('flashing', !zDot.dim && zDot.flash);
+    }
+  });
+
+  // Camera dots
+  dd.querySelectorAll('.cam-dd-cam-row').forEach(row => {
+    const toggle = row.querySelector('.cam-entity-toggle');
+    if (!toggle) return;
+    const camId  = toggle.dataset.camId;
+    const camOn  = localStorage.getItem(CAM_TOGGLE_PREFIX + camId) !== 'false';
+    const isActive = activeIds.has(camId);
+    const cDot   = camDotColour(camOn, isActive && camOn);
+    const dot    = row.querySelector('.zone-list-dot');
+    if (dot) {
+      dot.style.background = cDot.colour;
+      dot.style.opacity    = camOn ? '1' : '0.3';
+      dot.classList.toggle('flashing', cDot.flash);
+    }
+  });
 }
 
 /* ── Modal bindings ─────────────────────────────────────────── */
