@@ -809,7 +809,8 @@ function startZoneFade(zoneId, hex) {
 function getZoneFadeAlpha(zoneId) {
   const fade = zoneFadeState[zoneId];
   if (!fade) return 0;
-  const dur = (parseFloat(localStorage.getItem('ow_fade_duration') ?? uiConfig.zone_fade_duration) || 3) * 1000;
+  const _fadeLs  = localStorage.getItem('ow_fade_duration');
+  const dur = ((_fadeLs !== null ? parseFloat(_fadeLs) : null) ?? parseFloat(uiConfig.zone_fade_duration) ?? 3) * 1000;
   const elapsed = Date.now() - fade.startedAt;
   if (elapsed >= dur) {
     delete zoneFadeState[zoneId];

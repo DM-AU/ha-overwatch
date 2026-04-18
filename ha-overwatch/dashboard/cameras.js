@@ -37,7 +37,11 @@ function camIsEnabled(type, key, serverData) {
     const z = (serverData.camera_zones || []).find(z => z.id === key);
     return z ? z.enabled !== false : true;
   }
-  return serverData.master !== false;
+  // global — all cameras enabled unless ALL are explicitly disabled
+  if (serverData.cameras && serverData.cameras.length > 0) {
+    return serverData.cameras.some(c => c.enabled !== false);
+  }
+  return true;
 }
 
 // Set camera/zone toggle — writes to server or localStorage
@@ -439,16 +443,22 @@ function renderCameraStatusBar() {
   const activeCams = getActiveCameras();
   const activeIds  = new Set(activeCams.map(c => c.id));
 
-  // ── Compute master state: all on = checked, any off = unchecked ──
-  const allCams = allCameraIds(zones);
-  const masterOn = allCams.length > 0 &&
-    allCams.every(id => localStorage.getItem(CAM_TOGGLE_PREFIX + id) !== 'false') &&
-    zones.filter(z => (z.cameras||[]).length).every(z => localStorage.getItem(CAM_ZONE_PREFIX + z.id) !== 'false');
+  // Lock toggles for direct browser users in server-defaults mode
+  const isDirectBrowser = !!document.querySelector('meta[name="ow-direct"]');
+  const lockedAttr      = (camUseServerState() && isDirectBrowser) ? 'disabled' : '';
+
+  // ── Compute master state ──────────────────────────────────────
+  const allCams  = allCameraIds(zones);
+  const masterOn = camUseServerState()
+    ? (camServerState ? camServerState.cameras.some(c => c.enabled !== false) : true)
+    : (allCams.length > 0 &&
+       allCams.every(id => localStorage.getItem(CAM_TOGGLE_PREFIX + id) !== 'false') &&
+       zones.filter(z => (z.cameras||[]).length).every(z => localStorage.getItem(CAM_ZONE_PREFIX + z.id) !== 'false'));
   const masterDot = camsDotState(allCams, activeIds);
 
   const zonesWithCameras = zones.filter(z => (z.cameras || []).length > 0);
 
-  // ── Build 3-level tree: groups (sorted) → zones (sorted) → cameras (sorted) ──
+  // ── Build 3-level tree: groups → zones → cameras ─────────────
   let zonesHtml = '';
   if (zonesWithCameras.length === 0) {
     zonesHtml = `<div class="cam-status-empty">No cameras configured in zones</div>`;
@@ -459,19 +469,12 @@ function renderCameraStatusBar() {
     const sortedGroups = [...(groups || [])].sort((a, b) =>
       (a.name || a.id).localeCompare(b.name || b.id));
 
-    // Lock toggles for direct browser users in server-defaults mode
-    const isDirectBrowser = !!document.querySelector('meta[name="ow-direct"]');
-    const lockedAttr      = (camUseServerState() && isDirectBrowser) ? 'disabled' : '';
-
     // Render a single zone row + its cameras
     const renderZoneRow = (zone, indent) => {
       const cameras  = [...(zone.cameras || [])].sort((a, b) =>
         friendlyName(a).localeCompare(friendlyName(b)));
-      // Zone is "on" only if zone key is on AND all its cameras are on
-      const zoneKeyOn = localStorage.getItem(CAM_ZONE_PREFIX + zone.id) !== 'false';
-      const allCamsOn = cameras.length > 0 && cameras.every(id => localStorage.getItem(CAM_TOGGLE_PREFIX + id) !== 'false');
-      const zoneOn    = zoneKeyOn && allCamsOn;
-      const colKey    = `cam_zone_collapsed_${zone.id}`;
+      const zoneOn   = camIsEnabled('zone', zone.id, camServerState);
+      const colKey   = `cam_zone_collapsed_${zone.id}`;
       const collapsed = localStorage.getItem(colKey) !== 'expanded';
       const dot = zoneDotState(zone, activeIds);
       const pl  = indent === 1 ? '28px' : '14px';
