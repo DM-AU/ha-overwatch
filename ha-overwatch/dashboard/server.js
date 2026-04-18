@@ -764,7 +764,8 @@ server.listen(PORT, "0.0.0.0", () => {
 // on add-on startup so admin just needs to restart HA and add the integration.
 function writeCustomComponent() {
   if (!process.env.SUPERVISOR_TOKEN) return; // only in add-on mode
-  const destDir = "/homeassistant/custom_components/ha_overwatch";
+  // config:rw maps HA /config directory to /config in the container
+  const destDir = "/config/custom_components/ha_overwatch";
   const srcDir  = path.join(APP_DIR, "..", "custom_components", "ha_overwatch");
   try {
     fs.mkdirSync(path.join(destDir, "translations"), { recursive: true });
@@ -773,18 +774,21 @@ function writeCustomComponent() {
       "switch.py", "binary_sensor.py",
       "manifest.json", "strings.json",
     ];
+    let written = 0;
     files.forEach(f => {
       const src  = path.join(srcDir, f);
       const dest = path.join(destDir, f);
-      if (fs.existsSync(src)) fs.copyFileSync(src, dest);
+      if (fs.existsSync(src)) { fs.copyFileSync(src, dest); written++; }
+      else console.warn(`[HA-Overwatch] Component source missing: ${src}`);
     });
-    // translations
     const enSrc  = path.join(srcDir, "translations", "en.json");
     const enDest = path.join(destDir, "translations", "en.json");
-    if (fs.existsSync(enSrc)) fs.copyFileSync(enSrc, enDest);
-    console.log("[HA-Overwatch] Custom component written to", destDir);
+    if (fs.existsSync(enSrc)) { fs.copyFileSync(enSrc, enDest); written++; }
+    console.log(`[HA-Overwatch] Custom component written to ${destDir} (${written} files)`);
+    console.log(`[HA-Overwatch] Restart Home Assistant to activate the HA Overwatch integration.`);
   } catch (e) {
     console.error("[HA-Overwatch] Failed to write custom component:", e.message);
+    console.error("[HA-Overwatch] Ensure the addon config.yaml has 'config:rw' in the map section.");
   }
 }
 

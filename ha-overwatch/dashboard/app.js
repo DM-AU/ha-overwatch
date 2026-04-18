@@ -809,14 +809,16 @@ function startZoneFade(zoneId, hex) {
 function getZoneFadeAlpha(zoneId) {
   const fade = zoneFadeState[zoneId];
   if (!fade) return 0;
-  const _fadeLs  = localStorage.getItem('ow_fade_duration');
-  const dur = ((_fadeLs !== null ? parseFloat(_fadeLs) : null) ?? parseFloat(uiConfig.zone_fade_duration) ?? 3) * 1000;
+  // Read duration: localStorage overrides uiConfig, minimum 0.1s to avoid instant clear
+  const _fadeLs = localStorage.getItem('ow_fade_duration');
+  const _fadeCfg = parseFloat(uiConfig.zone_fade_duration);
+  const _fadeVal = _fadeLs !== null ? parseFloat(_fadeLs) : (!isNaN(_fadeCfg) ? _fadeCfg : 3);
+  const dur = Math.max(0.1, isNaN(_fadeVal) ? 3 : _fadeVal) * 1000;
   const elapsed = Date.now() - fade.startedAt;
   if (elapsed >= dur) {
     delete zoneFadeState[zoneId];
     return 0;
   }
-  // Linear fade from 0.55 → 0 (starting from the dim flash level)
   return 0.55 * (1 - elapsed / dur);
 }
 
@@ -2968,7 +2970,11 @@ function renderSettingsPanel() {
               <div class="entity-search-results" id="alarmEntityResults" style="display:none;"></div>
             </div>
             <div style="font-size:11px;color:#777;margin-top:3px;">Supports alarm_control_panel, input_boolean, switch, etc.</div>
-            ` : `<div class="settings-readonly">${escapeHtml(uiConfig.alarm_entity || '—')}</div>`}
+            ` : `<div class="settings-readonly">${escapeHtml(uiConfig.alarm_entity || '—')}${
+              uiConfig.alarm_entity && haStates[uiConfig.alarm_entity]?.attributes?.friendly_name
+                ? `<span style="color:#666;font-size:11px;display:block;margin-top:2px;">${escapeHtml(haStates[uiConfig.alarm_entity].attributes.friendly_name)}</span>`
+                : ''
+            }</div>`}
           </div>
           <div class="settings-field">
             <label style="display:flex;align-items:center;gap:8px;">

@@ -498,7 +498,7 @@ function renderCameraStatusBar() {
         <div class="cam-dd-cameras" data-zone-id="${zone.id}" style="display:${collapsed ? 'none' : ''};">`;
 
       cameras.forEach(camId => {
-        const camOn    = localStorage.getItem(CAM_TOGGLE_PREFIX + camId) !== 'false';
+        const camOn    = camIsEnabled('camera', camId, camServerState);
         const isActive = activeIds.has(camId);
         const isPinned = camPinned.has(camId);
         const dot      = camDotColour(camOn && zoneOn, isActive && camOn && zoneOn);
@@ -531,10 +531,8 @@ function renderCameraStatusBar() {
       const gCollapsed = localStorage.getItem(gColKey) !== 'expanded';
       const gDot       = groupDotState(group, zones, activeIds);
 
-      // Group is "on" if ALL member zones and their cameras are on
-      const gAllCams = memberZones.flatMap(z => z.cameras || []);
-      const gAllOn   = gAllCams.length > 0 && gAllCams.every(id => localStorage.getItem(CAM_TOGGLE_PREFIX + id) !== 'false')
-                    && memberZones.every(z => localStorage.getItem(CAM_ZONE_PREFIX + z.id) !== 'false');
+      // Group is "on" if ALL member zones are on per current mode
+      const gAllOn = memberZones.every(z => camIsEnabled('zone', z.id, camServerState));
 
       zonesHtml += `
         <div class="cam-dd-group-header${gCollapsed ? ' collapsed' : ''}"
