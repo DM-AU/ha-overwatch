@@ -915,6 +915,9 @@ function initCameraPage() {
   refreshServerState();
   // Refresh every 10s to stay in sync with HA
   setInterval(refreshServerState, 10000);
+
+  // Initial renders
+  renderCameraStatusBar();
   renderCameraGrid();
   bindModal();
 

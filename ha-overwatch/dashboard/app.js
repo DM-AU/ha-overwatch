@@ -3092,14 +3092,12 @@ function renderSettingsPanel() {
             </div>
             <div style="font-size:11px;color:#777;margin-top:4px;"><b>Snapshot:</b> lower bandwidth, periodic refresh.<br><b>Live:</b> MJPEG stream, instant but more resources.</div>
           </div>
-          <div class="settings-field" id="hideCamLabelsField" style="margin-top:6px;${localStorage.getItem('ow_cam_source') !== 'device' ? 'opacity:0.4;pointer-events:none;' : ''}">
+          <div class="settings-field" id="hideCamLabelsField" style="margin-top:6px;">
             <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
               <input type="checkbox" id="cfgHideCamLabels" ${eff('ow_hide_cam_labels','cam_hide_labels','false') === 'true' ? 'checked' : ''}
-                style="width:16px;height:16px;accent-color:#0096ff;cursor:pointer;"
-                ${localStorage.getItem('ow_cam_source') !== 'device' ? 'disabled' : ''}>
+                style="width:16px;height:16px;accent-color:#0096ff;cursor:pointer;">
               <span>Hide camera name labels on tiles</span>
             </label>
-            ${localStorage.getItem('ow_cam_source') !== 'device' ? '<div style="font-size:10px;color:#555;margin-top:2px;">Switch to Per device mode to change this setting.</div>' : ''}
           </div>
           <button class="settings-btn settings-btn-secondary" id="settingsSaveCamDisplayBtn" style="margin-top:6px;">Save Display</button>
           <div id="camDisplaySaveStatus" style="font-size:11px;color:#888;margin-top:6px;text-align:center;"></div>
@@ -3184,14 +3182,7 @@ function renderSettingsPanel() {
     btn.onclick = () => {
       panel.querySelectorAll(".settings-toggle[data-camsource]").forEach(b => b.classList.remove("active"));
       btn.classList.add("active");
-      const src = btn.dataset.camsource;
-      localStorage.setItem('ow_cam_source', src);
-      // Lock/unlock the hide labels field based on mode
-      const field = document.getElementById("hideCamLabelsField");
-      const cb    = document.getElementById("cfgHideCamLabels");
-      const isDevice = src === 'device';
-      if (field) field.style.cssText = `margin-top:6px;${!isDevice ? 'opacity:0.4;pointer-events:none;' : ''}`;
-      if (cb) cb.disabled = !isDevice;
+      localStorage.setItem('ow_cam_source', btn.dataset.camsource);
     };
   });
 

@@ -753,11 +753,10 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log(`[HA-Overwatch] App directory:  ${APP_DIR}`);
   console.log(`[HA-Overwatch] Data directory: ${DATA_DIR}`);
 
-  // On startup: write custom component files and start HA listener
-  setTimeout(() => {
-    writeCustomComponent();
-    startHAListener();
-  }, 2000); // wait for HA to be ready
+  // Write custom component files immediately — must exist before HA loads
+  writeCustomComponent();
+  // Start server-side HA listener (small delay to let HA be ready)
+  setTimeout(startHAListener, 3000);
 });
 
 /* ─── CUSTOM COMPONENT WRITER ──────────────────────────────── */
