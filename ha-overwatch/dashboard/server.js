@@ -568,6 +568,19 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  /* ── /ow/register-webhook — HA integration registers its webhook URL ── */
+  if (pathname === "/ow/register-webhook" && req.method === "POST") {
+    try {
+      const body = await readBody(req);
+      if (body.url) {
+        haWebhookUrl = body.url;
+        console.log("[HA-Overwatch] Webhook registered:", haWebhookUrl);
+      }
+      json(res, { ok: true });
+    } catch (e) { err(res, e.message); }
+    return;
+  }
+
   /* ── /ow/entity-states — HA component polls this ─────────── */
   if (pathname === "/ow/entity-states" && req.method === "GET") {
     try {
@@ -629,11 +642,14 @@ const server = http.createServer(async (req, res) => {
 
       saveEntityState(es);
 
-      // Push updated state to HA
+      // Build updated payload
       const payload = buildEntityPayload();
+
+      // Push to HA coordinator via webhook (instant) and via HA REST for binary sensors
+      pushToHAWebhook(payload);
       pushStateToHA(payload).catch(() => {});
 
-      json(res, { ok: true, state: buildEntityPayload() });
+      json(res, { ok: true, state: payload });
     } catch (e) { err(res, e.message, 500); }
     return;
   }
@@ -763,17 +779,15 @@ server.listen(PORT, "0.0.0.0", () => {
 const COMPONENT_FILES = {
   "__init__.py": `"""HA Overwatch integration."""
 from __future__ import annotations
-
 import logging
 from datetime import timedelta
-
 import aiohttp
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_URL, Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.components.webhook import async_register, async_unregister
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
-
-from .const import DOMAIN
+from .const import DOMAIN, WEBHOOK_ID
 
 _LOGGER = logging.getLogger(__name__)
 PLATFORMS = [Platform.SWITCH, Platform.BINARY_SENSOR]
@@ -792,11 +806,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.error("Failed to connect to Overwatch add-on: %s", err)
         return False
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+    async_register(hass, DOMAIN, "HA Overwatch Push", WEBHOOK_ID, coordinator.handle_webhook)
+    await coordinator.register_webhook()
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    async_unregister(hass, WEBHOOK_ID)
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
         hass.data[DOMAIN].pop(entry.entry_id, None)
@@ -804,40 +821,49 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 class OverwatchCoordinator(DataUpdateCoordinator):
-    """Fetches entity states from the Overwatch add-on."""
-
     def __init__(self, hass: HomeAssistant, url: str) -> None:
-        super().__init__(
-            hass, _LOGGER, name="HA Overwatch",
-            update_interval=timedelta(seconds=30),
-        )
+        super().__init__(hass, _LOGGER, name="HA Overwatch", update_interval=timedelta(seconds=30))
         self.url = url
 
     async def _async_update_data(self) -> dict:
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    f"{self.url}/ow/entity-states",
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as resp:
+                async with session.get(f"{self.url}/ow/entity-states",
+                    timeout=aiohttp.ClientTimeout(total=10)) as resp:
                     if resp.status != 200:
                         raise UpdateFailed(f"Add-on returned {resp.status}")
                     return await resp.json(content_type=None)
         except aiohttp.ClientError as err:
             raise UpdateFailed(f"Cannot reach Overwatch add-on: {err}") from err
 
+    async def handle_webhook(self, hass, webhook_id, request):
+        try:
+            data = await request.json()
+            if data:
+                self.async_set_updated_data(data)
+        except Exception as err:
+            _LOGGER.warning("Webhook parse error: %s", err)
+
+    async def register_webhook(self):
+        try:
+            hass_url = self.hass.config.internal_url or self.hass.config.external_url or ""
+            if not hass_url:
+                return
+            webhook_url = f"{hass_url.rstrip(chr(39))}/api/webhook/{WEBHOOK_ID}"
+            async with aiohttp.ClientSession() as session:
+                await session.post(f"{self.url}/ow/register-webhook",
+                    json={"url": webhook_url}, timeout=aiohttp.ClientTimeout(total=5))
+        except Exception:
+            pass
+
     async def async_set_entity(self, entity_type: str, entity_key: str, state: bool) -> None:
-        """Push a state change to the add-on and refresh coordinator data."""
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{self.url}/ow/entity-set",
+                async with session.post(f"{self.url}/ow/entity-set",
                     json={"type": entity_type, "key": entity_key, "state": state},
-                    timeout=aiohttp.ClientTimeout(total=5),
-                ) as resp:
+                    timeout=aiohttp.ClientTimeout(total=5)) as resp:
                     if resp.status == 200:
                         data = await resp.json(content_type=None)
-                        # Apply returned state immediately — no need to wait for poll
                         if data.get("state"):
                             self.async_set_updated_data(data["state"])
                     else:
@@ -848,6 +874,7 @@ class OverwatchCoordinator(DataUpdateCoordinator):
   "const.py": `"""Constants for HA Overwatch integration."""
 DOMAIN = "ha_overwatch"
 DEFAULT_URL = "http://localhost:8099"
+WEBHOOK_ID = "ha_overwatch_push"
 `,
   "config_flow.py": `"""Config flow for HA Overwatch integration."""
 from __future__ import annotations
@@ -859,7 +886,6 @@ from .const import DOMAIN, DEFAULT_URL
 
 
 class OverwatchConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Handle a config flow for HA Overwatch."""
     VERSION = 1
 
     async def async_step_user(self, user_input=None):
@@ -870,29 +896,21 @@ class OverwatchConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             url = user_input[CONF_URL].rstrip("/")
             try:
                 async with aiohttp.ClientSession() as session:
-                    async with session.get(
-                        f"{url}/ow/health",
-                        timeout=aiohttp.ClientTimeout(total=5),
-                    ) as resp:
+                    async with session.get(f"{url}/ow/health",
+                        timeout=aiohttp.ClientTimeout(total=5)) as resp:
                         if resp.status == 200:
                             data = await resp.json(content_type=None)
                             if data.get("ok"):
                                 await self.async_set_unique_id(DOMAIN)
                                 self._abort_if_unique_id_configured()
-                                return self.async_create_entry(
-                                    title="HA Overwatch",
-                                    data={CONF_URL: url},
-                                )
+                                return self.async_create_entry(title="HA Overwatch", data={CONF_URL: url})
                 errors["base"] = "cannot_connect"
             except Exception:
                 errors["base"] = "cannot_connect"
         return self.async_show_form(
             step_id="user",
-            data_schema=vol.Schema({
-                vol.Required(CONF_URL, default=DEFAULT_URL): str,
-            }),
-            errors=errors,
-        )
+            data_schema=vol.Schema({vol.Required(CONF_URL, default=DEFAULT_URL): str}),
+            errors=errors)
 `,
   "switch.py": `"""Switch platform for HA Overwatch."""
 from __future__ import annotations
@@ -909,197 +927,105 @@ from . import OverwatchCoordinator
 _LOGGER = logging.getLogger(__name__)
 
 
-async def async_setup_entry(
-    hass: HomeAssistant, entry: ConfigEntry,
-    async_add_entities: AddEntitiesCallback,
-) -> None:
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback) -> None:
     coordinator: OverwatchCoordinator = hass.data[DOMAIN][entry.entry_id]
     data = coordinator.data or {}
-    entities = []
-
-    entities.append(OverwatchMasterSwitch(coordinator))
-
-    for group in data.get("groups", []):
-        entities.append(OverwatchGroupSwitch(coordinator, group))
-    for zone in data.get("zones", []):
-        entities.append(OverwatchZoneSwitch(coordinator, zone))
-
+    entities = [OverwatchMasterSwitch(coordinator)]
+    for g in data.get("groups", []):    entities.append(OverwatchGroupSwitch(coordinator, g))
+    for z in data.get("zones", []):     entities.append(OverwatchZoneSwitch(coordinator, z))
     entities.append(OverwatchCameraAllSwitch(coordinator))
-    for group in data.get("camera_groups", []):
-        entities.append(OverwatchCameraGroupSwitch(coordinator, group))
-    for zone in data.get("camera_zones", []):
-        entities.append(OverwatchCameraZoneSwitch(coordinator, zone))
-    for camera in data.get("cameras", []):
-        entities.append(OverwatchCameraSwitch(coordinator, camera))
-
+    for g in data.get("camera_groups", []): entities.append(OverwatchCameraGroupSwitch(coordinator, g))
+    for z in data.get("camera_zones", []):  entities.append(OverwatchCameraZoneSwitch(coordinator, z))
+    for c in data.get("cameras", []):   entities.append(OverwatchCameraSwitch(coordinator, c))
     async_add_entities(entities)
 
 
-def _device_info(coordinator: OverwatchCoordinator) -> DeviceInfo:
-    return DeviceInfo(
-        identifiers={(DOMAIN, "overwatch")},
-        name="HA Overwatch",
-        manufacturer="HA Overwatch",
-        model="Floor Plan Dashboard",
-        configuration_url=coordinator.url,
-    )
+def _dev(coordinator):
+    return DeviceInfo(identifiers={(DOMAIN, "overwatch")}, name="HA Overwatch",
+        manufacturer="HA Overwatch", model="Floor Plan Dashboard", configuration_url=coordinator.url)
 
 
-class OverwatchBaseSwitch(CoordinatorEntity, SwitchEntity):
+class OWSwitch(CoordinatorEntity, SwitchEntity):
     _attr_should_poll = False
-
-    def __init__(self, coordinator, unique_id, name, entity_type, entity_key, icon="mdi:shield"):
+    def __init__(self, coordinator, uid, name, etype, ekey, icon="mdi:shield"):
         super().__init__(coordinator)
-        self._attr_unique_id = unique_id
+        self._attr_unique_id = uid
         self._attr_name = name
         self._attr_icon = icon
-        self._attr_device_info = _device_info(coordinator)
-        self._entity_type = entity_type
-        self._entity_key = entity_key
+        self._attr_device_info = _dev(coordinator)
+        self._etype = etype
+        self._ekey = ekey
+    @property
+    def is_on(self): return True
+    async def async_turn_on(self, **kw): await self.coordinator.async_set_entity(self._etype, self._ekey, True)
+    async def async_turn_off(self, **kw): await self.coordinator.async_set_entity(self._etype, self._ekey, False)
 
+
+class OverwatchMasterSwitch(OWSwitch):
+    def __init__(self, c): super().__init__(c, "overwatch_zone_master", "Overwatch Zone Master", "master", "master", "mdi:shield-home")
+    @property
+    def is_on(self): return bool((self.coordinator.data or {}).get("master", True))
+
+class OverwatchGroupSwitch(OWSwitch):
+    def __init__(self, c, g):
+        super().__init__(c, f"overwatch_zone_group_{g['id']}", f"Zone Group: {g.get('name', g['id'])}", "group", g["id"], "mdi:layers")
+        self._gid = g["id"]
     @property
     def is_on(self):
-        return True
-
-    async def async_turn_on(self, **kwargs):
-        await self.coordinator.async_set_entity(self._entity_type, self._entity_key, True)
-
-    async def async_turn_off(self, **kwargs):
-        await self.coordinator.async_set_entity(self._entity_type, self._entity_key, False)
-
-
-# ── Floorplan: Master ─────────────────────────────────────────
-
-class OverwatchMasterSwitch(OverwatchBaseSwitch):
-    def __init__(self, coordinator):
-        super().__init__(coordinator,
-            unique_id="overwatch_zone_master",
-            name="Overwatch Zone Master",
-            entity_type="master", entity_key="master",
-            icon="mdi:shield-home")
-
-    @property
-    def is_on(self):
-        return bool((self.coordinator.data or {}).get("master", True))
-
-
-# ── Floorplan: Groups ─────────────────────────────────────────
-
-class OverwatchGroupSwitch(OverwatchBaseSwitch):
-    def __init__(self, coordinator, group):
-        gid = group["id"]
-        name = group.get("name", gid)
-        super().__init__(coordinator,
-            unique_id=f"overwatch_zone_group_{gid}",
-            name=f"Zone Group: {name}",
-            entity_type="group", entity_key=gid,
-            icon="mdi:layers")
-        self._group_id = gid
-
-    @property
-    def is_on(self):
-        groups = (self.coordinator.data or {}).get("groups", [])
-        g = next((g for g in groups if g["id"] == self._group_id), None)
+        gs = (self.coordinator.data or {}).get("groups", [])
+        g = next((x for x in gs if x["id"] == self._gid), None)
         return bool(g.get("enabled", True)) if g else True
 
-
-# ── Floorplan: Zones ─────────────────────────────────────────
-
-class OverwatchZoneSwitch(OverwatchBaseSwitch):
-    def __init__(self, coordinator, zone):
-        zid = zone["id"]
-        name = zone.get("name", zid)
-        super().__init__(coordinator,
-            unique_id=f"overwatch_zone_{zid}",
-            name=f"Zone: {name}",
-            entity_type="zone", entity_key=zid,
-            icon="mdi:map-marker-radius")
-        self._zone_id = zid
-
+class OverwatchZoneSwitch(OWSwitch):
+    def __init__(self, c, z):
+        super().__init__(c, f"overwatch_zone_{z['id']}", f"Zone: {z.get('name', z['id'])}", "zone", z["id"], "mdi:map-marker-radius")
+        self._zid = z["id"]
     @property
     def is_on(self):
-        zones = (self.coordinator.data or {}).get("zones", [])
-        z = next((z for z in zones if z["id"] == self._zone_id), None)
+        zs = (self.coordinator.data or {}).get("zones", [])
+        z = next((x for x in zs if x["id"] == self._zid), None)
         return bool(z.get("enabled", True)) if z else True
 
-
-# ── Cameras: All ─────────────────────────────────────────────
-
-class OverwatchCameraAllSwitch(OverwatchBaseSwitch):
-    def __init__(self, coordinator):
-        super().__init__(coordinator,
-            unique_id="overwatch_camera_all",
-            name="Camera All",
-            entity_type="camera_all", entity_key="all",
-            icon="mdi:cctv")
-
+class OverwatchCameraAllSwitch(OWSwitch):
+    def __init__(self, c): super().__init__(c, "overwatch_camera_all", "Camera All", "camera_all", "all", "mdi:cctv")
     @property
     def is_on(self):
-        cameras = (self.coordinator.data or {}).get("cameras", [])
-        return all(c.get("enabled", True) for c in cameras) if cameras else True
+        cs = (self.coordinator.data or {}).get("cameras", [])
+        return all(x.get("enabled", True) for x in cs) if cs else True
 
-
-# ── Cameras: Groups ───────────────────────────────────────────
-
-class OverwatchCameraGroupSwitch(OverwatchBaseSwitch):
-    def __init__(self, coordinator, group):
-        gid = group["id"]
-        name = group.get("name", gid)
-        super().__init__(coordinator,
-            unique_id=f"overwatch_camera_group_{gid}",
-            name=f"Camera Group: {name}",
-            entity_type="camera_group", entity_key=gid,
-            icon="mdi:cctv")
-        self._group_id = gid
-
+class OverwatchCameraGroupSwitch(OWSwitch):
+    def __init__(self, c, g):
+        super().__init__(c, f"overwatch_camera_group_{g['id']}", f"Camera Group: {g.get('name', g['id'])}", "camera_group", g["id"], "mdi:cctv")
+        self._gid = g["id"]
     @property
     def is_on(self):
-        groups = (self.coordinator.data or {}).get("camera_groups", [])
-        g = next((g for g in groups if g["id"] == self._group_id), None)
+        gs = (self.coordinator.data or {}).get("camera_groups", [])
+        g = next((x for x in gs if x["id"] == self._gid), None)
         return bool(g.get("enabled", True)) if g else True
 
-
-# ── Cameras: Zones ────────────────────────────────────────────
-
-class OverwatchCameraZoneSwitch(OverwatchBaseSwitch):
-    def __init__(self, coordinator, zone):
-        zid = zone["id"]
-        name = zone.get("name", zid)
-        super().__init__(coordinator,
-            unique_id=f"overwatch_camera_zone_{zid}",
-            name=f"Camera Zone: {name}",
-            entity_type="camera_zone", entity_key=zid,
-            icon="mdi:cctv")
-        self._zone_id = zid
-
+class OverwatchCameraZoneSwitch(OWSwitch):
+    def __init__(self, c, z):
+        super().__init__(c, f"overwatch_camera_zone_{z['id']}", f"Camera Zone: {z.get('name', z['id'])}", "camera_zone", z["id"], "mdi:cctv")
+        self._zid = z["id"]
     @property
     def is_on(self):
-        zones = (self.coordinator.data or {}).get("camera_zones", [])
-        z = next((z for z in zones if z["id"] == self._zone_id), None)
+        zs = (self.coordinator.data or {}).get("camera_zones", [])
+        z = next((x for x in zs if x["id"] == self._zid), None)
         return bool(z.get("enabled", True)) if z else True
 
-
-# ── Cameras: Individual ───────────────────────────────────────
-
-class OverwatchCameraSwitch(OverwatchBaseSwitch):
-    def __init__(self, coordinator, camera):
-        cam_id = camera["id"]
-        safe_id = cam_id.replace(".", "_").replace("-", "_")
-        name = camera.get("name", cam_id)
-        super().__init__(coordinator,
-            unique_id=f"overwatch_camera_{safe_id}",
-            name=f"Camera: {name}",
-            entity_type="camera", entity_key=cam_id,
-            icon="mdi:cctv")
-        self._camera_id = cam_id
-
+class OverwatchCameraSwitch(OWSwitch):
+    def __init__(self, c, cam):
+        cid = cam["id"]; safe = cid.replace(".", "_").replace("-", "_")
+        super().__init__(c, f"overwatch_camera_{safe}", f"Camera: {cam.get('name', cid)}", "camera", cid, "mdi:cctv")
+        self._cid = cid
     @property
     def is_on(self):
-        cameras = (self.coordinator.data or {}).get("cameras", [])
-        c = next((c for c in cameras if c["id"] == self._camera_id), None)
+        cs = (self.coordinator.data or {}).get("cameras", [])
+        c = next((x for x in cs if x["id"] == self._cid), None)
         return bool(c.get("enabled", True)) if c else True
 `,
-  "binary_sensor.py": `"""Binary sensor platform for HA Overwatch — triggered states."""
+  "binary_sensor.py": `"""Binary sensor platform for HA Overwatch."""
 from __future__ import annotations
 from homeassistant.components.binary_sensor import BinarySensorDeviceClass, BinarySensorEntity
 from homeassistant.config_entries import ConfigEntry
@@ -1111,103 +1037,57 @@ from .const import DOMAIN
 from . import OverwatchCoordinator
 
 
-async def async_setup_entry(
-    hass: HomeAssistant, entry: ConfigEntry,
-    async_add_entities: AddEntitiesCallback,
-) -> None:
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback) -> None:
     coordinator: OverwatchCoordinator = hass.data[DOMAIN][entry.entry_id]
     data = coordinator.data or {}
-    entities = []
-    entities.append(OverwatchMasterTriggered(coordinator))
-    for group in data.get("groups", []):
-        entities.append(OverwatchGroupTriggered(coordinator, group))
-    for zone in data.get("zones", []):
-        entities.append(OverwatchZoneTriggered(coordinator, zone))
+    entities = [OverwatchMasterTriggered(coordinator)]
+    for g in data.get("groups", []): entities.append(OverwatchGroupTriggered(coordinator, g))
+    for z in data.get("zones", []):  entities.append(OverwatchZoneTriggered(coordinator, z))
     async_add_entities(entities)
 
 
-def _device_info(coordinator):
-    return DeviceInfo(
-        identifiers={(DOMAIN, "overwatch")},
-        name="HA Overwatch",
-        manufacturer="HA Overwatch",
-        model="Floor Plan Dashboard",
-        configuration_url=coordinator.url,
-    )
+def _dev(coordinator):
+    return DeviceInfo(identifiers={(DOMAIN, "overwatch")}, name="HA Overwatch",
+        manufacturer="HA Overwatch", model="Floor Plan Dashboard", configuration_url=coordinator.url)
 
 
-class OverwatchBaseTriggered(CoordinatorEntity, BinarySensorEntity):
+class OWSensor(CoordinatorEntity, BinarySensorEntity):
     _attr_device_class = BinarySensorDeviceClass.MOTION
     _attr_should_poll = False
-
-    def __init__(self, coordinator, unique_id, name, icon="mdi:shield-alert"):
+    def __init__(self, coordinator, uid, name):
         super().__init__(coordinator)
-        self._attr_unique_id = unique_id
+        self._attr_unique_id = uid
         self._attr_name = name
-        self._attr_icon = icon
-        self._attr_device_info = _device_info(coordinator)
+        self._attr_icon = "mdi:shield-alert"
+        self._attr_device_info = _dev(coordinator)
+    @property
+    def is_on(self): return False
 
+
+class OverwatchMasterTriggered(OWSensor):
+    def __init__(self, c): super().__init__(c, "overwatch_zone_master_triggered", "Overwatch Zone Master Triggered")
     @property
     def is_on(self):
-        return False
+        return any(z.get("triggered", False) for z in (self.coordinator.data or {}).get("zones", []))
 
-
-class OverwatchMasterTriggered(OverwatchBaseTriggered):
-    def __init__(self, coordinator):
-        super().__init__(coordinator,
-            unique_id="overwatch_zone_master_triggered",
-            name="Overwatch Zone Master Triggered")
-
+class OverwatchGroupTriggered(OWSensor):
+    def __init__(self, c, g):
+        super().__init__(c, f"overwatch_zone_group_{g['id']}_triggered", f"Zone Group Triggered: {g.get('name', g['id'])}")
+        self._gid = g["id"]; self._zids = g.get("zone_ids", [])
     @property
     def is_on(self):
-        zones = (self.coordinator.data or {}).get("zones", [])
-        return any(z.get("triggered", False) for z in zones)
+        return any(z.get("triggered", False) for z in (self.coordinator.data or {}).get("zones", []) if z["id"] in self._zids)
 
-
-class OverwatchGroupTriggered(OverwatchBaseTriggered):
-    def __init__(self, coordinator, group):
-        gid = group["id"]
-        name = group.get("name", gid)
-        super().__init__(coordinator,
-            unique_id=f"overwatch_zone_group_{gid}_triggered",
-            name=f"Zone Group Triggered: {name}")
-        self._group_id = gid
-        self._zone_ids = group.get("zone_ids", [])
-
+class OverwatchZoneTriggered(OWSensor):
+    def __init__(self, c, z):
+        super().__init__(c, f"overwatch_zone_{z['id']}_triggered", f"Zone Triggered: {z.get('name', z['id'])}")
+        self._zid = z["id"]
     @property
     def is_on(self):
-        zones = (self.coordinator.data or {}).get("zones", [])
-        return any(z.get("triggered", False) for z in zones if z["id"] in self._zone_ids)
-
-
-class OverwatchZoneTriggered(OverwatchBaseTriggered):
-    def __init__(self, coordinator, zone):
-        zid = zone["id"]
-        name = zone.get("name", zid)
-        super().__init__(coordinator,
-            unique_id=f"overwatch_zone_{zid}_triggered",
-            name=f"Zone Triggered: {name}")
-        self._zone_id = zid
-
-    @property
-    def is_on(self):
-        zones = (self.coordinator.data or {}).get("zones", [])
-        z = next((z for z in zones if z["id"] == self._zone_id), None)
+        zs = (self.coordinator.data or {}).get("zones", [])
+        z = next((x for x in zs if x["id"] == self._zid), None)
         return bool(z.get("triggered", False)) if z else False
-`,
-  "manifest.json": `{
-  "domain": "ha_overwatch",
-  "name": "HA Overwatch",
-  "version": "0.97.0",
-  "documentation": "https://github.com/DM-AU/ha-overwatch",
-  "issue_tracker": "https://github.com/DM-AU/ha-overwatch/issues",
-  "codeowners": [],
-  "requirements": [],
-  "dependencies": [],
-  "after_dependencies": [],
-  "config_flow": true,
-  "iot_class": "local_polling"
-}
 `,
   "strings.json": `{
   "config": {
@@ -1243,7 +1123,389 @@ class OverwatchZoneTriggered(OverwatchBaseTriggered):
   }
 }
 `,
+  "manifest.json": `{
+  "domain": "ha_overwatch",
+  "name": "HA Overwatch",
+  "version": "0.98.0",
+  "documentation": "https://github.com/DM-AU/ha-overwatch",
+  "issue_tracker": "https://github.com/DM-AU/ha-overwatch/issues",
+  "codeowners": [],
+  "requirements": [],
+  "dependencies": [],
+  "after_dependencies": [],
+  "config_flow": true,
+  "iot_class": "local_polling"
+}
+`,
 };
+/* ─── CUSTOM COMPONENT WRITER ──────────────────────────────── */
+// Files embedded directly in server.js — no external source files needed.
+function writeCustomComponent() {
+  if (!process.env.SUPERVISOR_TOKEN) return;
+  const destDir = "/config/custom_components/ha_overwatch";
+  try {
+    fs.mkdirSync(path.join(destDir, "translations"), { recursive: true });
+    let written = 0;
+    for (const [fname, content] of Object.entries(COMPONENT_FILES)) {
+      const dest = path.join(destDir, fname);
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.writeFileSync(dest, content, "utf8");
+      written++;
+    }
+    console.log(`[HA-Overwatch] Custom component written to ${destDir} (${written} files)`);
+    console.log(`[HA-Overwatch] Restart Home Assistant to activate the HA Overwatch integration.`);
+  } catch (e) {
+    console.error("[HA-Overwatch] Failed to write custom component:", e.message);
+  }
+}
+
+
+/* ─── WEBHOOK PUSH TO HA COORDINATOR ──────────────────────── */
+let haWebhookUrl = null;
+
+async function pushToHAWebhook(payload) {
+  if (!haWebhookUrl) return;
+  try {
+    const parsed  = new URL(haWebhookUrl);
+    const isHttps = parsed.protocol === "https:";
+    const lib     = isHttps ? https : http;
+    const body    = JSON.stringify(payload);
+    const req = lib.request({
+      hostname: parsed.hostname,
+      port:     parsed.port || (isHttps ? 443 : 80),
+      path:     parsed.pathname + (parsed.search || ""),
+      method:   "POST",
+      headers:  { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
+    }, res => { res.resume(); });
+    req.on("error", () => {});
+    req.write(body); req.end();
+  } catch { /* ignore — coordinator still polls every 30s */ }
+}
+
+/* ─── SERVER-SIDE HA WEBSOCKET LISTENER ────────────────────── */
+// Maintains a persistent server-to-HA WebSocket connection.
+// Watches zone sensor states and updates serverState.triggeredZones,
+// then pushes binary_sensor states to HA whenever a zone triggers/clears.
+function startHAListener() {
+  if (!process.env.SUPERVISOR_TOKEN) return;
+  const net = require("net");
+
+  let msgId     = 1;
+  let authDone  = false;
+  let subId     = null;
+  let recBuf    = Buffer.alloc(0);
+  let reconnectDelay = 5000;
+
+  function connect() {
+    const sock = net.connect({ host: "homeassistant", port: 8123 });
+
+    // Upgrade to WebSocket manually
+    const crypto = require("crypto");
+    const wsKey  = crypto.randomBytes(16).toString("base64");
+    sock.write(
+      "GET /api/websocket HTTP/1.1\r\n" +
+      "Host: homeassistant\r\n" +
+      "Upgrade: websocket\r\n" +
+      "Connection: Upgrade\r\n" +
+      `Sec-WebSocket-Key: ${wsKey}\r\n` +
+      "Sec-WebSocket-Version: 13\r\n\r\n"
+    );
+
+    function send(obj) {
+      sendWsFrame(sock, JSON.stringify({ ...obj, id: msgId++ }));
+    }
+
+    let httpDone = false;
+    sock.on("data", chunk => {
+      if (!httpDone) {
+        const s = chunk.toString();
+        if (s.includes("\r\n\r\n")) {
+          httpDone = true;
+          const rest = chunk.slice(chunk.indexOf("\r\n\r\n") + 4);
+          if (rest.length > 0) processChunk(rest);
+        }
+        return;
+      }
+      processChunk(chunk);
+    });
+
+    function processChunk(chunk) {
+      recBuf = Buffer.concat([recBuf, chunk]);
+      while (true) {
+        const text = extractWsPayload(recBuf);
+        if (text === null) break;
+        // advance buffer past this frame
+        const used = frameLength(recBuf);
+        if (used <= 0) break;
+        recBuf = recBuf.slice(used);
+        try { handleMsg(JSON.parse(text)); } catch {}
+      }
+    }
+
+    function handleMsg(msg) {
+      if (msg.type === "auth_required") {
+        sendWsFrame(sock, JSON.stringify({
+          type: "auth", access_token: process.env.SUPERVISOR_TOKEN,
+        }));
+        return;
+      }
+      if (msg.type === "auth_ok") {
+        authDone = true;
+        reconnectDelay = 5000;
+        console.log("[HA-Overwatch] Server HA listener authenticated");
+        // Subscribe to all state_changed events
+        send({ type: "subscribe_events", event_type: "state_changed" });
+        return;
+      }
+      if (msg.type === "result" && msg.success && !subId) {
+        subId = msg.id;
+        return;
+      }
+      if (msg.type === "event" && msg.event?.event_type === "state_changed") {
+        const { entity_id, new_state } = msg.event.data || {};
+        if (!entity_id || !new_state) return;
+        onStateChanged(entity_id, new_state.state);
+      }
+    }
+
+    sock.on("error", e  => { console.error("[HA-Overwatch] HA listener error:", e.message); scheduleReconnect(); });
+    sock.on("close", () => { console.log("[HA-Overwatch] HA listener disconnected"); scheduleReconnect(); });
+  }
+
+  function scheduleReconnect() {
+    setTimeout(connect, reconnectDelay);
+    reconnectDelay = Math.min(reconnectDelay * 2, 60000);
+  }
+
+  // Called when any HA entity state changes
+  function onStateChanged(entityId, state) {
+    const zones  = loadZones();
+    const groups = loadGroups();
+
+    // Build map of sensor → zone(s)
+    let changed = false;
+    zones.forEach(zone => {
+      const sensors = zone.sensors || [];
+      if (!sensors.includes(entityId)) return;
+      const isTriggered = ["on", "open", "detected", "home", "triggered"].includes((state || "").toLowerCase());
+      if (!!serverState.triggeredZones[zone.id] !== isTriggered) {
+        serverState.triggeredZones[zone.id] = isTriggered;
+        changed = true;
+      }
+    });
+
+    if (changed) {
+      const payload = buildEntityPayload();
+      pushToHAWebhook(payload);
+      pushStateToHA(payload).catch(() => {});
+    }
+  }
+
+  connect();
+}
+
+// Calculate byte length of a WS frame (to advance buffer)
+function frameLength(buf) {
+  if (buf.length < 2) return -1;
+  let len = buf[1] & 0x7f;
+  let offset = 2;
+  if (len === 126) { if (buf.length < 4) return -1; len = buf.readUInt16BE(2); offset = 4; }
+  else if (len === 127) return -1;
+  const masked = (buf[1] & 0x80) !== 0;
+  if (masked) offset += 4;
+  return offset + len;
+}
+
+// WebSocket proxy — only active in add-on mode (SUPERVISOR_TOKEN present).
+// Uses the ha_token stored in ui.yaml (entered once by user in Settings).
+// This is the only reliable way to authenticate with HA Core WebSocket from an add-on.
+server.on("upgrade", (req, socket, head) => {
+  const supervisorToken = process.env.SUPERVISOR_TOKEN;
+  if (!supervisorToken) { socket.destroy(); return; }
+
+  const url = req.url || "";
+  if (!url.includes("websocket")) { socket.destroy(); return; }
+
+  console.log("[HA-Overwatch] WebSocket → proxying to HA");
+
+  // Cache browser WS key before async operations
+  socket._cachedKey = req.headers["sec-websocket-key"] || "";
+
+  // Load ha_token from ui.yaml — the user enters this once in Settings
+  const cfg      = loadConfig();
+  const haToken  = cfg.ha_token || "";
+
+  if (!haToken) {
+    console.log("[HA-Overwatch] WS proxy: no ha_token in ui.yaml — browser must connect directly");
+    // Don't proxy — let browser handle it (will fail without token, shows message to user)
+    socket.destroy();
+    return;
+  }
+
+  openWSProxy(socket, haToken);
+});
+
+function openWSProxy(socket, haToken) {
+  const crypto     = require("crypto");
+  const browserKey = socket._cachedKey || "";
+
+  // Complete the browser WebSocket handshake
+  const acceptKey = crypto.createHash("sha1")
+    .update(browserKey + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")
+    .digest("base64");
+
+  socket.write(
+    "HTTP/1.1 101 Switching Protocols\r\n" +
+    "Upgrade: websocket\r\n" +
+    "Connection: Upgrade\r\n" +
+    `Sec-WebSocket-Accept: ${acceptKey}\r\n` +
+    "\r\n"
+  );
+
+  // Connect to HA Core WebSocket — use internal hostname 'homeassistant' on port 8123
+  const haReq = http.request({
+    hostname: "homeassistant",
+    port:     8123,
+    path:     "/api/websocket",
+    headers: {
+      "Host":                  "homeassistant",
+      "Upgrade":               "websocket",
+      "Connection":            "Upgrade",
+      "Sec-WebSocket-Key":     crypto.randomBytes(16).toString("base64"),
+      "Sec-WebSocket-Version": "13",
+    },
+  });
+
+  haReq.on("upgrade", (haRes, haSocket, haHead) => {
+    console.log("[HA-Overwatch] WS proxy: HA upgrade successful");
+
+    let authState = "waiting_for_ha"; // waiting_for_ha → forwarded_to_browser → done
+    let haBuf     = haHead.length > 0 ? Buffer.from(haHead) : Buffer.alloc(0);
+    let broBuf    = Buffer.alloc(0); // browser data buffer during auth
+
+    // HA → Browser
+    function processHAData(chunk) {
+      if (authState === "done") { try { socket.write(chunk); } catch {} return; }
+      haBuf = Buffer.concat([haBuf, chunk]);
+      const payload = extractWsPayload(haBuf);
+      if (payload === null) return;
+
+      try {
+        const msg = JSON.parse(payload);
+        console.log("[HA-Overwatch] WS proxy HA msg:", msg.type);
+
+        if (authState === "waiting_for_ha" && msg.type === "auth_required") {
+          // Forward auth_required to browser so it knows to send auth
+          try { socket.write(haBuf); } catch {}
+          haBuf = Buffer.alloc(0);
+          authState = "forwarded_to_browser";
+          return;
+        }
+
+        if (msg.type === "auth_ok" || msg.type === "auth_invalid") {
+          console.log("[HA-Overwatch] WS proxy: auth result from HA:", msg.type);
+          try { socket.write(haBuf); } catch {}
+          haBuf = Buffer.alloc(0);
+          authState = "done";
+          // Flush any buffered browser data
+          if (broBuf.length > 0) { try { haSocket.write(broBuf); } catch {} broBuf = Buffer.alloc(0); }
+          return;
+        }
+      } catch {}
+
+      try { socket.write(haBuf); } catch {}
+      haBuf = Buffer.alloc(0);
+      authState = "done";
+    }
+
+    // Browser → HA: intercept auth message and replace token
+    function processBrowserData(chunk) {
+      if (authState === "done") { try { haSocket.write(chunk); } catch {} return; }
+
+      // Buffer browser data during auth exchange
+      broBuf = Buffer.concat([broBuf, chunk]);
+      const payload = extractWsPayload(broBuf);
+      if (payload === null) return;
+
+      try {
+        const msg = JSON.parse(payload);
+        if (msg.type === "auth") {
+          // Replace whatever token browser sent with our real token
+          console.log("[HA-Overwatch] WS proxy: replacing browser auth token with stored token");
+          sendWsFrame(haSocket, JSON.stringify({ type: "auth", access_token: haToken }));
+          broBuf = Buffer.alloc(0);
+          return;
+        }
+      } catch {}
+
+      // Not an auth message — forward as-is
+      try { haSocket.write(broBuf); } catch {}
+      broBuf = Buffer.alloc(0);
+    }
+
+    if (haBuf.length > 0) processHAData(Buffer.alloc(0));
+    haSocket.on("data",  processHAData);
+    haSocket.on("end",   () => { try { socket.end();     } catch {} });
+    haSocket.on("error", e  => { console.error("[HA-Overwatch] WS HA error:", e.message); socket.destroy(); });
+
+    socket.on("data",  processBrowserData);
+    socket.on("end",   () => { try { haSocket.end();    } catch {} });
+    socket.on("error", () => { haSocket.destroy(); });
+  });
+
+  haReq.on("error", e => {
+    console.error("[HA-Overwatch] WS proxy request error:", e.message);
+    socket.destroy();
+  });
+  haReq.end();
+}
+
+// Extract payload string from a WebSocket frame (text frames only, unmasked)
+function extractWsPayload(buf) {
+  if (buf.length < 2) return null;
+  const firstByte  = buf[0];
+  const secondByte = buf[1];
+  const opcode     = firstByte & 0x0f;
+  if (opcode !== 1) return null; // only handle text frames
+  const masked = (secondByte & 0x80) !== 0;
+  let len    = secondByte & 0x7f;
+  let offset = 2;
+  if (len === 126) {
+    if (buf.length < 4) return null;
+    len = buf.readUInt16BE(2);
+    offset = 4;
+  } else if (len === 127) {
+    return null; // skip large frames
+  }
+  if (masked) offset += 4;
+  if (buf.length < offset + len) return null;
+  const payload = Buffer.from(buf.slice(offset, offset + len));
+  if (masked) {
+    const mask = buf.slice(offset - 4, offset);
+    for (let i = 0; i < payload.length; i++) payload[i] ^= mask[i % 4];
+  }
+  return payload.toString("utf8");
+}
+
+// Write an unmasked WebSocket text frame to a socket
+function sendWsFrame(sock, text) {
+  const payload = Buffer.from(text, "utf8");
+  const len     = payload.length;
+  let   header;
+  if      (len < 126)   header = Buffer.from([0x81, len]);
+  else if (len < 65536) header = Buffer.from([0x81, 126, (len >> 8) & 0xff, len & 0xff]);
+  else return;
+  try { sock.write(Buffer.concat([header, payload])); } catch {}
+}
+
+server.on("error", e => {
+  if (e.code === "EADDRINUSE") {
+    console.error(`[HA-Overwatch] Port ${PORT} already in use. Try: node server.js ${PORT + 1}`);
+  } else {
+    console.error("[HA-Overwatch] Server error:", e.message);
+  }
+  process.exit(1);
+});
 
 /* ─── CUSTOM COMPONENT WRITER ──────────────────────────────── */
 // Files embedded directly in server.js — no external source files needed.
