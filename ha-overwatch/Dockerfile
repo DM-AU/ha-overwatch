@@ -8,6 +8,9 @@ RUN apk add --no-cache nodejs npm
 WORKDIR /app
 COPY dashboard/ /app/
 
+# Copy custom component source so server.js can install it to /config/custom_components/
+COPY custom_components/ /app/custom_components/
+
 # Copy the startup script and make it the s6 service entrypoint
 COPY run.sh /etc/services.d/ha-overwatch/run
 RUN chmod +x /etc/services.d/ha-overwatch/run

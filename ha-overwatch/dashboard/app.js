@@ -960,17 +960,20 @@ function checkZoneStateChanges() {
 
     // Triggered → anything else (cleared)
     if (prev === "triggered" && state !== "triggered") {
-      const lastSensor = sensors.find(id => isEntityTriggered(id)) || sensors[0];
-      const type       = detectEntityType(lastSensor || "");
-      const zoneColour = resolveColour(entityTypeColour(type));
-      startZoneFade(zone.id, zoneColour);
+      // Only start fade if not already fading (don't reset timer on rapid sensor clears)
+      if (!zoneFadeState[zone.id]) {
+        const lastSensor = sensors.find(id => isEntityTriggered(id)) || sensors[0];
+        const type       = detectEntityType(lastSensor || "");
+        const zoneColour = resolveColour(entityTypeColour(type));
+        startZoneFade(zone.id, zoneColour);
+      }
       logEvent(
         "ok",
         `Cleared`,
         "zone",
-        { zoneName: zone.name || zone.id, zoneColour }
+        { zoneName: zone.name || zone.id, zoneColour: zoneFadeState[zone.id]?.hex || "#32d74b" }
       );
-      syncZoneToHA(zone, state);   // "normal", "fault", or "disabled"
+      syncZoneToHA(zone, state);
     }
 
     // Normal → Fault (new offline entity)
@@ -3179,10 +3182,16 @@ function renderSettingsPanel() {
 
   // ── Camera source toggle (server/device) ────────────────────
   panel.querySelectorAll(".settings-toggle[data-camsource]").forEach(btn => {
-    btn.onclick = () => {
+    btn.onclick = async () => {
       panel.querySelectorAll(".settings-toggle[data-camsource]").forEach(b => b.classList.remove("active"));
       btn.classList.add("active");
       localStorage.setItem('ow_cam_source', btn.dataset.camsource);
+      // If switching to server mode, fetch latest state immediately so UI reflects it
+      if (btn.dataset.camsource !== 'device' && window._camRefreshServerState) {
+        await window._camRefreshServerState();
+      }
+      // Trigger camera re-render with new source
+      if (window.camUpdate) window.camUpdate();
     };
   });
 

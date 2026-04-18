@@ -766,7 +766,8 @@ function writeCustomComponent() {
   if (!process.env.SUPERVISOR_TOKEN) return; // only in add-on mode
   // config:rw maps HA /config directory to /config in the container
   const destDir = "/config/custom_components/ha_overwatch";
-  const srcDir  = path.join(APP_DIR, "..", "custom_components", "ha_overwatch");
+  // custom_components are copied to /app/custom_components/ by the Dockerfile
+  const srcDir  = path.join(APP_DIR, "custom_components", "ha_overwatch");
   try {
     fs.mkdirSync(path.join(destDir, "translations"), { recursive: true });
     const files = [
