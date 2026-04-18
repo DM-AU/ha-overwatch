@@ -3029,8 +3029,6 @@ function renderSettingsPanel() {
             </div>
             <div style="font-size:11px;color:#777;margin-top:4px;"><b>Zone only:</b> just the triggered zone flashes.<br><b>Whole group:</b> all zones in the group flash.</div>
           </div>
-          <button class="settings-btn settings-btn-secondary" id="settingsSaveZonesBehaviourBtn">Save Zone Behaviour</button>
-          <div id="zoneBehaviourSaveStatus" style="font-size:11px;color:#888;margin-top:6px;text-align:center;"></div>
         </div>
 
         <div class="settings-section">
@@ -3058,9 +3056,8 @@ function renderSettingsPanel() {
             <div class="settings-color-item"><label>Smoke</label><input type="color" id="cfgColOffSmoke" value="${eff('ow_color_off_smoke','color_off_smoke','#ff6b6b')}"></div>
             <div class="settings-color-item"><label>CO/Gas</label><input type="color" id="cfgColOffCo" value="${eff('ow_color_off_co','color_off_co','#cc73f8')}"></div>
           </div>
-          <button class="settings-btn settings-btn-secondary" id="settingsSaveColoursBtn" style="margin-top:8px;">Save Colours to this device</button>
           ${isAdmin ? `<div style="font-size:10px;color:#444;margin-top:4px;">Admin: <a href="#" id="settingsSaveColoursYamlLink" style="color:#666;">Save as server default</a></div>` : ''}
-          <div id="coloursSaveStatus" style="font-size:11px;color:#888;margin-top:6px;text-align:center;"></div>
+
         </div>
       </div>
 
@@ -3099,8 +3096,6 @@ function renderSettingsPanel() {
               <span>Hide camera name labels on tiles</span>
             </label>
           </div>
-          <button class="settings-btn settings-btn-secondary" id="settingsSaveCamDisplayBtn" style="margin-top:6px;">Save Display</button>
-          <div id="camDisplaySaveStatus" style="font-size:11px;color:#888;margin-top:6px;text-align:center;"></div>
         </div>
 
         <div class="settings-section">
@@ -3116,8 +3111,6 @@ function renderSettingsPanel() {
             <input type="number" id="cfgCamCooldown" value="${eff('ow_cam_cooldown','cam_cooldown','30')}"
               min="0" max="300" style="width:70px;background:#0a0a0a;border:1px solid #2a2a2a;border-radius:8px;color:#fff;padding:6px 8px;font-size:13px;outline:none;">
           </div>
-          <button class="settings-btn settings-btn-secondary" id="settingsSavePerfBtn">Save Performance</button>
-          <div id="perfSaveStatus" style="font-size:11px;color:#888;margin-top:6px;text-align:center;"></div>
           ${isAdmin ? `
           <div style="font-size:10px;color:#444;margin-top:6px;">Admin: <a href="#" id="settingsSavePerfYamlLink" style="color:#666;">Save as server default</a></div>` : ''}
         </div>
@@ -3186,7 +3179,28 @@ function renderSettingsPanel() {
     };
   });
 
-  // ── Camera mode ──────────────────────────────────────────────
+  // ── Zone behaviour — auto-save to localStorage on change ─────
+  document.getElementById("cfgFadeDuration")?.addEventListener("change", function() {
+    localStorage.setItem('ow_fade_duration', this.value);
+  });
+
+  // ── Camera display — auto-save to localStorage on change ─────
+  panel.querySelectorAll(".settings-toggle[data-cammode]").forEach(btn => {
+    btn.onclick = () => {
+      panel.querySelectorAll(".settings-toggle[data-cammode]").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      localStorage.setItem('ow_cam_mode', btn.dataset.cammode);
+      if (window._camSetMode) window._camSetMode(btn.dataset.cammode);
+    };
+  });
+
+  // ── Camera performance — auto-save to localStorage on change ──
+  document.getElementById("cfgSnapInterval")?.addEventListener("change", function() {
+    localStorage.setItem('ow_snap_interval', this.value);
+  });
+  document.getElementById("cfgCamCooldown")?.addEventListener("change", function() {
+    localStorage.setItem('ow_cam_cooldown', this.value);
+  });
   panel.querySelectorAll(".settings-toggle[data-cammode]").forEach(btn => {
     btn.onclick = () => {
       panel.querySelectorAll(".settings-toggle[data-cammode]").forEach(b => b.classList.remove("active"));
@@ -3217,57 +3231,22 @@ function renderSettingsPanel() {
   };
 
   // ── Save zone behaviour to localStorage ──────────────────────
-  document.getElementById("settingsSaveZonesBehaviourBtn")?.addEventListener("click", () => {
-    const fadeVal = document.getElementById("cfgFadeDuration")?.value;
-    if (fadeVal != null) localStorage.setItem('ow_fade_duration', fadeVal);
-    const flashBtn = panel.querySelector(".settings-toggle[data-flash].active");
-    if (flashBtn) localStorage.setItem('ow_flash_mode', flashBtn.dataset.flash);
-    const statusEl = document.getElementById("zoneBehaviourSaveStatus");
-    if (statusEl) { statusEl.textContent = "✓ Saved to this device"; statusEl.style.color = "#32d74b"; }
-  });
-
-  // ── Save camera display to localStorage ──────────────────────
-  document.getElementById("settingsSaveCamDisplayBtn")?.addEventListener("click", () => {
-    const camModeBtn = panel.querySelector(".settings-toggle[data-cammode].active");
-    if (camModeBtn) {
-      localStorage.setItem('ow_cam_mode', camModeBtn.dataset.cammode);
-      if (window._camSetMode) window._camSetMode(camModeBtn.dataset.cammode);
-    }
-    const hideLabels = document.getElementById("cfgHideCamLabels")?.checked;
-    if (hideLabels != null) localStorage.setItem('ow_hide_cam_labels', hideLabels ? 'true' : 'false');
-    const statusEl = document.getElementById("camDisplaySaveStatus");
-    if (statusEl) { statusEl.textContent = "✓ Saved to this device"; statusEl.style.color = "#32d74b"; }
-  });
-
-  // ── Save performance to localStorage ─────────────────────────
-  document.getElementById("settingsSavePerfBtn")?.addEventListener("click", () => {
-    const interval = document.getElementById("cfgSnapInterval")?.value;
-    const cooldown = document.getElementById("cfgCamCooldown")?.value;
-    if (interval) localStorage.setItem('ow_snap_interval', interval);
-    if (cooldown) localStorage.setItem('ow_cam_cooldown', cooldown);
-    const statusEl = document.getElementById("perfSaveStatus");
-    if (statusEl) { statusEl.textContent = "✓ Saved to this device"; statusEl.style.color = "#32d74b"; }
-  });
-
-  // ── Save colours to localStorage (all users) ─────────────────
-  document.getElementById("settingsSaveColoursBtn")?.addEventListener("click", () => {
-    const colourMap = {
-      cfgColOnPerson: 'ow_color_on_person', cfgColOnMotion: 'ow_color_on_motion',
-      cfgColOnDoor:   'ow_color_on_door',   cfgColOnWindow: 'ow_color_on_window',
-      cfgColOnAnimal: 'ow_color_on_animal', cfgColOnVehicle:'ow_color_on_vehicle',
-      cfgColOnSmoke:  'ow_color_on_smoke',  cfgColOnCo:     'ow_color_on_co',
-      cfgColOffPerson:'ow_color_off_person',cfgColOffMotion:'ow_color_off_motion',
-      cfgColOffDoor:  'ow_color_off_door',  cfgColOffWindow:'ow_color_off_window',
-      cfgColOffAnimal:'ow_color_off_animal',cfgColOffVehicle:'ow_color_off_vehicle',
-      cfgColOffSmoke: 'ow_color_off_smoke', cfgColOffCo:    'ow_color_off_co',
-    };
-    Object.entries(colourMap).forEach(([id, lsKey]) => {
-      const val = document.getElementById(id)?.value;
-      if (val) localStorage.setItem(lsKey, val);
+  // ── Colours — auto-save to localStorage on change ────────────
+  const colourMap = {
+    cfgColOnPerson: 'ow_color_on_person',  cfgColOnMotion:  'ow_color_on_motion',
+    cfgColOnDoor:   'ow_color_on_door',    cfgColOnWindow:  'ow_color_on_window',
+    cfgColOnAnimal: 'ow_color_on_animal',  cfgColOnVehicle: 'ow_color_on_vehicle',
+    cfgColOnSmoke:  'ow_color_on_smoke',   cfgColOnCo:      'ow_color_on_co',
+    cfgColOffPerson:'ow_color_off_person', cfgColOffMotion: 'ow_color_off_motion',
+    cfgColOffDoor:  'ow_color_off_door',   cfgColOffWindow: 'ow_color_off_window',
+    cfgColOffAnimal:'ow_color_off_animal', cfgColOffVehicle:'ow_color_off_vehicle',
+    cfgColOffSmoke: 'ow_color_off_smoke',  cfgColOffCo:     'ow_color_off_co',
+  };
+  Object.entries(colourMap).forEach(([id, lsKey]) => {
+    document.getElementById(id)?.addEventListener("input", function() {
+      localStorage.setItem(lsKey, this.value);
+      renderZones(); // apply immediately to floorplan
     });
-    renderZones(); // apply immediately
-    const statusEl = document.getElementById("coloursSaveStatus");
-    if (statusEl) { statusEl.textContent = "✓ Saved to this device"; statusEl.style.color = "#32d74b"; }
   });
 
   if (!isAdmin) return;  // ══ Admin-only bindings below ══════════

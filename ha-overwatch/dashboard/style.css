@@ -1686,9 +1686,10 @@ display: flex;
 }
 
 .cam-status-label {
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
-  color: #ccc;
+  letter-spacing: 0.02em;
+  color: #fff;
 }
 
 .cam-status-mode {
@@ -2319,4 +2320,14 @@ body.sidebar-collapsed.sidebar-left .view-toggle-widget {
   padding: 14px;
   overflow-y: auto;
   max-height: calc(100vh - 120px);
+}
+
+/* Secondary save button — for per-device saves (localStorage only) */
+.settings-btn-secondary {
+  background: rgba(0,150,255,0.12) !important;
+  border-color: rgba(0,150,255,0.35) !important;
+  color: #5ac8fa !important;
+}
+.settings-btn-secondary:hover {
+  background: rgba(0,150,255,0.22) !important;
 }

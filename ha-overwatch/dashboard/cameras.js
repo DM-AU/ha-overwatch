@@ -459,6 +459,10 @@ function renderCameraStatusBar() {
     const sortedGroups = [...(groups || [])].sort((a, b) =>
       (a.name || a.id).localeCompare(b.name || b.id));
 
+    // Lock toggles for direct browser users in server-defaults mode
+    const isDirectBrowser = !!document.querySelector('meta[name="ow-direct"]');
+    const lockedAttr      = (camUseServerState() && isDirectBrowser) ? 'disabled' : '';
+
     // Render a single zone row + its cameras
     const renderZoneRow = (zone, indent) => {
       const cameras  = [...(zone.cameras || [])].sort((a, b) =>
@@ -484,7 +488,7 @@ function renderCameraStatusBar() {
             <path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
           <label class="zone-toggle-switch" style="flex-shrink:0;" onclick="event.stopPropagation()">
-            <input type="checkbox" class="cam-zone-toggle" data-zone-id="${zone.id}" ${zoneOn ? 'checked' : ''}>
+            <input type="checkbox" class="cam-zone-toggle" data-zone-id="${zone.id}" ${zoneOn ? 'checked' : ''} ${lockedAttr}>
             <span class="zone-toggle-track"></span>
           </label>
         </div>
@@ -502,7 +506,7 @@ function renderCameraStatusBar() {
               style="background:${dot.colour};opacity:${camOn && zoneOn ? 1 : 0.3};width:6px;height:6px;border-radius:50%;flex-shrink:0;"></div>
             <span class="cam-dd-cam-name">${escapeHtml(friendlyName(camId))}${isPinned ? ' <span style="font-size:9px;color:#ff9500;">📌</span>' : ''}</span>
             <label class="zone-toggle-switch" style="flex-shrink:0;" onclick="event.stopPropagation()">
-              <input type="checkbox" class="cam-entity-toggle" data-cam-id="${camId}" ${camOn ? 'checked' : ''}>
+              <input type="checkbox" class="cam-entity-toggle" data-cam-id="${camId}" ${camOn ? 'checked' : ''} ${lockedAttr}>
               <span class="zone-toggle-track"></span>
             </label>
           </div>`;
@@ -540,7 +544,7 @@ function renderCameraStatusBar() {
             <path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
           <label class="zone-toggle-switch" style="flex-shrink:0;" onclick="event.stopPropagation()">
-            <input type="checkbox" class="cam-group-toggle" data-group-id="${group.id}" ${gAllOn ? 'checked' : ''}>
+            <input type="checkbox" class="cam-group-toggle" data-group-id="${group.id}" ${gAllOn ? 'checked' : ''} ${lockedAttr}>
             <span class="zone-toggle-track"></span>
           </label>
         </div>
@@ -578,7 +582,7 @@ function renderCameraStatusBar() {
               style="background:${dot.colour};opacity:${camOn ? 1 : 0.3};width:6px;height:6px;border-radius:50%;flex-shrink:0;"></div>
             <span class="cam-dd-cam-name">${escapeHtml(friendlyName(camId))} <span style="font-size:9px;color:#ff9500;">📌</span></span>
             <label class="zone-toggle-switch" style="flex-shrink:0;">
-              <input type="checkbox" class="cam-entity-toggle" data-cam-id="${camId}" ${camOn ? 'checked' : ''}>
+              <input type="checkbox" class="cam-entity-toggle" data-cam-id="${camId}" ${camOn ? 'checked' : ''} ${lockedAttr}>
               <span class="zone-toggle-track"></span>
             </label>
           </div>`;
@@ -627,18 +631,26 @@ function renderCameraStatusBar() {
     document.body.appendChild(dd);
   }
   dd.className = 'cam-status-dd cam-status-dd-portal';
+
+  const lockedNote = (lockedAttr)
+    ? `<div style="font-size:10px;color:#555;padding:6px 14px;border-top:1px solid rgba(255,255,255,0.05);">
+        Camera toggles controlled by HA entities (server defaults).<br>
+        Switch to Per device in Settings → Cameras to override locally.
+       </div>` : '';
+
   dd.innerHTML = `
     <div class="cam-status-master">
       <div class="zone-list-dot${masterFlash ? ' flashing' : ''}"
         style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${masterColour};opacity:${masterDot.dim ? 0.35 : 1};"></div>
       <span style="flex:1;font-size:11px;font-weight:600;color:#aaa;margin-left:6px;">All Cameras</span>
-      <label class="zone-toggle-switch" style="flex-shrink:0;">
-        <input type="checkbox" id="camGlobalToggle" ${masterOn ? 'checked' : ''}>
+      <label class="zone-toggle-switch" style="flex-shrink:0;${lockedAttr ? 'opacity:0.4;' : ''}">
+        <input type="checkbox" id="camGlobalToggle" ${masterOn ? 'checked' : ''} ${lockedAttr}>
         <span class="zone-toggle-track"></span>
       </label>
     </div>
     <div style="height:1px;background:rgba(255,255,255,0.06);margin:0 14px 4px;"></div>
     ${zonesHtml}
+    ${lockedNote}
   `;
   dd.style.display = camStatusOpen ? 'block' : 'none';
 
