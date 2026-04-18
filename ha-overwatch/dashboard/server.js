@@ -776,34 +776,27 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
-
 PLATFORMS = [Platform.SWITCH, Platform.BINARY_SENSOR]
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
-    """Set up the HA Overwatch component."""
     return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up HA Overwatch from a config entry."""
     url = entry.data[CONF_URL]
-
     coordinator = OverwatchCoordinator(hass, url)
     try:
         await coordinator.async_config_entry_first_refresh()
     except Exception as err:
         _LOGGER.error("Failed to connect to Overwatch add-on: %s", err)
         return False
-
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
-
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Unload a config entry."""
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
         hass.data[DOMAIN].pop(entry.entry_id, None)
@@ -815,15 +808,12 @@ class OverwatchCoordinator(DataUpdateCoordinator):
 
     def __init__(self, hass: HomeAssistant, url: str) -> None:
         super().__init__(
-            hass,
-            _LOGGER,
-            name="HA Overwatch",
+            hass, _LOGGER, name="HA Overwatch",
             update_interval=timedelta(seconds=30),
         )
         self.url = url
 
     async def _async_update_data(self) -> dict:
-        """Fetch entity states from add-on."""
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(
@@ -837,7 +827,7 @@ class OverwatchCoordinator(DataUpdateCoordinator):
             raise UpdateFailed(f"Cannot reach Overwatch add-on: {err}") from err
 
     async def async_set_entity(self, entity_type: str, entity_key: str, state: bool) -> None:
-        """Push a state change to the add-on."""
+        """Push a state change to the add-on and refresh coordinator data."""
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
@@ -845,41 +835,37 @@ class OverwatchCoordinator(DataUpdateCoordinator):
                     json={"type": entity_type, "key": entity_key, "state": state},
                     timeout=aiohttp.ClientTimeout(total=5),
                 ) as resp:
-                    if resp.status != 200:
-                        _LOGGER.warning("Overwatch entity-set returned %s", resp.status)
-                    else:
-                        # Refresh coordinator with new state
+                    if resp.status == 200:
                         data = await resp.json(content_type=None)
+                        # Apply returned state immediately — no need to wait for poll
                         if data.get("state"):
                             self.async_set_updated_data(data["state"])
+                    else:
+                        _LOGGER.warning("Overwatch entity-set returned %s", resp.status)
         except aiohttp.ClientError as err:
             _LOGGER.error("Cannot push state to Overwatch: %s", err)
 `,
+  "const.py": `"""Constants for HA Overwatch integration."""
+DOMAIN = "ha_overwatch"
+DEFAULT_URL = "http://localhost:8099"
+`,
   "config_flow.py": `"""Config flow for HA Overwatch integration."""
 from __future__ import annotations
-
 import aiohttp
 import voluptuous as vol
-
 from homeassistant import config_entries
 from homeassistant.const import CONF_URL
-
 from .const import DOMAIN, DEFAULT_URL
 
 
 class OverwatchConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for HA Overwatch."""
-
     VERSION = 1
 
     async def async_step_user(self, user_input=None):
-        """Handle the initial step."""
-        # Only allow one instance
         if self._async_current_entries():
             return self.async_abort(reason="already_configured")
-
         errors = {}
-
         if user_input is not None:
             url = user_input[CONF_URL].rstrip("/")
             try:
@@ -900,7 +886,6 @@ class OverwatchConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors["base"] = "cannot_connect"
             except Exception:
                 errors["base"] = "cannot_connect"
-
         return self.async_show_form(
             step_id="user",
             data_schema=vol.Schema({
@@ -909,33 +894,15 @@ class OverwatchConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 `,
-  "const.py": `"""Constants for HA Overwatch integration."""
-
-DOMAIN = "ha_overwatch"
-DEFAULT_URL = "http://localhost:8099"
-
-# Entity prefixes — must match server.js slug logic exactly
-ENTITY_PREFIX = "overwatch"
-
-# Poll interval for entity state refresh from add-on (seconds)
-# Used as fallback if push fails
-POLL_INTERVAL = 30
-
-# Coordinator update interval
-UPDATE_INTERVAL = 30
-`,
   "switch.py": `"""Switch platform for HA Overwatch."""
 from __future__ import annotations
-
 import logging
-
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
-
 from .const import DOMAIN
 from . import OverwatchCoordinator
 
@@ -943,28 +910,20 @@ _LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(
-    hass: HomeAssistant,
-    entry: ConfigEntry,
+    hass: HomeAssistant, entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up Overwatch switch entities."""
     coordinator: OverwatchCoordinator = hass.data[DOMAIN][entry.entry_id]
     data = coordinator.data or {}
+    entities = []
 
-    entities: list[SwitchEntity] = []
-
-    # Master switch
     entities.append(OverwatchMasterSwitch(coordinator))
 
-    # Group switches
     for group in data.get("groups", []):
         entities.append(OverwatchGroupSwitch(coordinator, group))
-
-    # Zone switches
     for zone in data.get("zones", []):
         entities.append(OverwatchZoneSwitch(coordinator, zone))
 
-    # Camera switches
     entities.append(OverwatchCameraAllSwitch(coordinator))
     for group in data.get("camera_groups", []):
         entities.append(OverwatchCameraGroupSwitch(coordinator, group))
@@ -987,205 +946,187 @@ def _device_info(coordinator: OverwatchCoordinator) -> DeviceInfo:
 
 
 class OverwatchBaseSwitch(CoordinatorEntity, SwitchEntity):
-    """Base switch entity."""
+    _attr_should_poll = False
 
-    _attr_has_entity_name = True
-
-    def __init__(self, coordinator: OverwatchCoordinator, unique_suffix: str) -> None:
+    def __init__(self, coordinator, unique_id, name, entity_type, entity_key, icon="mdi:shield"):
         super().__init__(coordinator)
-        self._attr_unique_id = f"overwatch_{unique_suffix}"
+        self._attr_unique_id = unique_id
+        self._attr_name = name
+        self._attr_icon = icon
         self._attr_device_info = _device_info(coordinator)
-        self._entity_type: str = ""
-        self._entity_key: str = ""
+        self._entity_type = entity_type
+        self._entity_key = entity_key
 
     @property
-    def is_on(self) -> bool:
-        return False
+    def is_on(self):
+        return True
 
-    async def async_turn_on(self, **kwargs) -> None:
+    async def async_turn_on(self, **kwargs):
         await self.coordinator.async_set_entity(self._entity_type, self._entity_key, True)
-        await self.coordinator.async_request_refresh()
 
-    async def async_turn_off(self, **kwargs) -> None:
+    async def async_turn_off(self, **kwargs):
         await self.coordinator.async_set_entity(self._entity_type, self._entity_key, False)
-        await self.coordinator.async_request_refresh()
 
 
-# ── Floorplan switches ────────────────────────────────────────
+# ── Floorplan: Master ─────────────────────────────────────────
 
 class OverwatchMasterSwitch(OverwatchBaseSwitch):
-    """Master zone switch."""
-
-    _attr_icon = "mdi:shield-home"
-
-    def __init__(self, coordinator: OverwatchCoordinator) -> None:
-        super().__init__(coordinator, "master")
-        self._attr_name = "Master"
-        self._entity_type = "master"
-        self._entity_key = "master"
+    def __init__(self, coordinator):
+        super().__init__(coordinator,
+            unique_id="overwatch_zone_master",
+            name="Overwatch Zone Master",
+            entity_type="master", entity_key="master",
+            icon="mdi:shield-home")
 
     @property
-    def is_on(self) -> bool:
+    def is_on(self):
         return bool((self.coordinator.data or {}).get("master", True))
 
 
+# ── Floorplan: Groups ─────────────────────────────────────────
+
 class OverwatchGroupSwitch(OverwatchBaseSwitch):
-    """Group enable/disable switch."""
-
-    _attr_icon = "mdi:layers"
-
-    def __init__(self, coordinator: OverwatchCoordinator, group: dict) -> None:
-        super().__init__(coordinator, f"group_{group['id']}")
-        self._group_id = group["id"]
-        self._attr_name = group.get("name", group["id"])
-        self._entity_type = "group"
-        self._entity_key = group["id"]
+    def __init__(self, coordinator, group):
+        gid = group["id"]
+        name = group.get("name", gid)
+        super().__init__(coordinator,
+            unique_id=f"overwatch_zone_group_{gid}",
+            name=f"Zone Group: {name}",
+            entity_type="group", entity_key=gid,
+            icon="mdi:layers")
+        self._group_id = gid
 
     @property
-    def is_on(self) -> bool:
+    def is_on(self):
         groups = (self.coordinator.data or {}).get("groups", [])
         g = next((g for g in groups if g["id"] == self._group_id), None)
         return bool(g.get("enabled", True)) if g else True
 
 
+# ── Floorplan: Zones ─────────────────────────────────────────
+
 class OverwatchZoneSwitch(OverwatchBaseSwitch):
-    """Zone enable/disable switch."""
-
-    _attr_icon = "mdi:map-marker-radius"
-
-    def __init__(self, coordinator: OverwatchCoordinator, zone: dict) -> None:
-        super().__init__(coordinator, f"zone_{zone['id']}")
-        self._zone_id = zone["id"]
-        self._attr_name = zone.get("name", zone["id"])
-        self._entity_type = "zone"
-        self._entity_key = zone["id"]
+    def __init__(self, coordinator, zone):
+        zid = zone["id"]
+        name = zone.get("name", zid)
+        super().__init__(coordinator,
+            unique_id=f"overwatch_zone_{zid}",
+            name=f"Zone: {name}",
+            entity_type="zone", entity_key=zid,
+            icon="mdi:map-marker-radius")
+        self._zone_id = zid
 
     @property
-    def is_on(self) -> bool:
+    def is_on(self):
         zones = (self.coordinator.data or {}).get("zones", [])
         z = next((z for z in zones if z["id"] == self._zone_id), None)
         return bool(z.get("enabled", True)) if z else True
 
 
-# ── Camera switches ───────────────────────────────────────────
+# ── Cameras: All ─────────────────────────────────────────────
 
 class OverwatchCameraAllSwitch(OverwatchBaseSwitch):
-    """All cameras master switch."""
-
-    _attr_icon = "mdi:cctv"
-
-    def __init__(self, coordinator: OverwatchCoordinator) -> None:
-        super().__init__(coordinator, "camera_all")
-        self._attr_name = "All Cameras"
-        self._entity_type = "camera_all"
-        self._entity_key = "all"
+    def __init__(self, coordinator):
+        super().__init__(coordinator,
+            unique_id="overwatch_camera_all",
+            name="Camera All",
+            entity_type="camera_all", entity_key="all",
+            icon="mdi:cctv")
 
     @property
-    def is_on(self) -> bool:
+    def is_on(self):
         cameras = (self.coordinator.data or {}).get("cameras", [])
         return all(c.get("enabled", True) for c in cameras) if cameras else True
 
 
+# ── Cameras: Groups ───────────────────────────────────────────
+
 class OverwatchCameraGroupSwitch(OverwatchBaseSwitch):
-    """Camera group switch."""
-
-    _attr_icon = "mdi:cctv"
-
-    def __init__(self, coordinator: OverwatchCoordinator, group: dict) -> None:
-        super().__init__(coordinator, f"camera_group_{group['id']}")
-        self._group_id = group["id"]
-        self._attr_name = f"{group.get('name', group['id'])} Cameras"
-        self._entity_type = "camera_group"
-        self._entity_key = group["id"]
+    def __init__(self, coordinator, group):
+        gid = group["id"]
+        name = group.get("name", gid)
+        super().__init__(coordinator,
+            unique_id=f"overwatch_camera_group_{gid}",
+            name=f"Camera Group: {name}",
+            entity_type="camera_group", entity_key=gid,
+            icon="mdi:cctv")
+        self._group_id = gid
 
     @property
-    def is_on(self) -> bool:
+    def is_on(self):
         groups = (self.coordinator.data or {}).get("camera_groups", [])
         g = next((g for g in groups if g["id"] == self._group_id), None)
         return bool(g.get("enabled", True)) if g else True
 
 
+# ── Cameras: Zones ────────────────────────────────────────────
+
 class OverwatchCameraZoneSwitch(OverwatchBaseSwitch):
-    """Camera zone switch."""
-
-    _attr_icon = "mdi:cctv"
-
-    def __init__(self, coordinator: OverwatchCoordinator, zone: dict) -> None:
-        super().__init__(coordinator, f"camera_zone_{zone['id']}")
-        self._zone_id = zone["id"]
-        self._attr_name = f"{zone.get('name', zone['id'])} Cameras"
-        self._entity_type = "camera_zone"
-        self._entity_key = zone["id"]
+    def __init__(self, coordinator, zone):
+        zid = zone["id"]
+        name = zone.get("name", zid)
+        super().__init__(coordinator,
+            unique_id=f"overwatch_camera_zone_{zid}",
+            name=f"Camera Zone: {name}",
+            entity_type="camera_zone", entity_key=zid,
+            icon="mdi:cctv")
+        self._zone_id = zid
 
     @property
-    def is_on(self) -> bool:
+    def is_on(self):
         zones = (self.coordinator.data or {}).get("camera_zones", [])
         z = next((z for z in zones if z["id"] == self._zone_id), None)
         return bool(z.get("enabled", True)) if z else True
 
 
+# ── Cameras: Individual ───────────────────────────────────────
+
 class OverwatchCameraSwitch(OverwatchBaseSwitch):
-    """Individual camera switch."""
-
-    _attr_icon = "mdi:cctv"
-
-    def __init__(self, coordinator: OverwatchCoordinator, camera: dict) -> None:
-        cam_id = camera["id"].replace(".", "_").replace("-", "_")
-        super().__init__(coordinator, f"camera_{cam_id}")
-        self._camera_id = camera["id"]
-        self._attr_name = camera.get("name", camera["id"])
-        self._entity_type = "camera"
-        self._entity_key = camera["id"]
+    def __init__(self, coordinator, camera):
+        cam_id = camera["id"]
+        safe_id = cam_id.replace(".", "_").replace("-", "_")
+        name = camera.get("name", cam_id)
+        super().__init__(coordinator,
+            unique_id=f"overwatch_camera_{safe_id}",
+            name=f"Camera: {name}",
+            entity_type="camera", entity_key=cam_id,
+            icon="mdi:cctv")
+        self._camera_id = cam_id
 
     @property
-    def is_on(self) -> bool:
+    def is_on(self):
         cameras = (self.coordinator.data or {}).get("cameras", [])
         c = next((c for c in cameras if c["id"] == self._camera_id), None)
         return bool(c.get("enabled", True)) if c else True
 `,
-  "binary_sensor.py": `"""Binary sensor platform for HA Overwatch — zone triggered states."""
+  "binary_sensor.py": `"""Binary sensor platform for HA Overwatch — triggered states."""
 from __future__ import annotations
-
-from homeassistant.components.binary_sensor import (
-    BinarySensorDeviceClass,
-    BinarySensorEntity,
-)
+from homeassistant.components.binary_sensor import BinarySensorDeviceClass, BinarySensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
-
 from .const import DOMAIN
 from . import OverwatchCoordinator
 
 
 async def async_setup_entry(
-    hass: HomeAssistant,
-    entry: ConfigEntry,
+    hass: HomeAssistant, entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up Overwatch binary sensor entities."""
     coordinator: OverwatchCoordinator = hass.data[DOMAIN][entry.entry_id]
     data = coordinator.data or {}
-
-    entities: list[BinarySensorEntity] = []
-
-    # Master triggered sensor
+    entities = []
     entities.append(OverwatchMasterTriggered(coordinator))
-
-    # Per-group triggered sensors
     for group in data.get("groups", []):
         entities.append(OverwatchGroupTriggered(coordinator, group))
-
-    # Per-zone triggered sensors
     for zone in data.get("zones", []):
         entities.append(OverwatchZoneTriggered(coordinator, zone))
-
     async_add_entities(entities)
 
 
-def _device_info(coordinator: OverwatchCoordinator) -> DeviceInfo:
+def _device_info(coordinator):
     return DeviceInfo(
         identifiers={(DOMAIN, "overwatch")},
         name="HA Overwatch",
@@ -1196,69 +1137,60 @@ def _device_info(coordinator: OverwatchCoordinator) -> DeviceInfo:
 
 
 class OverwatchBaseTriggered(CoordinatorEntity, BinarySensorEntity):
-    """Base triggered binary sensor."""
-
-    _attr_has_entity_name = True
     _attr_device_class = BinarySensorDeviceClass.MOTION
+    _attr_should_poll = False
 
-    def __init__(self, coordinator: OverwatchCoordinator, unique_suffix: str) -> None:
+    def __init__(self, coordinator, unique_id, name, icon="mdi:shield-alert"):
         super().__init__(coordinator)
-        self._attr_unique_id = f"overwatch_{unique_suffix}_triggered"
+        self._attr_unique_id = unique_id
+        self._attr_name = name
+        self._attr_icon = icon
         self._attr_device_info = _device_info(coordinator)
 
     @property
-    def is_on(self) -> bool:
+    def is_on(self):
         return False
 
 
 class OverwatchMasterTriggered(OverwatchBaseTriggered):
-    """Any zone triggered sensor."""
-
-    _attr_icon = "mdi:shield-alert"
-
-    def __init__(self, coordinator: OverwatchCoordinator) -> None:
-        super().__init__(coordinator, "master")
-        self._attr_name = "Master Triggered"
+    def __init__(self, coordinator):
+        super().__init__(coordinator,
+            unique_id="overwatch_zone_master_triggered",
+            name="Overwatch Zone Master Triggered")
 
     @property
-    def is_on(self) -> bool:
+    def is_on(self):
         zones = (self.coordinator.data or {}).get("zones", [])
         return any(z.get("triggered", False) for z in zones)
 
 
 class OverwatchGroupTriggered(OverwatchBaseTriggered):
-    """Group triggered — true if any member zone is triggered."""
-
-    _attr_icon = "mdi:shield-alert"
-
-    def __init__(self, coordinator: OverwatchCoordinator, group: dict) -> None:
-        super().__init__(coordinator, f"group_{group['id']}")
-        self._group_id = group["id"]
-        self._zone_ids: list[str] = group.get("zone_ids", [])
-        self._attr_name = f"{group.get('name', group['id'])} Triggered"
+    def __init__(self, coordinator, group):
+        gid = group["id"]
+        name = group.get("name", gid)
+        super().__init__(coordinator,
+            unique_id=f"overwatch_zone_group_{gid}_triggered",
+            name=f"Zone Group Triggered: {name}")
+        self._group_id = gid
+        self._zone_ids = group.get("zone_ids", [])
 
     @property
-    def is_on(self) -> bool:
+    def is_on(self):
         zones = (self.coordinator.data or {}).get("zones", [])
-        return any(
-            z.get("triggered", False)
-            for z in zones
-            if z["id"] in self._zone_ids
-        )
+        return any(z.get("triggered", False) for z in zones if z["id"] in self._zone_ids)
 
 
 class OverwatchZoneTriggered(OverwatchBaseTriggered):
-    """Zone triggered binary sensor."""
-
-    _attr_icon = "mdi:shield-alert"
-
-    def __init__(self, coordinator: OverwatchCoordinator, zone: dict) -> None:
-        super().__init__(coordinator, f"zone_{zone['id']}")
-        self._zone_id = zone["id"]
-        self._attr_name = f"{zone.get('name', zone['id'])} Triggered"
+    def __init__(self, coordinator, zone):
+        zid = zone["id"]
+        name = zone.get("name", zid)
+        super().__init__(coordinator,
+            unique_id=f"overwatch_zone_{zid}_triggered",
+            name=f"Zone Triggered: {name}")
+        self._zone_id = zid
 
     @property
-    def is_on(self) -> bool:
+    def is_on(self):
         zones = (self.coordinator.data or {}).get("zones", [])
         z = next((z for z in zones if z["id"] == self._zone_id), None)
         return bool(z.get("triggered", False)) if z else False
@@ -1266,7 +1198,7 @@ class OverwatchZoneTriggered(OverwatchBaseTriggered):
   "manifest.json": `{
   "domain": "ha_overwatch",
   "name": "HA Overwatch",
-  "version": "0.90.0",
+  "version": "0.97.0",
   "documentation": "https://github.com/DM-AU/ha-overwatch",
   "issue_tracker": "https://github.com/DM-AU/ha-overwatch/issues",
   "codeowners": [],
@@ -1282,19 +1214,15 @@ class OverwatchZoneTriggered(OverwatchBaseTriggered):
     "step": {
       "user": {
         "title": "HA Overwatch",
-        "description": "Connect to the HA Overwatch add-on running on this instance.\\n\\nMake sure the HA Overwatch add-on is installed and running before continuing.",
-        "data": {
-          "url": "Add-on URL"
-        }
+        "description": "Connect to the HA Overwatch add-on. Make sure it is installed and running.",
+        "data": { "url": "Add-on URL" }
       }
     },
     "error": {
-      "cannot_connect": "Cannot connect to HA Overwatch add-on. Make sure it is installed and running.",
-      "unknown": "Unexpected error. Check the HA Overwatch add-on logs."
+      "cannot_connect": "Cannot connect to HA Overwatch add-on.",
+      "unknown": "Unexpected error."
     },
-    "abort": {
-      "already_configured": "HA Overwatch is already configured."
-    }
+    "abort": { "already_configured": "HA Overwatch is already configured." }
   }
 }
 `,
@@ -1303,19 +1231,15 @@ class OverwatchZoneTriggered(OverwatchBaseTriggered):
     "step": {
       "user": {
         "title": "HA Overwatch",
-        "description": "Connect to the HA Overwatch add-on running on this instance.\\n\\nMake sure the HA Overwatch add-on is installed and running before continuing.",
-        "data": {
-          "url": "Add-on URL"
-        }
+        "description": "Connect to the HA Overwatch add-on. Make sure it is installed and running.",
+        "data": { "url": "Add-on URL" }
       }
     },
     "error": {
-      "cannot_connect": "Cannot connect to HA Overwatch add-on. Make sure it is installed and running.",
-      "unknown": "Unexpected error. Check the HA Overwatch add-on logs."
+      "cannot_connect": "Cannot connect to HA Overwatch add-on.",
+      "unknown": "Unexpected error."
     },
-    "abort": {
-      "already_configured": "HA Overwatch is already configured."
-    }
+    "abort": { "already_configured": "HA Overwatch is already configured." }
   }
 }
 `,
