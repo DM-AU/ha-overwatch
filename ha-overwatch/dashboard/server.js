@@ -149,6 +149,125 @@ function parseZoneYaml(text) {
   return z;
 }
 
+/* ─── GROUPS ──────────────────────────────────────────────── */
+function loadGroups() {
+  try {
+    const idxPath = path.join(DATA_DIR, "config", "zones", "groups_index.json");
+    const index   = JSON.parse(fs.readFileSync(idxPath, "utf8"));
+    return index.map(filename => {
+      try {
+        const text = fs.readFileSync(path.join(DATA_DIR, "config", "zones", filename), "utf8");
+        return parseGroupYaml(text);
+      } catch { return null; }
+    }).filter(g => g && g.id);
+  } catch { return []; }
+}
+
+function parseGroupYaml(text) {
+  const g = { zone_ids: [] };
+  let section = null;
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    if (line === "zone_ids:") { section = "zone_ids"; continue; }
+    if (line.startsWith("- ") && section === "zone_ids") {
+      g.zone_ids.push(line.slice(2).trim()); continue;
+    }
+    section = null;
+    if (!line.includes(":")) continue;
+    const colonIdx = line.indexOf(":");
+    const key = line.slice(0, colonIdx).trim();
+    const val = line.slice(colonIdx + 1).trim().replace(/^"(.*)"$/, "$1").replace(/^'(.*)'$/, "$1");
+    if      (key === "id")      g.id       = val;
+    else if (key === "name")    g.name     = val;
+    else if (key === "enabled") g.enabled  = val !== "false";
+    else if (key === "colorHex") g.colorHex = val;
+  }
+  return g;
+}
+
+/* ─── ENTITY STATE FILE ────────────────────────────────────── */
+const ENTITY_STATE_FILE = path.join(DATA_DIR, "config", "entity_state.json");
+
+function loadEntityState() {
+  try {
+    return JSON.parse(fs.readFileSync(ENTITY_STATE_FILE, "utf8"));
+  } catch {
+    return { master: true, groups: {}, zones: {}, cameras: {} };
+  }
+}
+
+function saveEntityState(state) {
+  try {
+    fs.mkdirSync(path.dirname(ENTITY_STATE_FILE), { recursive: true });
+    fs.writeFileSync(ENTITY_STATE_FILE, JSON.stringify(state, null, 2), "utf8");
+  } catch (e) {
+    console.error("[HA-Overwatch] Failed to save entity_state.json:", e.message);
+  }
+}
+
+// Runtime state — triggered zones populated by server-side HA WS listener
+const serverState = { triggeredZones: {} };
+
+function buildEntityPayload() {
+  const state  = loadEntityState();
+  const zones  = loadZones();
+  const groups = loadGroups();
+  const triggered = serverState.triggeredZones;
+
+  // All unique cameras across zones
+  const cameraSet = new Set();
+  zones.forEach(z => (z.cameras || []).forEach(c => cameraSet.add(c)));
+
+  return {
+    master: state.master !== false,
+    groups: groups.map(g => ({
+      id: g.id, name: g.name || g.id, zone_ids: g.zone_ids || [],
+      enabled: state.groups[g.id] !== false,
+    })),
+    zones: zones.map(z => ({
+      id: z.id, name: z.name || z.id,
+      enabled:   state.zones[z.id] !== false,
+      triggered: !!triggered[z.id],
+    })),
+    camera_groups: groups
+      .filter(g => (g.zone_ids || []).some(zid => zones.find(z => z.id === zid && (z.cameras||[]).length > 0)))
+      .map(g => ({ id: g.id, name: g.name || g.id, enabled: state.groups["cam_" + g.id] !== false })),
+    camera_zones: zones
+      .filter(z => (z.cameras || []).length > 0)
+      .map(z => ({ id: z.id, name: z.name || z.id, enabled: state.zones["cam_" + z.id] !== false })),
+    cameras: [...cameraSet].map(camId => ({
+      id: camId, name: camId.replace(/^camera\./, "").replace(/_/g, " "),
+      enabled: state.cameras[camId] !== false,
+    })),
+  };
+}
+
+async function pushStateToHA(payload) {
+  const cfg = getHAConfig(loadConfig());
+  if (!cfg.ha_token) return;
+  const masterTriggered = payload.zones.some(z => z.triggered);
+  const pushes = [
+    haRestCall("POST", "/api/states/binary_sensor.overwatch_master_triggered",
+      { state: masterTriggered ? "on" : "off",
+        attributes: { friendly_name: "Overwatch Master Triggered", device_class: "motion" } }, cfg),
+  ];
+  payload.zones.forEach(z => {
+    pushes.push(haRestCall("POST", `/api/states/binary_sensor.overwatch_zone_${z.id}_triggered`,
+      { state: z.triggered ? "on" : "off",
+        attributes: { friendly_name: `${z.name} Triggered`, device_class: "motion" } }, cfg));
+  });
+  payload.groups.forEach(g => {
+    const gTriggered = (g.zone_ids || []).some(zid => payload.zones.find(z => z.id === zid)?.triggered);
+    pushes.push(haRestCall("POST", `/api/states/binary_sensor.overwatch_group_${g.id}_triggered`,
+      { state: gTriggered ? "on" : "off",
+        attributes: { friendly_name: `${g.name} Triggered`, device_class: "motion" } }, cfg));
+  });
+  try { await Promise.all(pushes); } catch (e) {
+    console.error("[HA-Overwatch] pushStateToHA error:", e.message);
+  }
+}
+
 /* ─── HA REST API ─────────────────────────────────────────── */
 function haRestCall(method, endpoint, body, cfg) {
   return new Promise((resolve, reject) => {
@@ -449,6 +568,76 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  /* ── /ow/entity-states — HA component polls this ─────────── */
+  if (pathname === "/ow/entity-states" && req.method === "GET") {
+    try {
+      json(res, buildEntityPayload());
+    } catch (e) { err(res, e.message, 500); }
+    return;
+  }
+
+  /* ── /ow/entity-set — browser or HA component sets state ─── */
+  if (pathname === "/ow/entity-set" && req.method === "POST") {
+    try {
+      const body  = await readBody(req);
+      const { type, key, state } = body; // type: master|group|zone|camera_all|camera_group|camera_zone|camera
+      const es = loadEntityState();
+
+      if (type === "master") {
+        es.master = !!state;
+        // Propagate to all groups and zones
+        const zones  = loadZones();
+        const groups = loadGroups();
+        groups.forEach(g => { es.groups[g.id] = !!state; });
+        zones.forEach(z => { es.zones[z.id] = !!state; });
+      } else if (type === "group") {
+        es.groups[key] = !!state;
+        // Propagate to member zones
+        const groups = loadGroups();
+        const group  = groups.find(g => g.id === key);
+        if (group) group.zone_ids.forEach(zid => { es.zones[zid] = !!state; });
+      } else if (type === "zone") {
+        es.zones[key] = !!state;
+      } else if (type === "camera_all") {
+        const zones = loadZones();
+        const cams  = new Set();
+        zones.forEach(z => (z.cameras || []).forEach(c => cams.add(c)));
+        cams.forEach(c => { es.cameras[c] = !!state; });
+        const groups = loadGroups();
+        groups.forEach(g => { es.groups["cam_" + g.id] = !!state; });
+        zones.forEach(z => { es.zones["cam_" + z.id] = !!state; });
+      } else if (type === "camera_group") {
+        es.groups["cam_" + key] = !!state;
+        const groups = loadGroups();
+        const group  = groups.find(g => g.id === key);
+        if (group) {
+          const zones = loadZones();
+          group.zone_ids.forEach(zid => {
+            es.zones["cam_" + zid] = !!state;
+            const z = zones.find(z => z.id === zid);
+            if (z) (z.cameras || []).forEach(c => { es.cameras[c] = !!state; });
+          });
+        }
+      } else if (type === "camera_zone") {
+        es.zones["cam_" + key] = !!state;
+        const zones = loadZones();
+        const zone  = zones.find(z => z.id === key);
+        if (zone) (zone.cameras || []).forEach(c => { es.cameras[c] = !!state; });
+      } else if (type === "camera") {
+        es.cameras[key] = !!state;
+      }
+
+      saveEntityState(es);
+
+      // Push updated state to HA
+      const payload = buildEntityPayload();
+      pushStateToHA(payload).catch(() => {});
+
+      json(res, { ok: true, state: buildEntityPayload() });
+    } catch (e) { err(res, e.message, 500); }
+    return;
+  }
+
   /* ── Camera proxy ────────────────────────────────────────── */
   if (pathname.startsWith("/ow/camera_proxy")) {
     try {
@@ -563,7 +752,175 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log(`[HA-Overwatch] Server running at http://0.0.0.0:${PORT}`);
   console.log(`[HA-Overwatch] App directory:  ${APP_DIR}`);
   console.log(`[HA-Overwatch] Data directory: ${DATA_DIR}`);
+
+  // On startup: write custom component files and start HA listener
+  setTimeout(() => {
+    writeCustomComponent();
+    startHAListener();
+  }, 2000); // wait for HA to be ready
 });
+
+/* ─── CUSTOM COMPONENT WRITER ──────────────────────────────── */
+// Copies Python component files to /homeassistant/custom_components/ha_overwatch/
+// on add-on startup so admin just needs to restart HA and add the integration.
+function writeCustomComponent() {
+  if (!process.env.SUPERVISOR_TOKEN) return; // only in add-on mode
+  const destDir = "/homeassistant/custom_components/ha_overwatch";
+  const srcDir  = path.join(APP_DIR, "..", "custom_components", "ha_overwatch");
+  try {
+    fs.mkdirSync(path.join(destDir, "translations"), { recursive: true });
+    const files = [
+      "__init__.py", "config_flow.py", "const.py",
+      "switch.py", "binary_sensor.py",
+      "manifest.json", "strings.json",
+    ];
+    files.forEach(f => {
+      const src  = path.join(srcDir, f);
+      const dest = path.join(destDir, f);
+      if (fs.existsSync(src)) fs.copyFileSync(src, dest);
+    });
+    // translations
+    const enSrc  = path.join(srcDir, "translations", "en.json");
+    const enDest = path.join(destDir, "translations", "en.json");
+    if (fs.existsSync(enSrc)) fs.copyFileSync(enSrc, enDest);
+    console.log("[HA-Overwatch] Custom component written to", destDir);
+  } catch (e) {
+    console.error("[HA-Overwatch] Failed to write custom component:", e.message);
+  }
+}
+
+/* ─── SERVER-SIDE HA WEBSOCKET LISTENER ────────────────────── */
+// Maintains a persistent server-to-HA WebSocket connection.
+// Watches zone sensor states and updates serverState.triggeredZones,
+// then pushes binary_sensor states to HA whenever a zone triggers/clears.
+function startHAListener() {
+  if (!process.env.SUPERVISOR_TOKEN) return;
+  const net = require("net");
+
+  let msgId     = 1;
+  let authDone  = false;
+  let subId     = null;
+  let recBuf    = Buffer.alloc(0);
+  let reconnectDelay = 5000;
+
+  function connect() {
+    const sock = net.connect({ host: "homeassistant", port: 8123 });
+
+    // Upgrade to WebSocket manually
+    const crypto = require("crypto");
+    const wsKey  = crypto.randomBytes(16).toString("base64");
+    sock.write(
+      "GET /api/websocket HTTP/1.1\r\n" +
+      "Host: homeassistant\r\n" +
+      "Upgrade: websocket\r\n" +
+      "Connection: Upgrade\r\n" +
+      `Sec-WebSocket-Key: ${wsKey}\r\n` +
+      "Sec-WebSocket-Version: 13\r\n\r\n"
+    );
+
+    function send(obj) {
+      sendWsFrame(sock, JSON.stringify({ ...obj, id: msgId++ }));
+    }
+
+    let httpDone = false;
+    sock.on("data", chunk => {
+      if (!httpDone) {
+        const s = chunk.toString();
+        if (s.includes("\r\n\r\n")) {
+          httpDone = true;
+          const rest = chunk.slice(chunk.indexOf("\r\n\r\n") + 4);
+          if (rest.length > 0) processChunk(rest);
+        }
+        return;
+      }
+      processChunk(chunk);
+    });
+
+    function processChunk(chunk) {
+      recBuf = Buffer.concat([recBuf, chunk]);
+      while (true) {
+        const text = extractWsPayload(recBuf);
+        if (text === null) break;
+        // advance buffer past this frame
+        const used = frameLength(recBuf);
+        if (used <= 0) break;
+        recBuf = recBuf.slice(used);
+        try { handleMsg(JSON.parse(text)); } catch {}
+      }
+    }
+
+    function handleMsg(msg) {
+      if (msg.type === "auth_required") {
+        sendWsFrame(sock, JSON.stringify({
+          type: "auth", access_token: process.env.SUPERVISOR_TOKEN,
+        }));
+        return;
+      }
+      if (msg.type === "auth_ok") {
+        authDone = true;
+        reconnectDelay = 5000;
+        console.log("[HA-Overwatch] Server HA listener authenticated");
+        // Subscribe to all state_changed events
+        send({ type: "subscribe_events", event_type: "state_changed" });
+        return;
+      }
+      if (msg.type === "result" && msg.success && !subId) {
+        subId = msg.id;
+        return;
+      }
+      if (msg.type === "event" && msg.event?.event_type === "state_changed") {
+        const { entity_id, new_state } = msg.event.data || {};
+        if (!entity_id || !new_state) return;
+        onStateChanged(entity_id, new_state.state);
+      }
+    }
+
+    sock.on("error", e  => { console.error("[HA-Overwatch] HA listener error:", e.message); scheduleReconnect(); });
+    sock.on("close", () => { console.log("[HA-Overwatch] HA listener disconnected"); scheduleReconnect(); });
+  }
+
+  function scheduleReconnect() {
+    setTimeout(connect, reconnectDelay);
+    reconnectDelay = Math.min(reconnectDelay * 2, 60000);
+  }
+
+  // Called when any HA entity state changes
+  function onStateChanged(entityId, state) {
+    const zones  = loadZones();
+    const groups = loadGroups();
+
+    // Build map of sensor → zone(s)
+    let changed = false;
+    zones.forEach(zone => {
+      const sensors = zone.sensors || [];
+      if (!sensors.includes(entityId)) return;
+      const isTriggered = ["on", "open", "detected", "home", "triggered"].includes((state || "").toLowerCase());
+      if (!!serverState.triggeredZones[zone.id] !== isTriggered) {
+        serverState.triggeredZones[zone.id] = isTriggered;
+        changed = true;
+      }
+    });
+
+    if (changed) {
+      const payload = buildEntityPayload();
+      pushStateToHA(payload).catch(() => {});
+    }
+  }
+
+  connect();
+}
+
+// Calculate byte length of a WS frame (to advance buffer)
+function frameLength(buf) {
+  if (buf.length < 2) return -1;
+  let len = buf[1] & 0x7f;
+  let offset = 2;
+  if (len === 126) { if (buf.length < 4) return -1; len = buf.readUInt16BE(2); offset = 4; }
+  else if (len === 127) return -1;
+  const masked = (buf[1] & 0x80) !== 0;
+  if (masked) offset += 4;
+  return offset + len;
+}
 
 // WebSocket proxy — only active in add-on mode (SUPERVISOR_TOKEN present).
 // Uses the ha_token stored in ui.yaml (entered once by user in Settings).

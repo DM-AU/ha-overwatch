@@ -727,7 +727,8 @@ function setGroupArmed(groupId, armed) {
   const group = groups.find(g => g.id === groupId);
   if (!group) return;
   (group.zone_ids || []).forEach(zoneId => setZoneEnabled(zoneId, armed));
-  // setZoneEnabled already calls updateStatusDropdownInPlace for each zone
+  // Also sync group as a unit to HA
+  owEntitySet("group", groupId, armed);
   renderZonesEditor();
 }
 
@@ -864,50 +865,27 @@ function setZoneHidden(zoneId, hidden) {
   );
 }
 
-/* ─── HA ENTITY SYNC (issue 17 Phase 1) ──────────────────── */
-// Mirrors app.js slug logic — must match server.js zoneSlug()
-function haZoneSlug(name) {
-  return (name || "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "_")
-    .replace(/^_+|_+$/g, "")
-    .slice(0, 40) || "zone";
-}
-
-function haZoneEntityIds(zone) {
-  const slug = haZoneSlug(zone.name || zone.id);
-  return {
-    armed:     `input_boolean.overwatch_zone_${slug}_armed`,
-    triggered: `input_boolean.overwatch_zone_${slug}_triggered`,
-  };
-}
-
-// Push a zone's current state to HA via the server.js relay.
-// Fire-and-forget — errors are logged but never block the UI.
-async function syncZoneToHA(zone, state) {
-  if (!serverApiAvailable) return;  // no server.js running
+/* ─── ENTITY SYNC (dashboard → server → HA) ───────────────── */
+// Fire-and-forget — errors never block the UI
+async function owEntitySet(type, key, state) {
+  if (!serverApiAvailable) return;
   try {
-    await fetch(apiPath("ow/ha-sync-zone"), {
+    await fetch(apiPath("ow/entity-set"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        zoneId:   zone.id,
-        zoneName: zone.name || zone.id,
-        state,
-      }),
+      body: JSON.stringify({ type, key, state }),
     });
-  } catch { /* server unreachable — silently ignore */ }
+  } catch { /* server unreachable */ }
+}
+
+async function syncZoneToHA(zone, zoneState) {
+  // Map visual state to enabled boolean
+  const enabled = zoneState !== "disabled";
+  await owEntitySet("zone", zone.id, enabled);
 }
 
 async function syncMasterToHA(armed) {
-  if (!serverApiAvailable) return;
-  try {
-    await fetch(apiPath("ow/ha-sync-master"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ armed }),
-    });
-  } catch { /* ignore */ }
+  await owEntitySet("master", "master", armed);
 }
 
 /* ─── ZONE STATE COMPUTATION ──────────────────────────────── */
@@ -1752,9 +1730,23 @@ function renderZonesEditor() {
 
   // ── Zone config wiring ───────────────────────────────────
   if (selectedZone) {
+    let _zoneOrigName = selectedZone.name || "";
     document.getElementById("zoneNameInput")?.addEventListener("input", e => {
       selectedZone.name = e.target.value;
       saveZone(selectedZone);
+    });
+    document.getElementById("zoneNameInput")?.addEventListener("blur", e => {
+      const newName = e.target.value.trim();
+      if (newName && newName !== _zoneOrigName) {
+        // Warn admin that entity ID changes break automations
+        logEvent("warn",
+          `Zone renamed from "${_zoneOrigName}" to "${newName}". ` +
+          `HA entity IDs for this zone have changed — update any automations referencing the old entity.`,
+          "system");
+        _zoneOrigName = newName;
+        // Re-sync the new entity state to HA
+        owEntitySet("zone", selectedZone.id, selectedZone.enabled !== false);
+      }
     });
 
     document.getElementById("zoneColorInput")?.addEventListener("input", e => {
@@ -1919,7 +1911,13 @@ function bindDeviceSearch(selectedZone, inputId, resultsId, devType, listId) {
     let candidates = [];
     if (haConnected && Object.keys(haStates).length > 0) {
       candidates = Object.keys(haStates)
-        .filter(id => id.toLowerCase().includes(query))
+        .filter(id => {
+          const low = id.toLowerCase();
+          // Exclude Overwatch's own entities from the picker (circular reference prevention)
+          if (low.startsWith("switch.overwatch_") ||
+              low.startsWith("binary_sensor.overwatch_")) return false;
+          return low.includes(query);
+        })
         .slice(0, 25)
         .map(id => ({ id, state: haStates[id]?.state || "—", friendly: haStates[id]?.attributes?.friendly_name || "" }));
     } else {
@@ -2935,6 +2933,24 @@ function renderSettingsPanel() {
           </div>
         </div>
 
+        ${isAdmin ? `
+        <div class="settings-section">
+          <div class="settings-section-title">HA Integration <span class="settings-admin-badge">Admin</span></div>
+          <div style="font-size:11px;color:#666;line-height:1.6;">
+            The HA Overwatch custom component is written to
+            <code style="background:rgba(255,255,255,0.05);padding:1px 4px;border-radius:3px;font-size:10px;">/config/custom_components/ha_overwatch/</code>
+            automatically on add-on start.<br><br>
+            To activate:
+            <ol style="margin:6px 0 0 16px;padding:0;">
+              <li>Restart Home Assistant</li>
+              <li>Go to <b>Settings → Devices &amp; Services → Add Integration</b></li>
+              <li>Search for <b>HA Overwatch</b> and follow the steps</li>
+            </ol>
+            <br>
+            Entities created: <code style="font-size:10px;">switch.overwatch_*</code> and <code style="font-size:10px;">binary_sensor.overwatch_*</code>
+          </div>
+        </div>` : ''}
+
       </div>
 
       <!-- ══ ALARM TAB ════════════════════════════════════════════ -->
@@ -3052,6 +3068,21 @@ function renderSettingsPanel() {
       <div class="settings-tab-panel" data-panel="cameras">
 
         <div class="settings-section">
+          <div class="settings-section-title">Camera Toggle Source ${perDeviceBadge}</div>
+          <div class="settings-field">
+            <label>Camera visibility controlled by</label>
+            <div class="settings-toggle-row">
+              <button class="settings-toggle ${localStorage.getItem('ow_cam_source') !== 'device' ? 'active' : ''}" data-camsource="server">Server defaults (HA entities)</button>
+              <button class="settings-toggle ${localStorage.getItem('ow_cam_source') === 'device' ? 'active' : ''}" data-camsource="device">Per device (this browser)</button>
+            </div>
+            <div style="font-size:11px;color:#777;margin-top:4px;">
+              <b>Server defaults:</b> camera visibility follows HA entity states — consistent across all browsers and controllable via HA automations.<br>
+              <b>Per device:</b> this browser uses its own camera toggle settings, ignoring HA entity state.
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-section">
           <div class="settings-section-title">Display ${perDeviceBadge}</div>
           <div class="settings-field">
             <label>Camera mode</label>
@@ -3061,12 +3092,14 @@ function renderSettingsPanel() {
             </div>
             <div style="font-size:11px;color:#777;margin-top:4px;"><b>Snapshot:</b> lower bandwidth, periodic refresh.<br><b>Live:</b> MJPEG stream, instant but more resources.</div>
           </div>
-          <div class="settings-field" style="margin-top:6px;">
+          <div class="settings-field" id="hideCamLabelsField" style="margin-top:6px;${localStorage.getItem('ow_cam_source') !== 'device' ? 'opacity:0.4;pointer-events:none;' : ''}">
             <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
               <input type="checkbox" id="cfgHideCamLabels" ${eff('ow_hide_cam_labels','cam_hide_labels','false') === 'true' ? 'checked' : ''}
-                style="width:16px;height:16px;accent-color:#0096ff;cursor:pointer;">
+                style="width:16px;height:16px;accent-color:#0096ff;cursor:pointer;"
+                ${localStorage.getItem('ow_cam_source') !== 'device' ? 'disabled' : ''}>
               <span>Hide camera name labels on tiles</span>
             </label>
+            ${localStorage.getItem('ow_cam_source') !== 'device' ? '<div style="font-size:10px;color:#555;margin-top:2px;">Switch to Per device mode to change this setting.</div>' : ''}
           </div>
           <button class="settings-btn settings-btn-secondary" id="settingsSaveCamDisplayBtn" style="margin-top:6px;">Save Display</button>
           <div id="camDisplaySaveStatus" style="font-size:11px;color:#888;margin-top:6px;text-align:center;"></div>
@@ -3143,6 +3176,22 @@ function renderSettingsPanel() {
       panel.querySelectorAll(".settings-toggle[data-flash]").forEach(b => b.classList.remove("active"));
       btn.classList.add("active");
       localStorage.setItem('ow_flash_mode', btn.dataset.flash);
+    };
+  });
+
+  // ── Camera source toggle (server/device) ────────────────────
+  panel.querySelectorAll(".settings-toggle[data-camsource]").forEach(btn => {
+    btn.onclick = () => {
+      panel.querySelectorAll(".settings-toggle[data-camsource]").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      const src = btn.dataset.camsource;
+      localStorage.setItem('ow_cam_source', src);
+      // Lock/unlock the hide labels field based on mode
+      const field = document.getElementById("hideCamLabelsField");
+      const cb    = document.getElementById("cfgHideCamLabels");
+      const isDevice = src === 'device';
+      if (field) field.style.cssText = `margin-top:6px;${!isDevice ? 'opacity:0.4;pointer-events:none;' : ''}`;
+      if (cb) cb.disabled = !isDevice;
     };
   });
 

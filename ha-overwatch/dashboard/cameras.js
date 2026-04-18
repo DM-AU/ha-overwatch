@@ -12,9 +12,55 @@ const CAM_STORAGE_PREFIX    = 'ow_cam_';
 const CAM_TOGGLE_PREFIX     = 'ow_cam_toggle_';   // per camera toggle
 const CAM_ZONE_PREFIX       = 'ow_cam_zone_';     // per zone toggle
 const CAM_GLOBAL_KEY        = 'ow_cam_global';    // global all-cameras toggle
+const CAM_MODE_KEY          = 'ow_cam_source';    // 'server' | 'device' (defaults to 'server')
+
+// Is this browser using server state (HA entities) or per-device localStorage?
+function camUseServerState() {
+  return localStorage.getItem(CAM_MODE_KEY) !== 'device';
+}
+
+// Read camera/zone toggle: server state takes precedence unless in device mode
+function camIsEnabled(type, key, serverData) {
+  if (!camUseServerState()) {
+    // Device mode — use localStorage
+    if (type === 'camera') return localStorage.getItem(CAM_TOGGLE_PREFIX + key) !== 'false';
+    if (type === 'zone')   return localStorage.getItem(CAM_ZONE_PREFIX   + key) !== 'false';
+    return localStorage.getItem(CAM_GLOBAL_KEY) !== 'false';
+  }
+  // Server mode — use entity state fetched from add-on
+  if (!serverData) return true;
+  if (type === 'camera') {
+    const c = (serverData.cameras || []).find(c => c.id === key);
+    return c ? c.enabled !== false : true;
+  }
+  if (type === 'zone') {
+    const z = (serverData.camera_zones || []).find(z => z.id === key);
+    return z ? z.enabled !== false : true;
+  }
+  return serverData.master !== false;
+}
+
+// Set camera/zone toggle — writes to server or localStorage
+async function camSetEnabled(type, key, state) {
+  if (!camUseServerState()) {
+    if (type === 'camera') localStorage.setItem(CAM_TOGGLE_PREFIX + key, state ? 'true' : 'false');
+    else if (type === 'zone') localStorage.setItem(CAM_ZONE_PREFIX + key, state ? 'true' : 'false');
+    else localStorage.setItem(CAM_GLOBAL_KEY, state ? 'true' : 'false');
+    return;
+  }
+  // Server mode — push to add-on
+  try {
+    await fetch(window.OW.apiPath('ow/entity-set'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: type === 'all' ? 'camera_all' : (type === 'camera' ? 'camera' : 'camera_zone'), key, state }),
+    });
+  } catch { /* ignore */ }
+}
 
 /* ── Module state ────────────────────────────────────────────── */
 let camMode        = 'snapshot';   // 'snapshot' | 'live'
+let camServerState = null;         // entity state from /ow/entity-states (server mode)
 let camPinned      = new Set();    // Set of pinned camera entity ids
 let camToggled     = {};           // { entityId: bool } — false = user disabled
 let camZoneToggled = {};           // { zoneId: bool } — false = zone disabled on cam page
@@ -73,27 +119,21 @@ function getActiveCameras() {
   const now   = Date.now();
   const cfg   = OW.uiConfig;
 
-  // Parse config
   camMaxVisible = parseInt(cfg.cam_max_visible) || 0;
   try { camLowResMap = JSON.parse(cfg.cam_low_res_map || '{}'); } catch {}
-  try {
-    const pins = JSON.parse(cfg.cam_pinned || '[]');
-    camPinned = new Set(pins);
-  } catch {}
+  try { camPinned = new Set(JSON.parse(cfg.cam_pinned || '[]')); } catch {}
 
-  const cooldownMs = (parseInt(cfg.cam_cooldown) || 30) * 1000;
+  const cooldownMs = (parseInt(localStorage.getItem("ow_cam_cooldown") || cfg.cam_cooldown) || 30) * 1000;
   const failHideMs = (parseInt(cfg.cam_fail_hide_seconds) || 5) * 1000;
 
-  // Global toggle check
-  const globalOn = localStorage.getItem(CAM_GLOBAL_KEY) !== 'false';
+  // Global toggle — server or device mode
+  const globalOn = camIsEnabled('global', 'all', camServerState);
   if (!globalOn) return [];
 
-  const cameraSet = new Map(); // entityId → { lastTrigger, fromZone }
+  const cameraSet = new Map();
 
-  // Add from triggered zones (with cooldown)
   zones.forEach(zone => {
-    // Zone-level toggle
-    const zoneOn = localStorage.getItem(CAM_ZONE_PREFIX + zone.id) !== 'false';
+    const zoneOn   = camIsEnabled('zone', zone.id, camServerState);
     if (!zoneOn) return;
 
     const sensors   = zone.sensors || [];
@@ -102,28 +142,25 @@ function getActiveCameras() {
     if (!cameras.length) return;
 
     cameras.forEach(entityId => {
-      // Per-camera toggle
-      const camOn = localStorage.getItem(CAM_TOGGLE_PREFIX + entityId) !== 'false';
+      const camOn = camIsEnabled('camera', entityId, camServerState);
       if (!camOn) return;
       if (camHidden.has(entityId)) return;
 
       if (triggered) {
-        // Mark/extend cooldown
         const until = now + cooldownMs;
         camCooldowns[entityId] = { until, zoneId: zone.id };
         camLastTrigger[entityId] = now;
         cameraSet.set(entityId, { lastTrigger: now, fromZone: zone.id });
       } else if (camCooldowns[entityId] && camCooldowns[entityId].until > now) {
-        // Still in cooldown
         const lt = camLastTrigger[entityId] || 0;
         cameraSet.set(entityId, { lastTrigger: lt, fromZone: zone.id });
       }
     });
   });
 
-  // Add pinned cameras (always show if toggled on)
+  // Pinned cameras
   camPinned.forEach(entityId => {
-    const camOn = localStorage.getItem(CAM_TOGGLE_PREFIX + entityId) !== 'false';
+    const camOn = camIsEnabled('camera', entityId, camServerState);
     if (!camOn) return;
     if (camHidden.has(entityId)) return;
     if (!cameraSet.has(entityId)) {
@@ -249,7 +286,7 @@ function renderCameraGrid() {
 /* ── Snapshot refresh ───────────────────────────────────────── */
 function startSnapshotRefresh() {
   stopSnapshotRefresh();
-  const interval = (parseInt(window.OW.uiConfig.cam_snapshot_interval) || 2) * 1000;
+  const interval = (parseInt(localStorage.getItem("ow_snap_interval") || window.OW.uiConfig.cam_snapshot_interval) || 2) * 1000;
   camSnapshotTimer = setInterval(() => {
     if (camMode !== 'snapshot') return;
     document.querySelectorAll('.cam-tile-img').forEach(img => {
@@ -638,24 +675,25 @@ function renderCameraStatusBar() {
   if (toggleEl) toggleEl.onclick = window._camToggle;
 
   // Master toggle → propagate to all zones and cameras
+  // Master toggle
   document.getElementById('camGlobalToggle')?.addEventListener('change', e => {
     const on = e.target.checked;
-    zonesWithCameras.forEach(zone => {
-      localStorage.setItem(CAM_ZONE_PREFIX + zone.id, on ? 'true' : 'false');
-      (zone.cameras || []).forEach(camId =>
-        localStorage.setItem(CAM_TOGGLE_PREFIX + camId, on ? 'true' : 'false'));
+    camSetEnabled('all', 'all', on).then(() => {
+      zonesWithCameras.forEach(zone => {
+        localStorage.setItem(CAM_ZONE_PREFIX + zone.id, on ? 'true' : 'false');
+        (zone.cameras || []).forEach(id => localStorage.setItem(CAM_TOGGLE_PREFIX + id, on ? 'true' : 'false'));
+      });
+      renderCameraStatusBar(); renderCameraGrid();
     });
-    renderCameraStatusBar();
-    renderCameraGrid();
   });
 
   // Group header: collapse/expand
   document.querySelectorAll('.cam-dd-group-header').forEach(hdr => {
     hdr.addEventListener('click', e => {
       if (e.target.closest('label,input')) return;
-      const colKey  = hdr.dataset.colKey;
+      const colKey = hdr.dataset.colKey;
       const content = hdr.nextElementSibling;
-      const isCol   = content?.style.display === 'none';
+      const isCol = content?.style.display === 'none';
       if (content) content.style.display = isCol ? '' : 'none';
       const chev = hdr.querySelector('.cam-dd-chevron');
       if (chev) chev.style.transform = `rotate(${isCol ? '0' : '-90'}deg)`;
@@ -663,22 +701,21 @@ function renderCameraStatusBar() {
     });
   });
 
-  // Group toggles → propagate to all member zones and cameras
+  // Group toggles
   document.querySelectorAll('.cam-group-toggle').forEach(chk => {
     chk.addEventListener('change', e => {
-      const gid   = e.target.dataset.groupId;
-      const on    = e.target.checked;
+      const gid = e.target.dataset.groupId;
+      const on  = e.target.checked;
       const group = (groups || []).find(g => g.id === gid);
-      const memberZones = (group?.zone_ids || [])
-        .map(id => zones.find(z => z.id === id))
+      const memberZones = (group?.zone_ids || []).map(id => zones.find(z => z.id === id))
         .filter(z => z && (z.cameras || []).length > 0);
-      memberZones.forEach(zone => {
-        localStorage.setItem(CAM_ZONE_PREFIX + zone.id, on ? 'true' : 'false');
-        (zone.cameras || []).forEach(camId =>
-          localStorage.setItem(CAM_TOGGLE_PREFIX + camId, on ? 'true' : 'false'));
+      camSetEnabled('camera_group', gid, on).then(() => {
+        memberZones.forEach(zone => {
+          localStorage.setItem(CAM_ZONE_PREFIX + zone.id, on ? 'true' : 'false');
+          (zone.cameras || []).forEach(id => localStorage.setItem(CAM_TOGGLE_PREFIX + id, on ? 'true' : 'false'));
+        });
+        renderCameraStatusBar(); renderCameraGrid();
       });
-      renderCameraStatusBar();
-      renderCameraGrid();
     });
   });
 
@@ -686,10 +723,10 @@ function renderCameraStatusBar() {
   document.querySelectorAll('.cam-dd-zone-header').forEach(hdr => {
     hdr.addEventListener('click', e => {
       if (e.target.closest('label,input')) return;
-      const colKey  = hdr.dataset.colKey;
+      const colKey = hdr.dataset.colKey;
       if (!colKey) return;
       const content = hdr.nextElementSibling;
-      const isCol   = content?.style.display === 'none';
+      const isCol = content?.style.display === 'none';
       if (content) content.style.display = isCol ? '' : 'none';
       const chev = hdr.querySelector('.cam-dd-chevron');
       if (chev) chev.style.transform = `rotate(${isCol ? '0' : '-90'}deg)`;
@@ -697,35 +734,34 @@ function renderCameraStatusBar() {
     });
   });
 
-  // Zone toggles → propagate to member cameras
+  // Zone toggles
   document.querySelectorAll('.cam-zone-toggle').forEach(chk => {
     chk.addEventListener('change', e => {
       const zid = e.target.dataset.zoneId;
       const on  = e.target.checked;
-      localStorage.setItem(CAM_ZONE_PREFIX + zid, on ? 'true' : 'false');
       const zone = zones.find(z => z.id === zid);
-      (zone?.cameras || []).forEach(camId =>
-        localStorage.setItem(CAM_TOGGLE_PREFIX + camId, on ? 'true' : 'false'));
-      renderCameraStatusBar();
-      renderCameraGrid();
+      camSetEnabled('zone', zid, on).then(() => {
+        localStorage.setItem(CAM_ZONE_PREFIX + zid, on ? 'true' : 'false');
+        (zone?.cameras || []).forEach(id => localStorage.setItem(CAM_TOGGLE_PREFIX + id, on ? 'true' : 'false'));
+        renderCameraStatusBar(); renderCameraGrid();
+      });
     });
   });
 
-  // Camera toggles — also update parent zone key to reflect camera states
+  // Camera toggles
   document.querySelectorAll('.cam-entity-toggle').forEach(chk => {
     chk.addEventListener('change', e => {
       const camId = e.target.dataset.camId;
       const on    = e.target.checked;
-      localStorage.setItem(CAM_TOGGLE_PREFIX + camId, on ? 'true' : 'false');
-      // Update zone key: zone is "on" if all its cameras are on
-      const parentZone = zones.find(z => (z.cameras || []).includes(camId));
-      if (parentZone) {
-        const allOn = (parentZone.cameras || []).every(id =>
-          localStorage.getItem(CAM_TOGGLE_PREFIX + id) !== 'false');
-        localStorage.setItem(CAM_ZONE_PREFIX + parentZone.id, allOn ? 'true' : 'false');
-      }
-      renderCameraStatusBar();
-      renderCameraGrid();
+      camSetEnabled('camera', camId, on).then(() => {
+        localStorage.setItem(CAM_TOGGLE_PREFIX + camId, on ? 'true' : 'false');
+        const parentZone = zones.find(z => (z.cameras || []).includes(camId));
+        if (parentZone) {
+          const allOn = (parentZone.cameras || []).every(id => localStorage.getItem(CAM_TOGGLE_PREFIX + id) !== 'false');
+          localStorage.setItem(CAM_ZONE_PREFIX + parentZone.id, allOn ? 'true' : 'false');
+        }
+        renderCameraStatusBar(); renderCameraGrid();
+      });
     });
   });
 
@@ -869,8 +905,16 @@ function initCameraPage() {
   try { camLowResMap = JSON.parse(OW.uiConfig.cam_low_res_map || '{}'); } catch {}
   try { camPinned = new Set(JSON.parse(OW.uiConfig.cam_pinned || '[]')); } catch {}
 
-  // Initial renders into their panels (already in the DOM via index.html)
-  renderCameraStatusBar();
+  // Fetch server entity state on init (for server mode)
+  async function refreshServerState() {
+    try {
+      const res = await fetch(window.OW.apiPath('ow/entity-states'));
+      if (res.ok) { camServerState = await res.json(); }
+    } catch { /* ignore */ }
+  }
+  refreshServerState();
+  // Refresh every 10s to stay in sync with HA
+  setInterval(refreshServerState, 10000);
   renderCameraGrid();
   bindModal();
 
