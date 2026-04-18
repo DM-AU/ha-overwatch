@@ -941,8 +941,9 @@ function checkZoneStateChanges() {
 
     const prev = zonePrevState[zone.id];
 
-    // Normal → Triggered
+    // Normal → Triggered: clear any stale fade (zone is lit up again)
     if (prev !== "triggered" && state === "triggered") {
+      delete zoneFadeState[zone.id]; // cancel any in-progress fade
       const triggeredEntity = sensors.find(isEntityTriggered) || sensors[0];
       const type            = detectEntityType(triggeredEntity || "");
       const zoneColour      = resolveColour(entityTypeColour(type));
@@ -958,20 +959,16 @@ function checkZoneStateChanges() {
       syncZoneToHA(zone, "triggered");
     }
 
-    // Triggered → anything else (cleared)
+    // Triggered → anything else (cleared): always start a fresh fade
     if (prev === "triggered" && state !== "triggered") {
-      // Only start fade if not already fading (don't reset timer on rapid sensor clears)
-      if (!zoneFadeState[zone.id]) {
-        const lastSensor = sensors.find(id => isEntityTriggered(id)) || sensors[0];
-        const type       = detectEntityType(lastSensor || "");
-        const zoneColour = resolveColour(entityTypeColour(type));
-        startZoneFade(zone.id, zoneColour);
-      }
+      const type       = detectEntityType(sensors[0] || "");
+      const zoneColour = resolveColour(entityTypeColour(type));
+      startZoneFade(zone.id, zoneColour); // always fresh — prev trigger cleared
       logEvent(
         "ok",
         `Cleared`,
         "zone",
-        { zoneName: zone.name || zone.id, zoneColour: zoneFadeState[zone.id]?.hex || "#32d74b" }
+        { zoneName: zone.name || zone.id, zoneColour }
       );
       syncZoneToHA(zone, state);
     }
@@ -3186,11 +3183,12 @@ function renderSettingsPanel() {
       panel.querySelectorAll(".settings-toggle[data-camsource]").forEach(b => b.classList.remove("active"));
       btn.classList.add("active");
       localStorage.setItem('ow_cam_source', btn.dataset.camsource);
-      // If switching to server mode, fetch latest state immediately so UI reflects it
+      // If switching to server mode, fetch latest state immediately
       if (btn.dataset.camsource !== 'device' && window._camRefreshServerState) {
         await window._camRefreshServerState();
       }
-      // Trigger camera re-render with new source
+      // Re-render both the status bar (dropdown locked state + dots) and grid
+      if (window.renderCameraStatusBar) window.renderCameraStatusBar();
       if (window.camUpdate) window.camUpdate();
     };
   });

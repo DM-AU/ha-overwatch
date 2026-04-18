@@ -942,6 +942,7 @@ function initCameraPage() {
 
   // Expose for settings panel source toggle
   window._camRefreshServerState = refreshServerState;
+  window.renderCameraStatusBar  = renderCameraStatusBar;
 
   // Initial renders
   renderCameraStatusBar();
