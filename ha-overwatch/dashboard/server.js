@@ -804,6 +804,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except Exception as err:
         _LOGGER.error("Failed to connect to Overwatch add-on: %s", err)
         return False
+
+    _LOGGER.debug("Overwatch data on setup: %s", coordinator.data)
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
@@ -825,20 +827,29 @@ class OverwatchCoordinator(DataUpdateCoordinator):
     async def _async_update_data(self) -> dict:
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(f"{self.url}/ow/entity-states",
-                    timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                async with session.get(
+                    f"{self.url}/ow/entity-states",
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
                     if resp.status != 200:
                         raise UpdateFailed(f"Add-on returned {resp.status}")
-                    return await resp.json(content_type=None)
+                    data = await resp.json(content_type=None)
+                    _LOGGER.debug("Fetched entity states: zones=%d groups=%d cameras=%d",
+                        len(data.get("zones", [])),
+                        len(data.get("groups", [])),
+                        len(data.get("cameras", [])))
+                    return data
         except aiohttp.ClientError as err:
             raise UpdateFailed(f"Cannot reach Overwatch add-on: {err}") from err
 
     async def async_set_entity(self, entity_type: str, entity_key: str, state: bool) -> None:
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(f"{self.url}/ow/entity-set",
+                async with session.post(
+                    f"{self.url}/ow/entity-set",
                     json={"type": entity_type, "key": entity_key, "state": state},
-                    timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as resp:
                     if resp.status == 200:
                         data = await resp.json(content_type=None)
                         if data.get("state"):
@@ -872,21 +883,29 @@ class OverwatchConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             url = user_input[CONF_URL].rstrip("/")
             try:
                 async with aiohttp.ClientSession() as session:
-                    async with session.get(f"{url}/ow/health",
-                        timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    async with session.get(
+                        f"{url}/ow/health",
+                        timeout=aiohttp.ClientTimeout(total=5),
+                    ) as resp:
                         if resp.status == 200:
                             data = await resp.json(content_type=None)
                             if data.get("ok"):
                                 await self.async_set_unique_id(DOMAIN)
                                 self._abort_if_unique_id_configured()
-                                return self.async_create_entry(title="HA Overwatch", data={CONF_URL: url})
+                                return self.async_create_entry(
+                                    title="HA Overwatch",
+                                    data={CONF_URL: url},
+                                )
                 errors["base"] = "cannot_connect"
             except Exception:
                 errors["base"] = "cannot_connect"
         return self.async_show_form(
             step_id="user",
-            data_schema=vol.Schema({vol.Required(CONF_URL, default=DEFAULT_URL): str}),
-            errors=errors)
+            data_schema=vol.Schema({
+                vol.Required(CONF_URL, default=DEFAULT_URL): str,
+            }),
+            errors=errors,
+        )
 `,
   "switch.py": `"""Switch platform for HA Overwatch."""
 from __future__ import annotations
@@ -903,102 +922,165 @@ from . import OverwatchCoordinator
 _LOGGER = logging.getLogger(__name__)
 
 
-async def async_setup_entry(hass, entry, async_add_entities):
-    coordinator = hass.data[DOMAIN][entry.entry_id]
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
+    coordinator: OverwatchCoordinator = hass.data[DOMAIN][entry.entry_id]
     data = coordinator.data or {}
+    _LOGGER.debug("switch setup: zones=%d groups=%d cameras=%d",
+        len(data.get("zones", [])), len(data.get("groups", [])), len(data.get("cameras", [])))
+
     entities = [OverwatchMasterSwitch(coordinator)]
-    for g in data.get("groups", []):        entities.append(OverwatchGroupSwitch(coordinator, g))
-    for z in data.get("zones", []):         entities.append(OverwatchZoneSwitch(coordinator, z))
+    for g in data.get("groups", []):
+        entities.append(OverwatchGroupSwitch(coordinator, g))
+    for z in data.get("zones", []):
+        entities.append(OverwatchZoneSwitch(coordinator, z))
     entities.append(OverwatchCameraAllSwitch(coordinator))
-    for g in data.get("camera_groups", []): entities.append(OverwatchCameraGroupSwitch(coordinator, g))
-    for z in data.get("camera_zones", []):  entities.append(OverwatchCameraZoneSwitch(coordinator, z))
-    for c in data.get("cameras", []):       entities.append(OverwatchCameraSwitch(coordinator, c))
-    async_add_entities(entities)
+    for g in data.get("camera_groups", []):
+        entities.append(OverwatchCameraGroupSwitch(coordinator, g))
+    for z in data.get("camera_zones", []):
+        entities.append(OverwatchCameraZoneSwitch(coordinator, z))
+    for c in data.get("cameras", []):
+        entities.append(OverwatchCameraSwitch(coordinator, c))
+
+    _LOGGER.info("Overwatch: registering %d switch entities", len(entities))
+    async_add_entities(entities, update_before_add=True)
 
 
-def _dev(c):
-    return DeviceInfo(identifiers={(DOMAIN, "overwatch")}, name="HA Overwatch",
-        manufacturer="HA Overwatch", model="Floor Plan Dashboard", configuration_url=c.url)
+def _dev(coordinator: OverwatchCoordinator) -> DeviceInfo:
+    return DeviceInfo(
+        identifiers={(DOMAIN, "overwatch")},
+        name="HA Overwatch",
+        manufacturer="HA Overwatch",
+        model="Floor Plan Dashboard",
+        configuration_url=coordinator.url,
+    )
 
 
 class OWSwitch(CoordinatorEntity, SwitchEntity):
     _attr_should_poll = False
-    def __init__(self, c, uid, name, etype, ekey, icon="mdi:shield"):
-        super().__init__(c)
+
+    def __init__(self, coordinator, uid, name, etype, ekey, icon="mdi:shield"):
+        super().__init__(coordinator)
         self._attr_unique_id = uid
         self._attr_name = name
         self._attr_icon = icon
-        self._attr_device_info = _dev(c)
+        self._attr_device_info = _dev(coordinator)
         self._etype = etype
         self._ekey = ekey
+
     @property
-    def is_on(self): return True
-    async def async_turn_on(self, **kw): await self.coordinator.async_set_entity(self._etype, self._ekey, True)
-    async def async_turn_off(self, **kw): await self.coordinator.async_set_entity(self._etype, self._ekey, False)
+    def is_on(self) -> bool:
+        return True
+
+    async def async_turn_on(self, **kwargs):
+        await self.coordinator.async_set_entity(self._etype, self._ekey, True)
+
+    async def async_turn_off(self, **kwargs):
+        await self.coordinator.async_set_entity(self._etype, self._ekey, False)
 
 
 class OverwatchMasterSwitch(OWSwitch):
     def __init__(self, c):
-        super().__init__(c, "overwatch_zone_master", "Overwatch Zone Master", "master", "master", "mdi:shield-home")
+        super().__init__(c, "overwatch_zone_master", "Overwatch Zone Master",
+                         "master", "master", "mdi:shield-home")
+
     @property
-    def is_on(self): return bool((self.coordinator.data or {}).get("master", True))
+    def is_on(self) -> bool:
+        return bool((self.coordinator.data or {}).get("master", True))
+
 
 class OverwatchGroupSwitch(OWSwitch):
     def __init__(self, c, g):
-        super().__init__(c, f"overwatch_zone_group_{g[chr(39)+'id'+chr(39)]}", f"Zone Group: {g.get(chr(39)+'name'+chr(39), g[chr(39)+'id'+chr(39)])}", "group", g["id"], "mdi:layers")
-        self._gid = g["id"]
+        gid = g["id"]
+        name = g.get("name", gid)
+        super().__init__(c, f"overwatch_zone_group_{gid}", f"Zone Group: {name}",
+                         "group", gid, "mdi:layers")
+        self._gid = gid
+
     @property
-    def is_on(self):
-        g = next((x for x in (self.coordinator.data or {}).get("groups", []) if x["id"] == self._gid), None)
+    def is_on(self) -> bool:
+        gs = (self.coordinator.data or {}).get("groups", [])
+        g = next((x for x in gs if x["id"] == self._gid), None)
         return bool(g.get("enabled", True)) if g else True
+
 
 class OverwatchZoneSwitch(OWSwitch):
     def __init__(self, c, z):
-        super().__init__(c, f"overwatch_zone_{z[chr(39)+'id'+chr(39)]}", f"Zone: {z.get(chr(39)+'name'+chr(39), z[chr(39)+'id'+chr(39)])}", "zone", z["id"], "mdi:map-marker-radius")
-        self._zid = z["id"]
+        zid = z["id"]
+        name = z.get("name", zid)
+        super().__init__(c, f"overwatch_zone_{zid}", f"Zone: {name}",
+                         "zone", zid, "mdi:map-marker-radius")
+        self._zid = zid
+
     @property
-    def is_on(self):
-        z = next((x for x in (self.coordinator.data or {}).get("zones", []) if x["id"] == self._zid), None)
+    def is_on(self) -> bool:
+        zs = (self.coordinator.data or {}).get("zones", [])
+        z = next((x for x in zs if x["id"] == self._zid), None)
         return bool(z.get("enabled", True)) if z else True
+
 
 class OverwatchCameraAllSwitch(OWSwitch):
     def __init__(self, c):
-        super().__init__(c, "overwatch_camera_all", "Camera All", "camera_all", "all", "mdi:cctv")
+        super().__init__(c, "overwatch_camera_all", "Camera All",
+                         "camera_all", "all", "mdi:cctv")
+
     @property
-    def is_on(self):
+    def is_on(self) -> bool:
         cs = (self.coordinator.data or {}).get("cameras", [])
         return all(x.get("enabled", True) for x in cs) if cs else True
 
+
 class OverwatchCameraGroupSwitch(OWSwitch):
     def __init__(self, c, g):
-        super().__init__(c, f"overwatch_camera_group_{g[chr(39)+'id'+chr(39)]}", f"Camera Group: {g.get(chr(39)+'name'+chr(39), g[chr(39)+'id'+chr(39)])}", "camera_group", g["id"], "mdi:cctv")
-        self._gid = g["id"]
+        gid = g["id"]
+        name = g.get("name", gid)
+        super().__init__(c, f"overwatch_camera_group_{gid}", f"Camera Group: {name}",
+                         "camera_group", gid, "mdi:cctv")
+        self._gid = gid
+
     @property
-    def is_on(self):
-        g = next((x for x in (self.coordinator.data or {}).get("camera_groups", []) if x["id"] == self._gid), None)
+    def is_on(self) -> bool:
+        gs = (self.coordinator.data or {}).get("camera_groups", [])
+        g = next((x for x in gs if x["id"] == self._gid), None)
         return bool(g.get("enabled", True)) if g else True
+
 
 class OverwatchCameraZoneSwitch(OWSwitch):
     def __init__(self, c, z):
-        super().__init__(c, f"overwatch_camera_zone_{z[chr(39)+'id'+chr(39)]}", f"Camera Zone: {z.get(chr(39)+'name'+chr(39), z[chr(39)+'id'+chr(39)])}", "camera_zone", z["id"], "mdi:cctv")
-        self._zid = z["id"]
+        zid = z["id"]
+        name = z.get("name", zid)
+        super().__init__(c, f"overwatch_camera_zone_{zid}", f"Camera Zone: {name}",
+                         "camera_zone", zid, "mdi:cctv")
+        self._zid = zid
+
     @property
-    def is_on(self):
-        z = next((x for x in (self.coordinator.data or {}).get("camera_zones", []) if x["id"] == self._zid), None)
+    def is_on(self) -> bool:
+        zs = (self.coordinator.data or {}).get("camera_zones", [])
+        z = next((x for x in zs if x["id"] == self._zid), None)
         return bool(z.get("enabled", True)) if z else True
+
 
 class OverwatchCameraSwitch(OWSwitch):
     def __init__(self, c, cam):
         cid = cam["id"]
-        super().__init__(c, f"overwatch_camera_{cid.replace(chr(46),chr(95)).replace(chr(45),chr(95))}", f"Camera: {cam.get(chr(39)+'name'+chr(39), cid)}", "camera", cid, "mdi:cctv")
+        safe = cid.replace(".", "_").replace("-", "_")
+        name = cam.get("name", cid)
+        super().__init__(c, f"overwatch_camera_{safe}", f"Camera: {name}",
+                         "camera", cid, "mdi:cctv")
         self._cid = cid
+
     @property
-    def is_on(self):
-        c = next((x for x in (self.coordinator.data or {}).get("cameras", []) if x["id"] == self._cid), None)
+    def is_on(self) -> bool:
+        cs = (self.coordinator.data or {}).get("cameras", [])
+        c = next((x for x in cs if x["id"] == self._cid), None)
         return bool(c.get("enabled", True)) if c else True
 `,
   "binary_sensor.py": `"""Binary sensor platform for HA Overwatch."""
 from __future__ import annotations
+import logging
 from homeassistant.components.binary_sensor import BinarySensorDeviceClass, BinarySensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -1008,57 +1090,90 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import DOMAIN
 from . import OverwatchCoordinator
 
+_LOGGER = logging.getLogger(__name__)
 
-async def async_setup_entry(hass, entry, async_add_entities):
-    coordinator = hass.data[DOMAIN][entry.entry_id]
+
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
+    coordinator: OverwatchCoordinator = hass.data[DOMAIN][entry.entry_id]
     data = coordinator.data or {}
     entities = [OverwatchMasterTriggered(coordinator)]
-    for g in data.get("groups", []): entities.append(OverwatchGroupTriggered(coordinator, g))
-    for z in data.get("zones", []):  entities.append(OverwatchZoneTriggered(coordinator, z))
-    async_add_entities(entities)
+    for g in data.get("groups", []):
+        entities.append(OverwatchGroupTriggered(coordinator, g))
+    for z in data.get("zones", []):
+        entities.append(OverwatchZoneTriggered(coordinator, z))
+    _LOGGER.info("Overwatch: registering %d binary sensor entities", len(entities))
+    async_add_entities(entities, update_before_add=True)
 
 
-def _dev(c):
-    return DeviceInfo(identifiers={(DOMAIN, "overwatch")}, name="HA Overwatch",
-        manufacturer="HA Overwatch", model="Floor Plan Dashboard", configuration_url=c.url)
+def _dev(coordinator: OverwatchCoordinator) -> DeviceInfo:
+    return DeviceInfo(
+        identifiers={(DOMAIN, "overwatch")},
+        name="HA Overwatch",
+        manufacturer="HA Overwatch",
+        model="Floor Plan Dashboard",
+        configuration_url=coordinator.url,
+    )
 
 
 class OWSensor(CoordinatorEntity, BinarySensorEntity):
     _attr_device_class = BinarySensorDeviceClass.MOTION
     _attr_should_poll = False
-    def __init__(self, c, uid, name):
-        super().__init__(c)
+
+    def __init__(self, coordinator, uid, name):
+        super().__init__(coordinator)
         self._attr_unique_id = uid
         self._attr_name = name
         self._attr_icon = "mdi:shield-alert"
-        self._attr_device_info = _dev(c)
+        self._attr_device_info = _dev(coordinator)
+
     @property
-    def is_on(self): return False
+    def is_on(self) -> bool:
+        return False
 
 
 class OverwatchMasterTriggered(OWSensor):
     def __init__(self, c):
-        super().__init__(c, "overwatch_zone_master_triggered", "Overwatch Zone Master Triggered")
+        super().__init__(c, "overwatch_zone_master_triggered",
+                         "Overwatch Zone Master Triggered")
+
     @property
-    def is_on(self):
-        return any(z.get("triggered", False) for z in (self.coordinator.data or {}).get("zones", []))
+    def is_on(self) -> bool:
+        return any(z.get("triggered", False)
+                   for z in (self.coordinator.data or {}).get("zones", []))
+
 
 class OverwatchGroupTriggered(OWSensor):
     def __init__(self, c, g):
-        super().__init__(c, f"overwatch_zone_group_{g[chr(39)+'id'+chr(39)]}_triggered", f"Zone Group Triggered: {g.get(chr(39)+'name'+chr(39), g[chr(39)+'id'+chr(39)])}")
-        self._gid = g["id"]
+        gid = g["id"]
+        name = g.get("name", gid)
+        super().__init__(c, f"overwatch_zone_group_{gid}_triggered",
+                         f"Zone Group Triggered: {name}")
+        self._gid = gid
         self._zids = g.get("zone_ids", [])
+
     @property
-    def is_on(self):
-        return any(z.get("triggered", False) for z in (self.coordinator.data or {}).get("zones", []) if z["id"] in self._zids)
+    def is_on(self) -> bool:
+        return any(z.get("triggered", False)
+                   for z in (self.coordinator.data or {}).get("zones", [])
+                   if z["id"] in self._zids)
+
 
 class OverwatchZoneTriggered(OWSensor):
     def __init__(self, c, z):
-        super().__init__(c, f"overwatch_zone_{z[chr(39)+'id'+chr(39)]}_triggered", f"Zone Triggered: {z.get(chr(39)+'name'+chr(39), z[chr(39)+'id'+chr(39)])}")
-        self._zid = z["id"]
+        zid = z["id"]
+        name = z.get("name", zid)
+        super().__init__(c, f"overwatch_zone_{zid}_triggered",
+                         f"Zone Triggered: {name}")
+        self._zid = zid
+
     @property
-    def is_on(self):
-        z = next((x for x in (self.coordinator.data or {}).get("zones", []) if x["id"] == self._zid), None)
+    def is_on(self) -> bool:
+        zs = (self.coordinator.data or {}).get("zones", [])
+        z = next((x for x in zs if x["id"] == self._zid), None)
         return bool(z.get("triggered", False)) if z else False
 `,
   "strings.json": `{
@@ -1098,7 +1213,7 @@ class OverwatchZoneTriggered(OWSensor):
   "manifest.json": `{
   "domain": "ha_overwatch",
   "name": "HA Overwatch",
-  "version": "0.99.0",
+  "version": "1.00.0",
   "documentation": "https://github.com/DM-AU/ha-overwatch",
   "issue_tracker": "https://github.com/DM-AU/ha-overwatch/issues",
   "codeowners": [],
