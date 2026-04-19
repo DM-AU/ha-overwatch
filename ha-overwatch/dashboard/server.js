@@ -214,6 +214,9 @@ function nameSlug(name) {
   return (name || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
 }
 
+// Zone triggered states — written by startHAListener, read by /ow/triggered endpoint
+const globalTriggeredZones = {}; // nameSlug(zone.name) -> bool
+
 /* ─── REQUEST HANDLER ─────────────────────────────────────── */
 const server = http.createServer(async (req, res) => {
   // CORS preflight
@@ -350,6 +353,12 @@ const server = http.createServer(async (req, res) => {
         err(res, "No file found in upload");
       } catch (e) { err(res, e.message); }
     });
+    return;
+  }
+
+  /* ── /ow/triggered — coordinator polls for zone triggered states ── */
+  if (pathname === "/ow/triggered" && req.method === "GET") {
+    json(res, globalTriggeredZones);
     return;
   }
 
@@ -539,13 +548,23 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     url = entry.data[CONF_URL]
-    coordinator = OverwatchCoordinator(hass, url)
+
+    # Zone structure coordinator — polls /ow/zones hourly
+    zone_coordinator = ZoneCoordinator(hass, url)
     try:
-        await coordinator.async_config_entry_first_refresh()
+        await zone_coordinator.async_config_entry_first_refresh()
     except Exception as err:
-        _LOGGER.error("Failed to fetch zone structure from Overwatch: %s", err)
+        _LOGGER.error("Failed to fetch zone structure: %s", err)
         return False
-    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+
+    # Triggered state coordinator — polls /ow/triggered every 2s
+    triggered_coordinator = TriggeredCoordinator(hass, url)
+    await triggered_coordinator.async_config_entry_first_refresh()
+
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {
+        "zone_coordinator":     zone_coordinator,
+        "triggered_coordinator": triggered_coordinator,
+    }
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
@@ -557,36 +576,49 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return unload_ok
 
 
-class OverwatchCoordinator(DataUpdateCoordinator):
-    """Fetches zone/group/camera structure from the add-on (rarely changes)."""
+class ZoneCoordinator(DataUpdateCoordinator):
+    """Fetches zone/group/camera structure — changes rarely."""
 
     def __init__(self, hass: HomeAssistant, url: str) -> None:
-        super().__init__(
-            hass, _LOGGER, name="HA Overwatch",
-            update_interval=timedelta(hours=1),
-        )
+        super().__init__(hass, _LOGGER, name="HA Overwatch Zones",
+            update_interval=timedelta(hours=1))
         self.url = url
 
     async def _async_update_data(self) -> dict:
-        """Fetch zone structure — only needed at startup and when zones change."""
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    f"{self.url}/ow/zones",
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as resp:
+                async with session.get(f"{self.url}/ow/zones",
+                    timeout=aiohttp.ClientTimeout(total=10)) as resp:
                     if resp.status != 200:
                         raise UpdateFailed(f"Add-on returned {resp.status}")
                     data = await resp.json(content_type=None)
-                    _LOGGER.info(
-                        "Overwatch: %d zones, %d groups, %d cameras",
+                    _LOGGER.info("Overwatch: %d zones, %d groups, %d cameras",
                         len(data.get("zones", [])),
                         len(data.get("groups", [])),
-                        len(data.get("cameras", [])),
-                    )
+                        len(data.get("cameras", [])))
                     return data
         except aiohttp.ClientError as err:
-            raise UpdateFailed(f"Cannot reach Overwatch add-on: {err}") from err
+            raise UpdateFailed(f"Cannot reach add-on: {err}") from err
+
+
+class TriggeredCoordinator(DataUpdateCoordinator):
+    """Polls /ow/triggered every 2s for zone triggered states."""
+
+    def __init__(self, hass: HomeAssistant, url: str) -> None:
+        super().__init__(hass, _LOGGER, name="HA Overwatch Triggered",
+            update_interval=timedelta(seconds=2))
+        self.url = url
+
+    async def _async_update_data(self) -> dict:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{self.url}/ow/triggered",
+                    timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    if resp.status != 200:
+                        return {}
+                    return await resp.json(content_type=None)
+        except aiohttp.ClientError:
+            return {}
 `,
   "const.py": `"""Constants for HA Overwatch integration."""
 DOMAIN = "ha_overwatch"
@@ -645,7 +677,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import DOMAIN
-from . import OverwatchCoordinator
+from . import ZoneCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -654,7 +686,7 @@ async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    coordinator: OverwatchCoordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator: ZoneCoordinator = hass.data[DOMAIN][entry.entry_id]["zone_coordinator"]
     data = coordinator.data or {}
 
     entities = [OverwatchMasterSwitch(coordinator)]
@@ -674,7 +706,7 @@ async def async_setup_entry(
     async_add_entities(entities, update_before_add=False)
 
 
-def _dev(coordinator: OverwatchCoordinator) -> DeviceInfo:
+def _dev(coordinator: ZoneCoordinator) -> DeviceInfo:
     return DeviceInfo(
         identifiers={(DOMAIN, "overwatch")},
         name="HA Overwatch",
@@ -790,9 +822,8 @@ class OverwatchCameraSwitch(OWSwitch):
 `,
   "binary_sensor.py": `"""Binary sensor platform for HA Overwatch.
 
-Triggered states are pushed by the server-side HA listener via
-POST supervisor/core/api/states/binary_sensor.overwatch_zone_*
-Entity IDs are set explicitly for predictable naming.
+Reads triggered state from TriggeredCoordinator which polls /ow/triggered every 2s.
+State is computed server-side from actual HA sensor state_changed events.
 """
 from __future__ import annotations
 import logging
@@ -803,7 +834,7 @@ from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import DOMAIN
-from . import OverwatchCoordinator
+from . import TriggeredCoordinator, ZoneCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -812,38 +843,47 @@ async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    coordinator: OverwatchCoordinator = hass.data[DOMAIN][entry.entry_id]
-    data = coordinator.data or {}
-    entities = [OverwatchMasterTriggered(coordinator)]
-    for g in data.get("groups", []):
-        entities.append(OverwatchGroupTriggered(coordinator, g))
-    for z in data.get("zones", []):
-        entities.append(OverwatchZoneTriggered(coordinator, z))
+    data               = hass.data[DOMAIN][entry.entry_id]
+    zone_coordinator   = data["zone_coordinator"]
+    trig_coordinator   = data["triggered_coordinator"]
+    zones_data         = zone_coordinator.data or {}
+
+    entities = [OverwatchMasterTriggered(trig_coordinator, zone_coordinator)]
+    for g in zones_data.get("groups", []):
+        entities.append(OverwatchGroupTriggered(trig_coordinator, g))
+    for z in zones_data.get("zones", []):
+        entities.append(OverwatchZoneTriggered(trig_coordinator, z))
+
     _LOGGER.info("Overwatch: registering %d binary sensor entities", len(entities))
     async_add_entities(entities, update_before_add=False)
 
 
-def _dev(coordinator: OverwatchCoordinator) -> DeviceInfo:
+def _dev(url: str) -> DeviceInfo:
     return DeviceInfo(
         identifiers={(DOMAIN, "overwatch")},
         name="HA Overwatch",
         manufacturer="HA Overwatch",
         model="Floor Plan Dashboard",
-        configuration_url=coordinator.url,
+        configuration_url=url,
     )
 
 
 class OWSensor(CoordinatorEntity, BinarySensorEntity):
     _attr_device_class = BinarySensorDeviceClass.MOTION
-    _attr_should_poll = False
+    _attr_should_poll  = False
 
-    def __init__(self, coordinator, entity_id: str, unique_id: str, name: str):
+    def __init__(self, coordinator: TriggeredCoordinator, entity_id: str,
+                 unique_id: str, name: str, url: str = ""):
         super().__init__(coordinator)
-        self.entity_id = entity_id
-        self._attr_unique_id = unique_id
-        self._attr_name = name
-        self._attr_icon = "mdi:shield-alert"
-        self._attr_device_info = _dev(coordinator)
+        self.entity_id        = entity_id
+        self._attr_unique_id  = unique_id
+        self._attr_name       = name
+        self._attr_icon       = "mdi:shield-alert"
+        self._attr_device_info = _dev(url)
+
+    @property
+    def triggered_data(self) -> dict:
+        return self.coordinator.data or {}
 
     @property
     def is_on(self) -> bool:
@@ -851,34 +891,52 @@ class OWSensor(CoordinatorEntity, BinarySensorEntity):
 
 
 class OverwatchMasterTriggered(OWSensor):
-    def __init__(self, c):
-        super().__init__(c,
+    def __init__(self, trig: TriggeredCoordinator, zone_coord: ZoneCoordinator):
+        super().__init__(trig,
             entity_id="binary_sensor.overwatch_zone_master_triggered",
             unique_id="overwatch_zone_master_triggered",
-            name="Overwatch Zone Master Triggered")
+            name="Overwatch Zone Master Triggered",
+            url=trig.url)
+        self._zone_coord = zone_coord
+
+    @property
+    def is_on(self) -> bool:
+        return any(v for v in self.triggered_data.values())
 
 
 class OverwatchGroupTriggered(OWSensor):
-    def __init__(self, c, g):
+    def __init__(self, trig: TriggeredCoordinator, g: dict):
         gid = g["id"]
-        super().__init__(c,
+        super().__init__(trig,
             entity_id=f"binary_sensor.overwatch_zone_group_{gid}_triggered",
             unique_id=f"overwatch_zone_group_{gid}_triggered",
-            name=f"Zone Group Triggered: {g.get('name', gid)}")
+            name=f"Zone Group Triggered: {g.get('name', gid)}",
+            url=trig.url)
+        self._zone_ids = g.get("zone_ids", [])
+
+    @property
+    def is_on(self) -> bool:
+        return any(self.triggered_data.get(zid, False) for zid in self._zone_ids)
 
 
 class OverwatchZoneTriggered(OWSensor):
-    def __init__(self, c, z):
+    def __init__(self, trig: TriggeredCoordinator, z: dict):
         zid = z["id"]
-        super().__init__(c,
+        super().__init__(trig,
             entity_id=f"binary_sensor.overwatch_zone_{zid}_triggered",
             unique_id=f"overwatch_zone_{zid}_triggered",
-            name=f"Zone Triggered: {z.get('name', zid)}")
+            name=f"Zone Triggered: {z.get('name', zid)}",
+            url=trig.url)
+        self._zid = zid
+
+    @property
+    def is_on(self) -> bool:
+        return bool(self.triggered_data.get(self._zid, False))
 `,
   "manifest.json": `{
   "domain": "ha_overwatch",
   "name": "HA Overwatch",
-  "version": "1.13.0",
+  "version": "1.14.0",
   "documentation": "https://github.com/DM-AU/ha-overwatch",
   "issue_tracker": "https://github.com/DM-AU/ha-overwatch/issues",
   "codeowners": [],
@@ -1094,6 +1152,9 @@ function startHAListener() {
         triggeredZones[`${zone.id}::${sid}`] === true);
       if (zoneNowTriggered !== wasTriggered) {
         triggeredZones[zone.id] = zoneNowTriggered;
+        // Update global state so /ow/triggered endpoint reflects current state
+        const slug = nameSlug(zone.name) || zone.id;
+        globalTriggeredZones[slug] = zoneNowTriggered;
         pushBinarySensor(zone, zoneNowTriggered);
       }
     });
