@@ -333,16 +333,27 @@ const server = http.createServer(async (req, res) => {
       const groups = loadGroups();
       const cameraSet = new Set();
       zones.forEach(z => (z.cameras || []).forEach(c => cameraSet.add(c)));
+
+      // Strip file-naming prefixes so entity IDs don't double up.
+      // Zone files use IDs like "zone_1775974222147", group files use "grp_..."
+      // The component generates "switch.overwatch_zone_{id}" so we pass the
+      // bare timestamp portion to avoid "switch.overwatch_zone_zone_1775974222147"
+      const zoneSlug  = id => id.replace(/^zone_/, '');
+      const groupSlug = id => id.replace(/^grp_/, '');
+
       json(res, {
-        zones:  zones.map(z => ({ id: z.id, name: z.name || z.id })),
-        groups: groups.map(g => ({ id: g.id, name: g.name || g.id, zone_ids: g.zone_ids || [] })),
+        zones:  zones.map(z => ({ id: zoneSlug(z.id), name: z.name || z.id, raw_id: z.id })),
+        groups: groups.map(g => ({
+          id: groupSlug(g.id), name: g.name || g.id, raw_id: g.id,
+          zone_ids: (g.zone_ids || []).map(zoneSlug),
+        })),
         camera_groups: groups
           .filter(g => (g.zone_ids || []).some(zid =>
             zones.find(z => z.id === zid && (z.cameras || []).length > 0)))
-          .map(g => ({ id: g.id, name: g.name || g.id })),
+          .map(g => ({ id: groupSlug(g.id), name: g.name || g.id })),
         camera_zones: zones
           .filter(z => (z.cameras || []).length > 0)
-          .map(z => ({ id: z.id, name: z.name || z.id })),
+          .map(z => ({ id: zoneSlug(z.id), name: z.name || z.id })),
         cameras: [...cameraSet].map(id => ({
           id, name: id.replace(/^camera\./, '').replace(/_/g, ' '),
         })),

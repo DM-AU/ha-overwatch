@@ -16,6 +16,10 @@ const CAM_MODE_KEY          = 'ow_cam_source';    // 'server' | 'device' (defaul
 
 // Is this browser using server state (HA entities) or per-device localStorage?
 // Camera toggle source: 'server' = HA switch entities, 'device' = localStorage
+// Zone/group ID slug helpers (strips file-naming prefixes)
+function zoneIdSlug(id) { return (id || '').replace(/^zone_/, ''); }
+function groupIdSlug(id) { return (id || '').replace(/^grp_/, ''); }
+
 function camUseServerState() {
   return localStorage.getItem(CAM_MODE_KEY) !== 'device';
 }
@@ -36,7 +40,7 @@ function camIsEnabled(type, key) {
     return st ? st.state !== 'off' : true;
   }
   if (type === 'zone') {
-    const st = haStates[`switch.overwatch_camera_zone_${key}`];
+    const st = haStates[`switch.overwatch_camera_zone_${zoneIdSlug(key)}`];
     return st ? st.state !== 'off' : true;
   }
   // global — check camera_all switch
@@ -57,9 +61,9 @@ async function camSetEnabled(type, key, state) {
   const entityMap = {
     'all':          'switch.overwatch_camera_all',
     'camera_all':   'switch.overwatch_camera_all',
-    'camera_group': `switch.overwatch_camera_group_${key}`,
-    'camera_zone':  `switch.overwatch_camera_zone_${key}`,
-    'zone':         `switch.overwatch_camera_zone_${key}`,
+    'camera_group': `switch.overwatch_camera_group_${groupIdSlug(key)}`,
+    'camera_zone':  `switch.overwatch_camera_zone_${zoneIdSlug(key)}`,
+    'zone':         `switch.overwatch_camera_zone_${zoneIdSlug(key)}`,
     'camera':       `switch.overwatch_camera_${key.replace(/\./g,'_').replace(/-/g,'_')}`,
   };
   const entityId = entityMap[type];
