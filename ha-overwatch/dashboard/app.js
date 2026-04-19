@@ -729,10 +729,10 @@ function setGroupArmed(groupId, armed) {
   // Toggle each member zone switch in HA
   (group.zone_ids || []).forEach(zoneId => {
     const z = zones.find(z => z.id === zoneId);
-    if (z) owCallSwitch(`switch.overwatch_zone_${zoneIdSlug(zoneId)}`, armed);
+    if (z) owCallSwitch(`switch.overwatch_zone_${zoneSlug(z)}`, armed);
   });
   // Toggle the group switch in HA
-  owCallSwitch(`switch.overwatch_zone_group_${groupIdSlug(groupId)}`, armed);
+  owCallSwitch(`switch.overwatch_zone_group_${groupSlug(group)}`, armed);
   renderZonesEditor();
 }
 
@@ -838,10 +838,10 @@ function setMasterEnabled(val) {
   owCallSwitch("switch.overwatch_zone_master", val);
   // Also toggle all group and zone switches to match master
   for (const g of groups) {
-    owCallSwitch(`switch.overwatch_zone_group_${groupIdSlug(g.id)}`, val);
+    owCallSwitch(`switch.overwatch_zone_group_${groupSlug(g)}`, val);
   }
   for (const z of zones) {
-    owCallSwitch(`switch.overwatch_zone_${zoneIdSlug(z.id)}`, val);
+    owCallSwitch(`switch.overwatch_zone_${zoneSlug(z)}`, val);
   }
   updateStatusDropdownInPlace();
   renderZones();
@@ -852,7 +852,7 @@ function setZoneEnabled(zoneId, val) {
   const zone = zones.find(z => z.id === zoneId);
   if (!zone) return;
   // Call HA switch service — state flows back via WS haStates
-  owCallSwitch(`switch.overwatch_zone_${zoneIdSlug(zoneId)}`, !!val);
+  owCallSwitch(`switch.overwatch_zone_${zoneSlug(zones.find(z=>z.id===zoneId)||{name:"",id:zoneId})}`, !!val);
   logEvent(
     "info",
     val ? `Zone enabled: ${zone.name || zone.id}` : `Zone disabled: ${zone.name || zone.id}`,
@@ -880,11 +880,14 @@ function setZoneHidden(zoneId, hidden) {
 /* ─── ENTITY SYNC (dashboard → HA via service call) ──────── */
 // Toggle a zone/group/master switch entity in HA directly.
 // The dashboard reads the state back from haStates (WS subscription).
-// Strip file-naming prefixes to get clean HA entity ID slugs
-// Zone YAML IDs are like "zone_1775974222147", group IDs like "grp_1776224940752"
-// HA entities are "switch.overwatch_zone_1775974222147" (no double prefix)
-function zoneIdSlug(id) { return (id || '').replace(/^zone_/, ''); }
-function groupIdSlug(id) { return (id || '').replace(/^grp_/, ''); }
+// Convert friendly name to HA entity ID slug
+// "Asphalt Right" -> "asphalt_right" -> switch.overwatch_zone_asphalt_right
+// Must match the nameSlug() function in server.js /ow/zones endpoint
+function nameSlug(name) {
+  return (name || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+}
+function zoneSlug(zone)  { return nameSlug(zone.name)  || zone.id; }
+function groupSlug(group) { return nameSlug(group.name) || group.id; }
 
 function owCallSwitch(entityId, on) {
   if (!haConnected || !haSocket) {
@@ -901,7 +904,7 @@ function owCallSwitch(entityId, on) {
 }
 
 function zoneEntityId(zone) {
-  return `switch.overwatch_zone_${zoneIdSlug(zone.id)}`;
+  return `switch.overwatch_zone_${zoneSlug(zone)}`;
 }
 
 function masterEntityId() {
@@ -931,7 +934,7 @@ const zonePrevState = {};
 function getZoneState(zone) {
   // Read enabled state from HA switch entity — HA is the source of truth.
   // Falls back to zone.enabled (YAML) if the HA entity doesn't exist yet.
-  const switchState = haStates[`switch.overwatch_zone_${zoneIdSlug(zone.id)}`];
+  const switchState = haStates[`switch.overwatch_zone_${zoneSlug(zone)}`];
   const enabled = switchState ? switchState.state !== "off" : zone.enabled !== false;
   const masterSwitch = haStates["switch.overwatch_zone_master"];
   const masterOn = masterSwitch ? masterSwitch.state !== "off" : masterEnabled;

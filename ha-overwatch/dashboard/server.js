@@ -123,12 +123,14 @@ function loadZones() {
   try {
     const idxPath = path.join(DATA_DIR, "config", "zones", "index.json");
     const index   = JSON.parse(fs.readFileSync(idxPath, "utf8"));
-    return index.map(filename => {
-      try {
-        const text = fs.readFileSync(path.join(DATA_DIR, "config", "zones", filename), "utf8");
-        return parseZoneYaml(text);
-      } catch { return null; }
-    }).filter(z => z && z.id);
+    return index
+      .filter(f => !f.startsWith("group_") && f.endsWith(".yaml"))
+      .map(filename => {
+        try {
+          const text = fs.readFileSync(path.join(DATA_DIR, "config", "zones", filename), "utf8");
+          return parseZoneYaml(text);
+        } catch { return null; }
+      }).filter(z => z && z.id && !z.id.startsWith("grp_"));
   } catch { return []; }
 }
 
@@ -187,6 +189,13 @@ function parseGroupYaml(text) {
 }
 
 // Update the enabled: field in a zone's YAML file so the dashboard sees the change
+/* ─── NAME SLUG ────────────────────────────────────────────── */
+// "Asphalt Right" -> "asphalt_right" — used for predictable entity IDs
+// Must match nameSlug() in /ow/zones endpoint and app.js
+function nameSlug(name) {
+  return (name || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+}
+
 /* ─── REQUEST HANDLER ─────────────────────────────────────── */
 const server = http.createServer(async (req, res) => {
   // CORS preflight
@@ -334,28 +343,37 @@ const server = http.createServer(async (req, res) => {
       const cameraSet = new Set();
       zones.forEach(z => (z.cameras || []).forEach(c => cameraSet.add(c)));
 
-      // Strip file-naming prefixes so entity IDs don't double up.
-      // Zone files use IDs like "zone_1775974222147", group files use "grp_..."
-      // The component generates "switch.overwatch_zone_{id}" so we pass the
-      // bare timestamp portion to avoid "switch.overwatch_zone_zone_1775974222147"
-      const zoneSlug  = id => id.replace(/^zone_/, '');
-      const groupSlug = id => id.replace(/^grp_/, '');
+      // Use name-based slugs for friendly entity IDs:
+      // "Asphalt Right" -> "asphalt_right" -> switch.overwatch_zone_asphalt_right
+      const nameSlug = name => (name || '').toLowerCase()
+        .replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
 
       json(res, {
-        zones:  zones.map(z => ({ id: zoneSlug(z.id), name: z.name || z.id, raw_id: z.id })),
+        zones: zones.map(z => ({
+          id:     nameSlug(z.name) || z.id,
+          name:   z.name || z.id,
+          raw_id: z.id,
+        })),
         groups: groups.map(g => ({
-          id: groupSlug(g.id), name: g.name || g.id, raw_id: g.id,
-          zone_ids: (g.zone_ids || []).map(zoneSlug),
+          id:       nameSlug(g.name) || g.id,
+          name:     g.name || g.id,
+          raw_id:   g.id,
+          zone_ids: (g.zone_ids || []).map(zid => {
+            const z = zones.find(z => z.id === zid);
+            return z ? (nameSlug(z.name) || zid) : zid;
+          }),
         })),
         camera_groups: groups
           .filter(g => (g.zone_ids || []).some(zid =>
             zones.find(z => z.id === zid && (z.cameras || []).length > 0)))
-          .map(g => ({ id: groupSlug(g.id), name: g.name || g.id })),
+          .map(g => ({ id: nameSlug(g.name) || g.id, name: g.name || g.id })),
         camera_zones: zones
           .filter(z => (z.cameras || []).length > 0)
-          .map(z => ({ id: zoneSlug(z.id), name: z.name || z.id })),
-        cameras: [...cameraSet].map(id => ({
-          id, name: id.replace(/^camera\./, '').replace(/_/g, ' '),
+          .map(z => ({ id: nameSlug(z.name) || z.id, name: z.name || z.id })),
+        cameras: [...cameraSet].map(camId => ({
+          id:   camId.replace(/^camera\./, '').replace(/[^a-z0-9]+/g, '_'),
+          name: camId.replace(/^camera\./, '').replace(/_/g, ' '),
+          raw_id: camId,
         })),
       });
     } catch (e) { err(res, e.message, 500); }
@@ -842,7 +860,7 @@ class OverwatchZoneTriggered(OWSensor):
   "manifest.json": `{
   "domain": "ha_overwatch",
   "name": "HA Overwatch",
-  "version": "1.09.0",
+  "version": "1.10.0",
   "documentation": "https://github.com/DM-AU/ha-overwatch",
   "issue_tracker": "https://github.com/DM-AU/ha-overwatch/issues",
   "codeowners": [],
@@ -1053,7 +1071,8 @@ function startHAListener() {
 
   function pushBinarySensor(zone, isTriggered) {
     if (!process.env.SUPERVISOR_TOKEN) return;
-    const entityId = `binary_sensor.overwatch_zone_${zone.id}_triggered`;
+    const slug     = nameSlug(zone.name) || zone.id;
+    const entityId = `binary_sensor.overwatch_zone_${slug}_triggered`;
     const name     = `Zone Triggered: ${zone.name || zone.id}`;
     const body = JSON.stringify({
       state: isTriggered ? "on" : "off",
