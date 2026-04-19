@@ -209,6 +209,13 @@ function saveEntityState(state) {
 // Runtime state — triggered zones populated by server-side HA WS listener
 const serverState = { triggeredZones: {} };
 
+// Long-poll listeners waiting for any state change
+const stateChangeListeners = [];
+function notifyStateChange() {
+  const ls = stateChangeListeners.splice(0);
+  ls.forEach(fn => { try { fn(); } catch {} });
+}
+
 function buildEntityPayload() {
   const state  = loadEntityState();
   const zones  = loadZones();
@@ -589,6 +596,33 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  /* ── /ow/entity-states/wait — long-poll: returns when state changes ── */
+  // Coordinator calls this to get near-instant updates without hammering the server.
+  // Holds for up to 4s, returns immediately if state changes during that time.
+  if (pathname === "/ow/entity-states/wait" && req.method === "GET") {
+    const lastKnown = req.headers["x-last-state"] || "";
+    const current   = JSON.stringify(buildEntityPayload());
+    if (current !== lastKnown) {
+      // State already changed — return immediately
+      json(res, JSON.parse(current));
+      return;
+    }
+    // State unchanged — hold until change or timeout
+    let resolved = false;
+    const timeout = setTimeout(() => {
+      if (!resolved) { resolved = true; json(res, buildEntityPayload()); }
+    }, 4000);
+    stateChangeListeners.push(() => {
+      if (!resolved) {
+        resolved = true;
+        clearTimeout(timeout);
+        try { json(res, buildEntityPayload()); } catch {}
+      }
+    });
+    req.on("close", () => { resolved = true; clearTimeout(timeout); });
+    return;
+  }
+
   /* ── /ow/entity-set — browser or HA component sets state ─── */
   if (pathname === "/ow/entity-set" && req.method === "POST") {
     try {
@@ -645,7 +679,10 @@ const server = http.createServer(async (req, res) => {
       // Build updated payload
       const payload = buildEntityPayload();
 
-      // Push to HA coordinator via webhook (instant) and via HA REST for binary sensors
+      // Notify long-poll listeners immediately (dashboard→HA path)
+      notifyStateChange();
+
+      // Push to HA coordinator via webhook and binary sensor REST
       pushToHAWebhook(payload);
       pushStateToHA(payload).catch(() => {});
 
@@ -779,6 +816,7 @@ server.listen(PORT, "0.0.0.0", () => {
 const COMPONENT_FILES = {
   "__init__.py": `"""HA Overwatch integration."""
 from __future__ import annotations
+import asyncio
 import logging
 from datetime import timedelta
 import aiohttp
@@ -804,10 +842,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except Exception as err:
         _LOGGER.error("Failed to connect to Overwatch add-on: %s", err)
         return False
-
-    _LOGGER.debug("Overwatch data on setup: %s", coordinator.data)
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    # Start long-poll listener in background
+    entry.async_create_background_task(
+        hass, coordinator.async_long_poll_loop(), "overwatch_long_poll"
+    )
     return True
 
 
@@ -820,44 +860,83 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 class OverwatchCoordinator(DataUpdateCoordinator):
     def __init__(self, hass: HomeAssistant, url: str) -> None:
-        super().__init__(hass, _LOGGER, name="HA Overwatch",
-            update_interval=timedelta(seconds=5))
+        super().__init__(
+            hass, _LOGGER, name="HA Overwatch",
+            update_interval=timedelta(seconds=30),
+        )
         self.url = url
+        self._last_state_json: str = ""
+        self._long_poll_running = True
 
     async def _async_update_data(self) -> dict:
+        """Background 30s fallback poll."""
         try:
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(force_close=True),
+            ) as session:
                 async with session.get(
                     f"{self.url}/ow/entity-states",
                     timeout=aiohttp.ClientTimeout(total=10),
                 ) as resp:
                     if resp.status != 200:
                         raise UpdateFailed(f"Add-on returned {resp.status}")
-                    data = await resp.json(content_type=None)
-                    _LOGGER.debug("Fetched entity states: zones=%d groups=%d cameras=%d",
-                        len(data.get("zones", [])),
-                        len(data.get("groups", [])),
-                        len(data.get("cameras", [])))
-                    return data
+                    return await resp.json(content_type=None)
         except aiohttp.ClientError as err:
             raise UpdateFailed(f"Cannot reach Overwatch add-on: {err}") from err
 
-    async def async_set_entity(self, entity_type: str, entity_key: str, state: bool) -> None:
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{self.url}/ow/entity-set",
-                    json={"type": entity_type, "key": entity_key, "state": state},
-                    timeout=aiohttp.ClientTimeout(total=5),
-                ) as resp:
-                    if resp.status == 200:
-                        data = await resp.json(content_type=None)
-                        if data.get("state"):
-                            self.async_set_updated_data(data["state"])
-                    else:
-                        _LOGGER.warning("Overwatch entity-set returned %s", resp.status)
-        except aiohttp.ClientError as err:
-            _LOGGER.error("Cannot push state to Overwatch: %s", err)
+    async def async_long_poll_loop(self) -> None:
+        """Long-poll the add-on for near-instant state updates (dashboard -> HA)."""
+        import json as _json
+        while self._long_poll_running:
+            try:
+                async with aiohttp.ClientSession(
+                    connector=aiohttp.TCPConnector(force_close=True),
+                ) as session:
+                    headers = {}
+                    if self._last_state_json:
+                        headers["x-last-state"] = self._last_state_json
+                    async with session.get(
+                        f"{self.url}/ow/entity-states/wait",
+                        headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=10),
+                    ) as resp:
+                        if resp.status == 200:
+                            data = await resp.json(content_type=None)
+                            new_json = _json.dumps(data, sort_keys=True)
+                            if new_json != self._last_state_json:
+                                self._last_state_json = new_json
+                                self.async_set_updated_data(data)
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                # Add-on unreachable — back off briefly before retrying
+                await asyncio.sleep(2)
+
+    async def async_set_entity(
+        self, entity_type: str, entity_key: str, state: bool
+    ) -> None:
+        """Push HA toggle to add-on instantly."""
+        for attempt in range(3):
+            try:
+                async with aiohttp.ClientSession(
+                    connector=aiohttp.TCPConnector(force_close=True),
+                ) as session:
+                    async with session.post(
+                        f"{self.url}/ow/entity-set",
+                        json={"type": entity_type, "key": entity_key, "state": state},
+                        timeout=aiohttp.ClientTimeout(total=5),
+                    ) as resp:
+                        if resp.status == 200:
+                            data = await resp.json(content_type=None)
+                            if data.get("state"):
+                                self.async_set_updated_data(data["state"])
+                            return
+                        _LOGGER.warning("entity-set returned %s", resp.status)
+            except aiohttp.ClientError as err:
+                if attempt < 2:
+                    await asyncio.sleep(0.1)
+                else:
+                    _LOGGER.error("Cannot push state to Overwatch: %s", err)
 `,
   "const.py": `"""Constants for HA Overwatch integration."""
 DOMAIN = "ha_overwatch"
@@ -1383,6 +1462,8 @@ function startHAListener() {
 
     if (changed) {
       const payload = buildEntityPayload();
+      notifyStateChange();
+      pushToHAWebhook(payload);
       pushStateToHA(payload).catch(() => {});
     }
   }
