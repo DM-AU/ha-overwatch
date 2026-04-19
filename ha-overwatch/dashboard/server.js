@@ -1245,9 +1245,9 @@ function openWSProxy(socket, haToken) {
 
   // Connect to HA Core WebSocket — use internal hostname 'homeassistant' on port 8123
   const haReq = http.request({
-    hostname: "homeassistant",
-    port:     8123,
-    path:     "/api/websocket",
+    hostname: "supervisor",
+    port:     80,
+    path:     "/core/api/websocket",
     headers: {
       "Host":                  "homeassistant",
       "Upgrade":               "websocket",

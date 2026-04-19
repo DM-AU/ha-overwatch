@@ -62,7 +62,7 @@ async function camSetEnabled(type, key, state) {
     else localStorage.setItem(CAM_GLOBAL_KEY, state ? 'true' : 'false');
     return;
   }
-  // Server mode — call HA switch service via existing WS connection
+  // Server mode — call HA switch service via app.js sendHA (shared id counter, no collision)
   if (!window.OW) return;
   const entityMap = {
     'all':          'switch.overwatch_camera_all',
@@ -73,15 +73,14 @@ async function camSetEnabled(type, key, state) {
     'camera':       `switch.overwatch_camera_${key.replace(/^camera\./, '').replace(/[^a-z0-9]+/g, '_')}`,
   };
   const entityId = entityMap[type];
-  if (entityId && window.OW.haStates !== undefined) {
-    // Use the same owCallSwitch pattern from app.js
-    const haSocket = window.OW.getHASocket?.();
-    if (haSocket && haSocket.readyState === WebSocket.OPEN) {
-      haSocket.send(JSON.stringify({
-        id: Date.now(), type: 'call_service',
+  if (entityId) {
+    // Use window.OW.sendHA — shares the haMsgId counter with app.js to avoid "id must increase" errors
+    if (window.OW.sendHA) {
+      window.OW.sendHA({
+        type: 'call_service',
         domain: 'switch', service: state ? 'turn_on' : 'turn_off',
         service_data: { entity_id: entityId },
-      }));
+      });
     }
   }
 }
@@ -743,8 +742,17 @@ function renderCameraStatusBar() {
       const group = (groups || []).find(g => g.id === gid);
       const memberZones = (group?.zone_ids || []).map(id => zones.find(z => z.id === id))
         .filter(z => z && (z.cameras || []).length > 0);
+      // Always call the group-level switch first
       await camSetEnabled('camera_group', gid, on);
-      if (!camUseServerState()) {
+      if (camUseServerState()) {
+        // Server mode: cascade group → member zones → cameras directly.
+        // HA has no built-in cascade for camera group switches, so we must call each entity.
+        memberZones.forEach(zone => {
+          camSetEnabled('zone', zone.id, on);
+          (zone.cameras || []).forEach(camId => camSetEnabled('camera', camId, on));
+        });
+        // Re-render will happen when HA WS state_changed events come back for each entity
+      } else {
         memberZones.forEach(zone => {
           localStorage.setItem(CAM_ZONE_PREFIX + zone.id, on ? 'true' : 'false');
           (zone.cameras || []).forEach(id => localStorage.setItem(CAM_TOGGLE_PREFIX + id, on ? 'true' : 'false'));

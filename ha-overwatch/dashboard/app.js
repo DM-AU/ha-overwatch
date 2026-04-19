@@ -2680,7 +2680,7 @@ function connectHA() {
           for (const z of zones)  owCallSwitch(`switch.overwatch_zone_${zoneSlug(z)}`, on);
         }
 
-        // When a group switch changes in HA, cascade to member zones
+        // When a ZONE group switch changes in HA, cascade to member zones
         if (data.entity_id.startsWith("switch.overwatch_zone_group_")) {
           const groupSwitchId = data.entity_id; // e.g. switch.overwatch_zone_group_house
           const on = (data.new_state.state || "").toLowerCase() !== "off";
@@ -2695,10 +2695,34 @@ function connectHA() {
           }
         }
 
+        // When a CAMERA group switch changes in HA, cascade to member zones and cameras
+        if (data.entity_id.startsWith("switch.overwatch_camera_group_")) {
+          const on = (data.new_state.state || "").toLowerCase() !== "off";
+          const matchGroup = groups.find(g =>
+            `switch.overwatch_camera_group_${groupSlug(g)}` === data.entity_id);
+          if (matchGroup) {
+            (matchGroup.zone_ids || []).forEach(zid => {
+              const z = zones.find(z => z.id === zid);
+              if (z && (z.cameras || []).length > 0) {
+                owCallSwitch(`switch.overwatch_camera_zone_${nameSlug(z.name) || z.id}`, on);
+                (z.cameras || []).forEach(camId => {
+                  const safe = camId.replace(/^camera\./, '').replace(/[^a-z0-9]+/g, '_');
+                  owCallSwitch(`switch.overwatch_camera_${safe}`, on);
+                });
+              }
+            });
+          }
+        }
+
         // Re-render when any overwatch switch changes
         if (data.entity_id.startsWith("switch.overwatch_")) {
           updateStatusDropdownInPlace();
           renderZones();
+          // Re-render camera status bar when a camera switch changes
+          if (window.renderCameraStatusBar &&
+              data.entity_id.startsWith("switch.overwatch_camera_")) {
+            window.renderCameraStatusBar();
+          }
         }
 
         // Always update status bar for the configured alarm entity or any alarm_control_panel
@@ -4235,6 +4259,9 @@ async function init() {
     renderSettingsPanel,
     renderLogPanel,
     getHASocket: () => haSocket,
+    // sendHA shared with cameras.js — MUST use this, not raw haSocket.send,
+    // to avoid "Identifier values have to increase" errors (shared haMsgId counter)
+    sendHA,
   };
   window.renderSettingsPanel      = renderSettingsPanel;
   window.renderLogPanel           = renderLogPanel;
