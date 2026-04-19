@@ -2724,6 +2724,12 @@ function connectHA() {
     if (haEverConnected) {
       logEvent("warn", `HA WebSocket disconnected (code ${ev.code})${reason}. Retrying in ${Math.round(haReconnectDelay/1000)}s…`, "ha");
     }
+    // Code 1006 = abnormal closure (HA restarting/not ready).
+    // Use a longer delay to avoid hammering HA with failed auth attempts
+    // which generate "Login attempt failed" notifications.
+    if (ev.code === 1006 && haReconnectDelay < 5000) {
+      haReconnectDelay = 5000;
+    }
     scheduleReconnect();
   };
 

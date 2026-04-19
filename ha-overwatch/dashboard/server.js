@@ -597,6 +597,7 @@ class OverwatchConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 Switch entities store their state in HA directly (restored across restarts).
 async_turn_on/off just writes the state — HA is the single source of truth.
 The dashboard reads switch states from haStates via the existing WS proxy.
+Entity IDs are set explicitly to ensure predictable naming.
 """
 from __future__ import annotations
 import logging
@@ -648,13 +649,18 @@ def _dev(coordinator: OverwatchCoordinator) -> DeviceInfo:
 
 
 class OWSwitch(CoordinatorEntity, SwitchEntity, RestoreEntity):
-    """Base switch — state lives in HA, restored across restarts."""
-
+    """Base switch — state lives in HA, restored across restarts.
+    
+    entity_id is set explicitly so it is always predictable regardless
+    of device name or HA naming conventions.
+    """
     _attr_should_poll = False
 
-    def __init__(self, coordinator, uid, name, icon="mdi:shield"):
+    def __init__(self, coordinator, entity_id: str, unique_id: str, name: str, icon: str = "mdi:shield"):
         super().__init__(coordinator)
-        self._attr_unique_id = uid
+        # Set entity_id explicitly — this overrides HA's auto-generation
+        self.entity_id = entity_id
+        self._attr_unique_id = unique_id
         self._attr_name = name
         self._attr_icon = icon
         self._attr_device_info = _dev(coordinator)
@@ -680,40 +686,77 @@ class OWSwitch(CoordinatorEntity, SwitchEntity, RestoreEntity):
 
 class OverwatchMasterSwitch(OWSwitch):
     def __init__(self, c):
-        super().__init__(c, "overwatch_zone_master", "Overwatch Zone Master", "mdi:shield-home")
+        super().__init__(c,
+            entity_id="switch.overwatch_zone_master",
+            unique_id="overwatch_zone_master",
+            name="Overwatch Zone Master",
+            icon="mdi:shield-home")
+
 
 class OverwatchGroupSwitch(OWSwitch):
     def __init__(self, c, g):
-        super().__init__(c, f"overwatch_zone_group_{g['id']}", f"Zone Group: {g.get('name', g['id'])}", "mdi:layers")
+        gid = g["id"]
+        super().__init__(c,
+            entity_id=f"switch.overwatch_zone_group_{gid}",
+            unique_id=f"overwatch_zone_group_{gid}",
+            name=f"Zone Group: {g.get('name', gid)}",
+            icon="mdi:layers")
+
 
 class OverwatchZoneSwitch(OWSwitch):
     def __init__(self, c, z):
-        super().__init__(c, f"overwatch_zone_{z['id']}", f"Zone: {z.get('name', z['id'])}", "mdi:map-marker-radius")
+        zid = z["id"]
+        super().__init__(c,
+            entity_id=f"switch.overwatch_zone_{zid}",
+            unique_id=f"overwatch_zone_{zid}",
+            name=f"Zone: {z.get('name', zid)}",
+            icon="mdi:map-marker-radius")
+
 
 class OverwatchCameraAllSwitch(OWSwitch):
     def __init__(self, c):
-        super().__init__(c, "overwatch_camera_all", "Camera All", "mdi:cctv")
+        super().__init__(c,
+            entity_id="switch.overwatch_camera_all",
+            unique_id="overwatch_camera_all",
+            name="Camera All",
+            icon="mdi:cctv")
+
 
 class OverwatchCameraGroupSwitch(OWSwitch):
     def __init__(self, c, g):
-        super().__init__(c, f"overwatch_camera_group_{g['id']}", f"Camera Group: {g.get('name', g['id'])}", "mdi:cctv")
+        gid = g["id"]
+        super().__init__(c,
+            entity_id=f"switch.overwatch_camera_group_{gid}",
+            unique_id=f"overwatch_camera_group_{gid}",
+            name=f"Camera Group: {g.get('name', gid)}",
+            icon="mdi:cctv")
+
 
 class OverwatchCameraZoneSwitch(OWSwitch):
     def __init__(self, c, z):
-        super().__init__(c, f"overwatch_camera_zone_{z['id']}", f"Camera Zone: {z.get('name', z['id'])}", "mdi:cctv")
+        zid = z["id"]
+        super().__init__(c,
+            entity_id=f"switch.overwatch_camera_zone_{zid}",
+            unique_id=f"overwatch_camera_zone_{zid}",
+            name=f"Camera Zone: {z.get('name', zid)}",
+            icon="mdi:cctv")
+
 
 class OverwatchCameraSwitch(OWSwitch):
     def __init__(self, c, cam):
         cid = cam["id"]
         safe = cid.replace(".", "_").replace("-", "_")
-        super().__init__(c, f"overwatch_camera_{safe}", f"Camera: {cam.get('name', cid)}", "mdi:cctv")
+        super().__init__(c,
+            entity_id=f"switch.overwatch_camera_{safe}",
+            unique_id=f"overwatch_camera_{safe}",
+            name=f"Camera: {cam.get('name', cid)}",
+            icon="mdi:cctv")
 `,
   "binary_sensor.py": `"""Binary sensor platform for HA Overwatch.
 
-Triggered states are pushed directly by the server-side HA listener
-via POST /api/states/binary_sensor.overwatch_zone_*
-These entities are created here so HA knows about them,
-but their state is written externally by the server.
+Triggered states are pushed by the server-side HA listener via
+POST supervisor/core/api/states/binary_sensor.overwatch_zone_*
+Entity IDs are set explicitly for predictable naming.
 """
 from __future__ import annotations
 import logging
@@ -758,9 +801,10 @@ class OWSensor(CoordinatorEntity, BinarySensorEntity):
     _attr_device_class = BinarySensorDeviceClass.MOTION
     _attr_should_poll = False
 
-    def __init__(self, coordinator, uid, name):
+    def __init__(self, coordinator, entity_id: str, unique_id: str, name: str):
         super().__init__(coordinator)
-        self._attr_unique_id = uid
+        self.entity_id = entity_id
+        self._attr_unique_id = unique_id
         self._attr_name = name
         self._attr_icon = "mdi:shield-alert"
         self._attr_device_info = _dev(coordinator)
@@ -772,22 +816,33 @@ class OWSensor(CoordinatorEntity, BinarySensorEntity):
 
 class OverwatchMasterTriggered(OWSensor):
     def __init__(self, c):
-        super().__init__(c, "overwatch_zone_master_triggered", "Overwatch Zone Master Triggered")
+        super().__init__(c,
+            entity_id="binary_sensor.overwatch_zone_master_triggered",
+            unique_id="overwatch_zone_master_triggered",
+            name="Overwatch Zone Master Triggered")
+
 
 class OverwatchGroupTriggered(OWSensor):
     def __init__(self, c, g):
-        super().__init__(c, f"overwatch_zone_group_{g['id']}_triggered",
-                         f"Zone Group Triggered: {g.get('name', g['id'])}")
+        gid = g["id"]
+        super().__init__(c,
+            entity_id=f"binary_sensor.overwatch_zone_group_{gid}_triggered",
+            unique_id=f"overwatch_zone_group_{gid}_triggered",
+            name=f"Zone Group Triggered: {g.get('name', gid)}")
+
 
 class OverwatchZoneTriggered(OWSensor):
     def __init__(self, c, z):
-        super().__init__(c, f"overwatch_zone_{z['id']}_triggered",
-                         f"Zone Triggered: {z.get('name', z['id'])}")
+        zid = z["id"]
+        super().__init__(c,
+            entity_id=f"binary_sensor.overwatch_zone_{zid}_triggered",
+            unique_id=f"overwatch_zone_{zid}_triggered",
+            name=f"Zone Triggered: {z.get('name', zid)}")
 `,
   "manifest.json": `{
   "domain": "ha_overwatch",
   "name": "HA Overwatch",
-  "version": "1.08.0",
+  "version": "1.09.0",
   "documentation": "https://github.com/DM-AU/ha-overwatch",
   "issue_tracker": "https://github.com/DM-AU/ha-overwatch/issues",
   "codeowners": [],
