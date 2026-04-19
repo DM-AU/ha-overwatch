@@ -4053,6 +4053,32 @@ function bindZonesButton() {
 // This stub kept for clarity.
 function startLiveRefresh() { /* flash driven by interval in renderZones block */ }
 
+// Poll add-on for entity state changes (e.g. HA toggling a zone from automations)
+// Uses long-poll so updates arrive within ~100ms of HA changing state
+(async function watchEntityState() {
+  let currentVer = 0;
+  while (true) {
+    try {
+      const res = await fetch(apiPath("ow/entity-states/wait"), {
+        headers: { "x-state-version": String(currentVer) },
+        signal: AbortSignal.timeout ? AbortSignal.timeout(10000) : undefined,
+      });
+      if (res.ok) {
+        const serverVer = parseInt(res.headers.get("x-state-version") || "0", 10);
+        if (serverVer !== currentVer) {
+          currentVer = serverVer;
+          // Re-read zone files to pick up enabled state changes from HA
+          await loadZones();
+          renderZones();
+          updateStatusDropdownInPlace();
+        }
+      }
+    } catch { /* ignore — server offline or timeout */ }
+    // Small delay between polls to avoid hammering on errors
+    await new Promise(r => setTimeout(r, 200));
+  }
+})();
+
 /* ─── INIT ────────────────────────────────────────────────── */
 function initFloorplan() {
   const img     = document.getElementById("floorplanImage");

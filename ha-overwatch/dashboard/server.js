@@ -186,6 +186,32 @@ function parseGroupYaml(text) {
   return g;
 }
 
+// Update the enabled: field in a zone's YAML file so the dashboard sees the change
+function updateZoneEnabledInFile(zoneId, enabled) {
+  try {
+    const idxPath = path.join(DATA_DIR, "config", "zones", "index.json");
+    const index   = JSON.parse(fs.readFileSync(idxPath, "utf8"));
+    // Find the zone file for this id
+    for (const fname of index) {
+      const fpath = path.join(DATA_DIR, "config", "zones", fname);
+      let text;
+      try { text = fs.readFileSync(fpath, "utf8"); } catch { continue; }
+      if (!text.includes(`id: ${zoneId}`) && !text.includes(`id: "${zoneId}"`)) continue;
+      // Replace or insert the enabled: line
+      if (text.includes("\nenabled:")) {
+        text = text.replace(/\nenabled:\s*(true|false)/, `\nenabled: ${enabled}`);
+      } else {
+        // Insert after the id: line
+        text = text.replace(/(\nid:.*)/,  `$1\nenabled: ${enabled}`);
+      }
+      fs.writeFileSync(fpath, text, "utf8");
+      break;
+    }
+  } catch (e) {
+    console.error("[HA-Overwatch] updateZoneEnabledInFile error:", e.message);
+  }
+}
+
 /* ─── ENTITY STATE FILE ────────────────────────────────────── */
 const ENTITY_STATE_FILE = path.join(DATA_DIR, "config", "entity_state.json");
 
@@ -211,7 +237,9 @@ const serverState = { triggeredZones: {} };
 
 // Long-poll listeners waiting for any state change
 const stateChangeListeners = [];
+let stateVersion = 0;
 function notifyStateChange() {
+  stateVersion++;
   const ls = stateChangeListeners.splice(0);
   ls.forEach(fn => { try { fn(); } catch {} });
 }
@@ -597,26 +625,31 @@ const server = http.createServer(async (req, res) => {
   }
 
   /* ── /ow/entity-states/wait — long-poll: returns when state changes ── */
-  // Coordinator calls this to get near-instant updates without hammering the server.
-  // Holds for up to 4s, returns immediately if state changes during that time.
   if (pathname === "/ow/entity-states/wait" && req.method === "GET") {
-    const lastKnown = req.headers["x-last-state"] || "";
-    const current   = JSON.stringify(buildEntityPayload());
-    if (current !== lastKnown) {
-      // State already changed — return immediately
-      json(res, JSON.parse(current));
+    const clientVer = parseInt(req.headers["x-state-version"] || "0", 10);
+    if (clientVer < stateVersion) {
+      // Already have a newer version — return immediately
+      res.setHeader("x-state-version", String(stateVersion));
+      json(res, buildEntityPayload());
       return;
     }
-    // State unchanged — hold until change or timeout
+    // Same version — hold until change or 4s timeout
     let resolved = false;
     const timeout = setTimeout(() => {
-      if (!resolved) { resolved = true; json(res, buildEntityPayload()); }
+      if (!resolved) {
+        resolved = true;
+        res.setHeader("x-state-version", String(stateVersion));
+        json(res, buildEntityPayload());
+      }
     }, 4000);
     stateChangeListeners.push(() => {
       if (!resolved) {
         resolved = true;
         clearTimeout(timeout);
-        try { json(res, buildEntityPayload()); } catch {}
+        try {
+          res.setHeader("x-state-version", String(stateVersion));
+          json(res, buildEntityPayload());
+        } catch {}
       }
     });
     req.on("close", () => { resolved = true; clearTimeout(timeout); });
@@ -632,19 +665,24 @@ const server = http.createServer(async (req, res) => {
 
       if (type === "master") {
         es.master = !!state;
-        // Propagate to all groups and zones
         const zones  = loadZones();
         const groups = loadGroups();
         groups.forEach(g => { es.groups[g.id] = !!state; });
-        zones.forEach(z => { es.zones[z.id] = !!state; });
+        zones.forEach(z => {
+          es.zones[z.id] = !!state;
+          updateZoneEnabledInFile(z.id, !!state);
+        });
       } else if (type === "group") {
         es.groups[key] = !!state;
-        // Propagate to member zones
         const groups = loadGroups();
         const group  = groups.find(g => g.id === key);
-        if (group) group.zone_ids.forEach(zid => { es.zones[zid] = !!state; });
+        if (group) group.zone_ids.forEach(zid => {
+          es.zones[zid] = !!state;
+          updateZoneEnabledInFile(zid, !!state);
+        });
       } else if (type === "zone") {
         es.zones[key] = !!state;
+        updateZoneEnabledInFile(key, !!state);
       } else if (type === "camera_all") {
         const zones = loadZones();
         const cams  = new Set();
@@ -886,30 +924,26 @@ class OverwatchCoordinator(DataUpdateCoordinator):
 
     async def async_long_poll_loop(self) -> None:
         """Long-poll the add-on for near-instant state updates (dashboard -> HA)."""
-        import json as _json
-        while self._long_poll_running:
+        current_version = 0
+        while True:
             try:
                 async with aiohttp.ClientSession(
                     connector=aiohttp.TCPConnector(force_close=True),
                 ) as session:
-                    headers = {}
-                    if self._last_state_json:
-                        headers["x-last-state"] = self._last_state_json
                     async with session.get(
                         f"{self.url}/ow/entity-states/wait",
-                        headers=headers,
+                        headers={"x-state-version": str(current_version)},
                         timeout=aiohttp.ClientTimeout(total=10),
                     ) as resp:
                         if resp.status == 200:
-                            data = await resp.json(content_type=None)
-                            new_json = _json.dumps(data, sort_keys=True)
-                            if new_json != self._last_state_json:
-                                self._last_state_json = new_json
+                            server_ver = int(resp.headers.get("x-state-version", current_version + 1))
+                            if server_ver != current_version:
+                                current_version = server_ver
+                                data = await resp.json(content_type=None)
                                 self.async_set_updated_data(data)
             except asyncio.CancelledError:
                 break
             except Exception:
-                # Add-on unreachable — back off briefly before retrying
                 await asyncio.sleep(2)
 
     async def async_set_entity(
