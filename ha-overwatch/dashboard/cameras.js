@@ -509,7 +509,7 @@ function renderCameraStatusBar() {
             <path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
           <label class="zone-toggle-switch" style="flex-shrink:0;" onclick="event.stopPropagation()">
-            <input type="checkbox" class="cam-zone-toggle" data-zone-id="${zone.id}" ${(zoneOn && cameras.every(id => camIsEnabled('camera', id))) ? 'checked' : ''} ${lockedAttr}>
+            <input type="checkbox" class="cam-zone-toggle" data-zone-id="${zone.id}" ${zoneOn ? 'checked' : ''} ${lockedAttr}>
             <span class="zone-toggle-track"></span>
           </label>
         </div>
