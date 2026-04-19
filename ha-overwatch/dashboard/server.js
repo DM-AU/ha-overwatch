@@ -1223,7 +1223,7 @@ server.on("upgrade", (req, socket, head) => {
     return;
   }
 
-  openWSProxy(socket, haToken);
+  openWSProxy(socket, supervisorToken);
 });
 
 function openWSProxy(socket, haToken) {
@@ -1245,9 +1245,9 @@ function openWSProxy(socket, haToken) {
 
   // Connect to HA Core WebSocket — use internal hostname 'homeassistant' on port 8123
   const haReq = http.request({
-    hostname: "supervisor",
-    port:     80,
-    path:     "/core/api/websocket",
+    hostname: "homeassistant",
+    port:     8123,
+    path:     "/api/websocket",
     headers: {
       "Host":                  "homeassistant",
       "Upgrade":               "websocket",
@@ -1312,7 +1312,7 @@ function openWSProxy(socket, haToken) {
         const msg = JSON.parse(payload);
         if (msg.type === "auth") {
           // Replace whatever token browser sent with our real token
-          console.log("[HA-Overwatch] WS proxy: replacing browser auth token with stored token");
+          console.log("[HA-Overwatch] WS proxy: replacing browser auth token with supervisor token");
           sendWsFrame(haSocket, JSON.stringify({ type: "auth", access_token: haToken }));
           broBuf = Buffer.alloc(0);
           return;
