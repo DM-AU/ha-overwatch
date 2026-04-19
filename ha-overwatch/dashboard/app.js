@@ -881,13 +881,17 @@ function setZoneHidden(zoneId, hidden) {
 // Toggle a zone/group/master switch entity in HA directly.
 // The dashboard reads the state back from haStates (WS subscription).
 function owCallSwitch(entityId, on) {
-  if (!haConnected || !haSocket) return;
-  haSocket.send(JSON.stringify({
-    id: haMsgId++, type: "call_service",
+  if (!haConnected || !haSocket) {
+    console.warn("[OW] owCallSwitch skipped — not connected:", entityId);
+    return;
+  }
+  console.log(`[OW] owCallSwitch: ${on ? "turn_on" : "turn_off"} ${entityId}`);
+  sendHA({
+    type: "call_service",
     domain: "switch",
     service: on ? "turn_on" : "turn_off",
     service_data: { entity_id: entityId },
-  }));
+  });
 }
 
 function zoneEntityId(zone) {
@@ -1503,7 +1507,7 @@ function renderZonesEditor() {
     if (selectedGroup && !selectedZone) {
       // Group config panel
       const members = (selectedGroup.zone_ids || []).map(id => zones.find(z => z.id === id)).filter(Boolean);
-      const allArmed = members.length > 0 && members.every(z => z.enabled !== false);
+      const allArmed = members.length > 0 && members.every(z => getZoneState(z) !== 'disabled');
       return `
         <div class="zed-right-content">
           <div class="zones-editor-row"><label>Group Name</label>

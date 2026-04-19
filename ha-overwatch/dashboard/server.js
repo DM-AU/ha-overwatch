@@ -888,28 +888,45 @@ function startHAListener() {
       console.log("[HA-Overwatch] HA listener connected via supervisor API");
       reconnectDelay = 5000;
       let buf = Buffer.alloc(0);
+      let connected = true;
 
       function send(obj) {
         sendWsFrame(sock, JSON.stringify({ ...obj, id: msgId++ }));
       }
 
+      // Send a ping every 30s to keep connection alive
+      const pingTimer = setInterval(() => {
+        if (!connected) { clearInterval(pingTimer); return; }
+        try {
+          // WS ping frame: opcode 0x9, no payload
+          sock.write(Buffer.from([0x89, 0x00]));
+        } catch { clearInterval(pingTimer); }
+      }, 30000);
+
       sock.on("data", chunk => {
         buf = Buffer.concat([buf, chunk]);
-        while (true) {
-          const text = extractWsPayload(buf);
-          if (text === null) break;
+        while (buf.length >= 2) {
           const used = frameLength(buf);
-          if (used <= 0) break;
+          if (used <= 0 || buf.length < used) break;
+          const frame = buf.slice(0, used);
           buf = buf.slice(used);
-          try { handleMsg(JSON.parse(text), send, sock); } catch {}
+          const text = extractWsPayload(frame);
+          if (text !== null) {
+            try { handleMsg(JSON.parse(text), send, sock); } catch {}
+          }
+          // Non-text frames (ping/pong/close) are silently consumed
         }
       });
 
       sock.on("close", () => {
+        connected = false;
+        clearInterval(pingTimer);
         console.log("[HA-Overwatch] HA listener disconnected");
         scheduleReconnect();
       });
       sock.on("error", e => {
+        connected = false;
+        clearInterval(pingTimer);
         console.error("[HA-Overwatch] HA listener error:", e.message);
         scheduleReconnect();
       });
