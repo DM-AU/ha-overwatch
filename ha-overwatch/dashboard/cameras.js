@@ -36,12 +36,17 @@ function camIsEnabled(type, key) {
   // Server mode — read from HA switch entity state via haStates
   const haStates = window.OW?.haStates || {};
   if (type === 'camera') {
-    const safe = key.replace(/\./g, '_').replace(/-/g, '_');
+    // Strip camera. prefix then slugify to match entity ID
+    const safe = key.replace(/^camera\./, '').replace(/[^a-z0-9]+/g, '_');
     const st   = haStates[`switch.overwatch_camera_${safe}`];
     return st ? st.state !== 'off' : true;
   }
   if (type === 'zone') {
-    const st = haStates[`switch.overwatch_camera_zone_${key}`];
+    // zone.id is raw file ID — convert to name slug to match entity ID
+    const zones = window.OW?.zones || [];
+    const zone  = zones.find(z => z.id === key || nameSlug(z.name) === key);
+    const slug  = zone ? nameSlug(zone.name) : nameSlug(key);
+    const st    = haStates[`switch.overwatch_camera_zone_${slug || key}`];
     return st ? st.state !== 'off' : true;
   }
   // global — check camera_all switch
@@ -63,9 +68,9 @@ async function camSetEnabled(type, key, state) {
     'all':          'switch.overwatch_camera_all',
     'camera_all':   'switch.overwatch_camera_all',
     'camera_group': `switch.overwatch_camera_group_${key}`,
-    'camera_zone':  `switch.overwatch_camera_zone_${key}`,
-    'zone':         `switch.overwatch_camera_zone_${key}`,
-    'camera':       `switch.overwatch_camera_${key.replace(/\./g,'_').replace(/-/g,'_')}`,
+    'camera_zone':  `switch.overwatch_camera_zone_${nameSlug(key) || key}`,
+    'zone':         `switch.overwatch_camera_zone_${nameSlug(key) || key}`,
+    'camera':       `switch.overwatch_camera_${key.replace(/^camera\./, '').replace(/[^a-z0-9]+/g, '_')}`,
   };
   const entityId = entityMap[type];
   if (entityId && window.OW.haStates !== undefined) {

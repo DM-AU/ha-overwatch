@@ -878,7 +878,7 @@ class OverwatchZoneTriggered(OWSensor):
   "manifest.json": `{
   "domain": "ha_overwatch",
   "name": "HA Overwatch",
-  "version": "1.12.0",
+  "version": "1.13.0",
   "documentation": "https://github.com/DM-AU/ha-overwatch",
   "issue_tracker": "https://github.com/DM-AU/ha-overwatch/issues",
   "codeowners": [],
@@ -1055,6 +1055,8 @@ function startHAListener() {
         sensorToZones[sid].push(zone);
       });
     });
+    const sensorCount = Object.keys(sensorToZones).length;
+    console.log(`[HA-Overwatch] Zone cache: ${cachedZones.length} zones, ${sensorCount} unique sensors tracked`);
   }
 
   function handleMsg(msg, send, sock) {
@@ -1081,6 +1083,7 @@ function startHAListener() {
     const zones = sensorToZones[entityId];
     if (!zones || !zones.length) return; // not a tracked sensor — fast exit
 
+    console.log(`[HA-Overwatch] Sensor state: ${entityId} → ${state} (affects ${zones.length} zone(s))`);
     const triggered = ["on","open","detected","home","triggered","motion"]
       .includes((state || "").toLowerCase());
 
@@ -1101,6 +1104,7 @@ function startHAListener() {
     const slug     = nameSlug(zone.name) || zone.id;
     const entityId = `binary_sensor.overwatch_zone_${slug}_triggered`;
     const name     = `Zone Triggered: ${zone.name || zone.id}`;
+    console.log(`[HA-Overwatch] Binary sensor push: ${entityId} → ${isTriggered ? "on" : "off"}`);
     const body = JSON.stringify({
       state: isTriggered ? "on" : "off",
       attributes: { friendly_name: name, device_class: "motion" },
@@ -1115,8 +1119,11 @@ function startHAListener() {
         "Content-Type":   "application/json",
         "Content-Length": Buffer.byteLength(body),
       },
-    }, res => { res.resume(); });
-    req.on("error", () => {});
+    }, res => {
+      console.log(`[HA-Overwatch] Binary sensor push response: ${res.statusCode} for ${entityId}`);
+      res.resume();
+    });
+    req.on("error", e => console.error(`[HA-Overwatch] Binary sensor push error: ${e.message}`));
     req.write(body);
     req.end();
   }
