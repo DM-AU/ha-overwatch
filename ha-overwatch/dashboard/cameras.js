@@ -15,71 +15,69 @@ const CAM_GLOBAL_KEY        = 'ow_cam_global';    // global all-cameras toggle
 const CAM_MODE_KEY          = 'ow_cam_source';    // 'server' | 'device' (defaults to 'server')
 
 // Is this browser using server state (HA entities) or per-device localStorage?
+// Camera toggle source: 'server' = HA switch entities, 'device' = localStorage
 function camUseServerState() {
   return localStorage.getItem(CAM_MODE_KEY) !== 'device';
 }
 
-// Read camera/zone toggle: server state takes precedence unless in device mode
-function camIsEnabled(type, key, serverData) {
+// Read camera/zone toggle state from HA switch entities or localStorage
+function camIsEnabled(type, key) {
   if (!camUseServerState()) {
     // Device mode — use localStorage
     if (type === 'camera') return localStorage.getItem(CAM_TOGGLE_PREFIX + key) !== 'false';
     if (type === 'zone')   return localStorage.getItem(CAM_ZONE_PREFIX   + key) !== 'false';
     return localStorage.getItem(CAM_GLOBAL_KEY) !== 'false';
   }
-  // Server mode — use entity state fetched from add-on
-  if (!serverData) return true;
+  // Server mode — read from HA switch entity state via haStates
+  const haStates = window.OW?.haStates || {};
   if (type === 'camera') {
-    const c = (serverData.cameras || []).find(c => c.id === key);
-    return c ? c.enabled !== false : true;
+    const safe = key.replace(/\./g, '_').replace(/-/g, '_');
+    const st   = haStates[`switch.overwatch_camera_${safe}`];
+    return st ? st.state !== 'off' : true;
   }
   if (type === 'zone') {
-    const z = (serverData.camera_zones || []).find(z => z.id === key);
-    return z ? z.enabled !== false : true;
+    const st = haStates[`switch.overwatch_camera_zone_${key}`];
+    return st ? st.state !== 'off' : true;
   }
-  // global — all cameras enabled unless ALL are explicitly disabled
-  if (serverData.cameras && serverData.cameras.length > 0) {
-    return serverData.cameras.some(c => c.enabled !== false);
-  }
-  return true;
+  // global — check camera_all switch
+  const st = haStates['switch.overwatch_camera_all'];
+  return st ? st.state !== 'off' : true;
 }
 
-// Set camera/zone toggle — writes to server or localStorage
+// Set camera/zone toggle — calls HA switch service or writes localStorage
 async function camSetEnabled(type, key, state) {
   if (!camUseServerState()) {
-    // Device mode — write to localStorage only
     if (type === 'camera') localStorage.setItem(CAM_TOGGLE_PREFIX + key, state ? 'true' : 'false');
     else if (type === 'zone') localStorage.setItem(CAM_ZONE_PREFIX + key, state ? 'true' : 'false');
     else localStorage.setItem(CAM_GLOBAL_KEY, state ? 'true' : 'false');
     return;
   }
-  // Server mode — map type to API type and push to add-on
-  const apiTypeMap = {
-    'all':           'camera_all',
-    'camera_all':    'camera_all',
-    'camera_group':  'camera_group',
-    'camera_zone':   'camera_zone',
-    'zone':          'camera_zone',
-    'camera':        'camera',
+  // Server mode — call HA switch service via existing WS connection
+  if (!window.OW) return;
+  const entityMap = {
+    'all':          'switch.overwatch_camera_all',
+    'camera_all':   'switch.overwatch_camera_all',
+    'camera_group': `switch.overwatch_camera_group_${key}`,
+    'camera_zone':  `switch.overwatch_camera_zone_${key}`,
+    'zone':         `switch.overwatch_camera_zone_${key}`,
+    'camera':       `switch.overwatch_camera_${key.replace(/\./g,'_').replace(/-/g,'_')}`,
   };
-  const apiType = apiTypeMap[type] || type;
-  try {
-    const res = await fetch(window.OW.apiPath('ow/entity-set'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ type: apiType, key, state }),
-    });
-    if (res.ok) {
-      const data = await res.json();
-      // Server returns updated full state — apply immediately, no need to wait for 10s poll
-      if (data.state) camServerState = data.state;
+  const entityId = entityMap[type];
+  if (entityId && window.OW.haStates !== undefined) {
+    // Use the same owCallSwitch pattern from app.js
+    const haSocket = window.OW.getHASocket?.();
+    if (haSocket && haSocket.readyState === WebSocket.OPEN) {
+      haSocket.send(JSON.stringify({
+        id: Date.now(), type: 'call_service',
+        domain: 'switch', service: state ? 'turn_on' : 'turn_off',
+        service_data: { entity_id: entityId },
+      }));
     }
-  } catch { /* ignore — state will sync on next 10s poll */ }
+  }
 }
 
 /* ── Module state ────────────────────────────────────────────── */
 let camMode        = 'snapshot';   // 'snapshot' | 'live'
-let camServerState = null;         // entity state from /ow/entity-states (server mode)
 let camPinned      = new Set();    // Set of pinned camera entity ids
 let camToggled     = {};           // { entityId: bool } — false = user disabled
 let camZoneToggled = {};           // { zoneId: bool } — false = zone disabled on cam page
@@ -146,13 +144,13 @@ function getActiveCameras() {
   const failHideMs = (parseInt(cfg.cam_fail_hide_seconds) || 5) * 1000;
 
   // Global toggle — server or device mode
-  const globalOn = camIsEnabled('global', 'all', camServerState);
+  const globalOn = camIsEnabled('global', 'all');
   if (!globalOn) return [];
 
   const cameraSet = new Map();
 
   zones.forEach(zone => {
-    const zoneOn   = camIsEnabled('zone', zone.id, camServerState);
+    const zoneOn   = camIsEnabled('zone', zone.id);
     if (!zoneOn) return;
 
     const sensors   = zone.sensors || [];
@@ -161,7 +159,7 @@ function getActiveCameras() {
     if (!cameras.length) return;
 
     cameras.forEach(entityId => {
-      const camOn = camIsEnabled('camera', entityId, camServerState);
+      const camOn = camIsEnabled('camera', entityId);
       if (!camOn) return;
       if (camHidden.has(entityId)) return;
 
@@ -179,7 +177,7 @@ function getActiveCameras() {
 
   // Pinned cameras
   camPinned.forEach(entityId => {
-    const camOn = camIsEnabled('camera', entityId, camServerState);
+    const camOn = camIsEnabled('camera', entityId);
     if (!camOn) return;
     if (camHidden.has(entityId)) return;
     if (!cameraSet.has(entityId)) {
@@ -464,11 +462,7 @@ function renderCameraStatusBar() {
 
   // ── Compute master state ──────────────────────────────────────
   const allCams  = allCameraIds(zones);
-  const masterOn = camUseServerState()
-    ? (camServerState ? camServerState.cameras.some(c => c.enabled !== false) : true)
-    : (allCams.length > 0 &&
-       allCams.every(id => localStorage.getItem(CAM_TOGGLE_PREFIX + id) !== 'false') &&
-       zones.filter(z => (z.cameras||[]).length).every(z => localStorage.getItem(CAM_ZONE_PREFIX + z.id) !== 'false'));
+  const masterOn = camIsEnabled('global', 'all');
   const masterDot = camsDotState(allCams, activeIds);
 
   const zonesWithCameras = zones.filter(z => (z.cameras || []).length > 0);
@@ -488,7 +482,7 @@ function renderCameraStatusBar() {
     const renderZoneRow = (zone, indent) => {
       const cameras  = [...(zone.cameras || [])].sort((a, b) =>
         friendlyName(a).localeCompare(friendlyName(b)));
-      const zoneOn   = camIsEnabled('zone', zone.id, camServerState);
+      const zoneOn   = camIsEnabled('zone', zone.id);
       const colKey   = `cam_zone_collapsed_${zone.id}`;
       const collapsed = localStorage.getItem(colKey) !== 'expanded';
       const dot = zoneDotState(zone, activeIds);
@@ -513,7 +507,7 @@ function renderCameraStatusBar() {
         <div class="cam-dd-cameras" data-zone-id="${zone.id}" style="display:${collapsed ? 'none' : ''};">`;
 
       cameras.forEach(camId => {
-        const camOn    = camIsEnabled('camera', camId, camServerState);
+        const camOn    = camIsEnabled('camera', camId);
         const isActive = activeIds.has(camId);
         const isPinned = camPinned.has(camId);
         const dot      = camDotColour(camOn && zoneOn, isActive && camOn && zoneOn);
@@ -547,7 +541,7 @@ function renderCameraStatusBar() {
       const gDot       = groupDotState(group, zones, activeIds);
 
       // Group is "on" if ALL member zones are on per current mode
-      const gAllOn = memberZones.every(z => camIsEnabled('zone', z.id, camServerState));
+      const gAllOn = memberZones.every(z => camIsEnabled('zone', z.id));
 
       zonesHtml += `
         <div class="cam-dd-group-header${gCollapsed ? ' collapsed' : ''}"
@@ -929,20 +923,8 @@ function initCameraPage() {
   try { camLowResMap = JSON.parse(OW.uiConfig.cam_low_res_map || '{}'); } catch {}
   try { camPinned = new Set(JSON.parse(OW.uiConfig.cam_pinned || '[]')); } catch {}
 
-  // Fetch server entity state on init (for server mode)
-  async function refreshServerState() {
-    try {
-      const res = await fetch(window.OW.apiPath('ow/entity-states'));
-      if (res.ok) { camServerState = await res.json(); }
-    } catch { /* ignore */ }
-  }
-  refreshServerState();
-  // Refresh every 10s to stay in sync with HA
-  setInterval(refreshServerState, 10000);
-
   // Expose for settings panel source toggle
-  window._camRefreshServerState = refreshServerState;
-  window.renderCameraStatusBar  = renderCameraStatusBar;
+  window.renderCameraStatusBar = renderCameraStatusBar;
 
   // Initial renders
   renderCameraStatusBar();

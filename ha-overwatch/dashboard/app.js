@@ -2663,6 +2663,13 @@ function connectHA() {
           }
         }
 
+        // Re-render status dropdown when any overwatch switch changes
+        // (so group checkboxes stay in sync with member zone states)
+        if (data.entity_id.startsWith("switch.overwatch_")) {
+          updateStatusDropdownInPlace();
+          renderZones();
+        }
+
         // Always update status bar for the configured alarm entity or any alarm_control_panel
         // This runs regardless of haSubscribedEntities to prevent missed status updates
         const alarmEntity = uiConfig.alarm_entity || "";
@@ -4190,6 +4197,7 @@ async function init() {
     logEvent,
     renderSettingsPanel,
     renderLogPanel,
+    getHASocket: () => haSocket,
   };
   window.renderSettingsPanel      = renderSettingsPanel;
   window.renderLogPanel           = renderLogPanel;
