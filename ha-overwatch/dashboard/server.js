@@ -135,15 +135,33 @@ function loadZones() {
 }
 
 function parseZoneYaml(text) {
-  const z = { enabled: true };
+  const z = { enabled: true, sensors: [], cameras: [], lights: [], sirens: [] };
+  let section = "";
   for (const raw of text.split("\n")) {
     const line = raw.trim();
     if (!line || line.startsWith("#")) continue;
+    // List section headers
+    if (line === "sensors:") { section = "sensors"; continue; }
+    if (line === "cameras:") { section = "cameras"; continue; }
+    if (line === "lights:")  { section = "lights";  continue; }
+    if (line === "sirens:")  { section = "sirens";  continue; }
+    if (line === "points:")  { section = "points";  continue; }
+    // List items
+    if (line.startsWith("- ") && section) {
+      const val = line.slice(2).trim();
+      if (section === "sensors") z.sensors.push(val);
+      else if (section === "cameras") z.cameras.push(val);
+      else if (section === "lights")  z.lights.push(val);
+      else if (section === "sirens")  z.sirens.push(val);
+      continue;
+    }
+    // Key: value pairs reset the section
     if (!line.includes(":")) continue;
+    section = "";
     const colonIdx = line.indexOf(":");
     const key = line.slice(0, colonIdx).trim();
-    let   val = line.slice(colonIdx + 1).trim()
-                   .replace(/^"(.*)"$/, "$1").replace(/^'(.*)'$/, "$1");
+    const val = line.slice(colonIdx + 1).trim()
+                    .replace(/^"(.*)"$/, "$1").replace(/^'(.*)'$/, "$1");
     if      (key === "id")      z.id      = val;
     else if (key === "name")    z.name    = val;
     else if (key === "enabled") z.enabled = val !== "false";
@@ -860,7 +878,7 @@ class OverwatchZoneTriggered(OWSensor):
   "manifest.json": `{
   "domain": "ha_overwatch",
   "name": "HA Overwatch",
-  "version": "1.10.0",
+  "version": "1.11.0",
   "documentation": "https://github.com/DM-AU/ha-overwatch",
   "issue_tracker": "https://github.com/DM-AU/ha-overwatch/issues",
   "codeowners": [],
