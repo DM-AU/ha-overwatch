@@ -847,6 +847,18 @@ function writeCustomComponent() {
 // When a zone's sensors trigger/clear, pushes binary_sensor state to HA.
 // Uses supervisor token + internal supervisor API — no login warnings.
 
+// Calculate byte length of a WebSocket frame (used by startHAListener)
+function frameLength(buf) {
+  if (buf.length < 2) return -1;
+  let len = buf[1] & 0x7f;
+  let offset = 2;
+  if (len === 126) { if (buf.length < 4) return -1; len = buf.readUInt16BE(2); offset = 4; }
+  else if (len === 127) return -1;
+  const masked = (buf[1] & 0x80) !== 0;
+  if (masked) offset += 4;
+  return offset + len;
+}
+
 function startHAListener() {
   if (!process.env.SUPERVISOR_TOKEN) return;
 
