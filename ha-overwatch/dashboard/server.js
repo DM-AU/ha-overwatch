@@ -187,232 +187,6 @@ function parseGroupYaml(text) {
 }
 
 // Update the enabled: field in a zone's YAML file so the dashboard sees the change
-function updateZoneEnabledInFile(zoneId, enabled) {
-  try {
-    const idxPath = path.join(DATA_DIR, "config", "zones", "index.json");
-    const index   = JSON.parse(fs.readFileSync(idxPath, "utf8"));
-    // Find the zone file for this id
-    for (const fname of index) {
-      const fpath = path.join(DATA_DIR, "config", "zones", fname);
-      let text;
-      try { text = fs.readFileSync(fpath, "utf8"); } catch { continue; }
-      if (!text.includes(`id: ${zoneId}`) && !text.includes(`id: "${zoneId}"`)) continue;
-      // Replace or insert the enabled: line
-      if (text.includes("\nenabled:")) {
-        text = text.replace(/\nenabled:\s*(true|false)/, `\nenabled: ${enabled}`);
-      } else {
-        // Insert after the id: line
-        text = text.replace(/(\nid:.*)/,  `$1\nenabled: ${enabled}`);
-      }
-      fs.writeFileSync(fpath, text, "utf8");
-      break;
-    }
-  } catch (e) {
-    console.error("[HA-Overwatch] updateZoneEnabledInFile error:", e.message);
-  }
-}
-
-/* ─── ENTITY STATE FILE ────────────────────────────────────── */
-const ENTITY_STATE_FILE = path.join(DATA_DIR, "config", "entity_state.json");
-
-function loadEntityState() {
-  try {
-    return JSON.parse(fs.readFileSync(ENTITY_STATE_FILE, "utf8"));
-  } catch {
-    return { master: true, groups: {}, zones: {}, cameras: {} };
-  }
-}
-
-function saveEntityState(state) {
-  try {
-    fs.mkdirSync(path.dirname(ENTITY_STATE_FILE), { recursive: true });
-    fs.writeFileSync(ENTITY_STATE_FILE, JSON.stringify(state, null, 2), "utf8");
-  } catch (e) {
-    console.error("[HA-Overwatch] Failed to save entity_state.json:", e.message);
-  }
-}
-
-// Runtime state — triggered zones populated by server-side HA WS listener
-const serverState = { triggeredZones: {} };
-
-// Long-poll listeners waiting for any state change
-const stateChangeListeners = [];
-let stateVersion = 0;
-function notifyStateChange() {
-  stateVersion++;
-  const ls = stateChangeListeners.splice(0);
-  ls.forEach(fn => { try { fn(); } catch {} });
-}
-
-function buildEntityPayload() {
-  const state  = loadEntityState();
-  const zones  = loadZones();
-  const groups = loadGroups();
-  const triggered = serverState.triggeredZones;
-
-  // All unique cameras across zones
-  const cameraSet = new Set();
-  zones.forEach(z => (z.cameras || []).forEach(c => cameraSet.add(c)));
-
-  return {
-    master: state.master !== false,
-    groups: groups.map(g => ({
-      id: g.id, name: g.name || g.id, zone_ids: g.zone_ids || [],
-      enabled: state.groups[g.id] !== false,
-    })),
-    zones: zones.map(z => ({
-      id: z.id, name: z.name || z.id,
-      enabled:   state.zones[z.id] !== false,
-      triggered: !!triggered[z.id],
-    })),
-    camera_groups: groups
-      .filter(g => (g.zone_ids || []).some(zid => zones.find(z => z.id === zid && (z.cameras||[]).length > 0)))
-      .map(g => ({ id: g.id, name: g.name || g.id, enabled: state.groups["cam_" + g.id] !== false })),
-    camera_zones: zones
-      .filter(z => (z.cameras || []).length > 0)
-      .map(z => ({ id: z.id, name: z.name || z.id, enabled: state.zones["cam_" + z.id] !== false })),
-    cameras: [...cameraSet].map(camId => ({
-      id: camId, name: camId.replace(/^camera\./, "").replace(/_/g, " "),
-      enabled: state.cameras[camId] !== false,
-    })),
-  };
-}
-
-async function pushStateToHA(payload) {
-  const cfg = getHAConfig(loadConfig());
-  if (!cfg.ha_token) return;
-  const masterTriggered = payload.zones.some(z => z.triggered);
-  const pushes = [
-    haRestCall("POST", "/api/states/binary_sensor.overwatch_master_triggered",
-      { state: masterTriggered ? "on" : "off",
-        attributes: { friendly_name: "Overwatch Master Triggered", device_class: "motion" } }, cfg),
-  ];
-  payload.zones.forEach(z => {
-    pushes.push(haRestCall("POST", `/api/states/binary_sensor.overwatch_zone_${z.id}_triggered`,
-      { state: z.triggered ? "on" : "off",
-        attributes: { friendly_name: `${z.name} Triggered`, device_class: "motion" } }, cfg));
-  });
-  payload.groups.forEach(g => {
-    const gTriggered = (g.zone_ids || []).some(zid => payload.zones.find(z => z.id === zid)?.triggered);
-    pushes.push(haRestCall("POST", `/api/states/binary_sensor.overwatch_group_${g.id}_triggered`,
-      { state: gTriggered ? "on" : "off",
-        attributes: { friendly_name: `${g.name} Triggered`, device_class: "motion" } }, cfg));
-  });
-  try { await Promise.all(pushes); } catch (e) {
-    console.error("[HA-Overwatch] pushStateToHA error:", e.message);
-  }
-}
-
-/* ─── HA REST API ─────────────────────────────────────────── */
-function haRestCall(method, endpoint, body, cfg) {
-  return new Promise((resolve, reject) => {
-    const haUrl   = (cfg.ha_url || "").replace(/\/$/, "");
-    const haToken = cfg.ha_token || "";
-    if (!haUrl || !haToken) return reject(new Error("HA URL or token not configured"));
-
-    let parsed;
-    try { parsed = new URL(haUrl); } catch { return reject(new Error("Invalid HA URL")); }
-
-    const isHttps   = parsed.protocol === "https:";
-    const lib       = isHttps ? https : http;
-    const bodyStr   = body ? JSON.stringify(body) : "";
-
-    const options = {
-      hostname: parsed.hostname,
-      port:     parsed.port || (isHttps ? 443 : 80),
-      path:     endpoint,
-      method,
-      headers: {
-        "Authorization":  `Bearer ${haToken}`,
-        "Content-Type":   "application/json",
-        "Content-Length": Buffer.byteLength(bodyStr),
-      },
-    };
-
-    const req = lib.request(options, res => {
-      const chunks = [];
-      res.on("data", c => chunks.push(c));
-      res.on("end", () => {
-        try { resolve({ status: res.statusCode, body: JSON.parse(Buffer.concat(chunks).toString()) }); }
-        catch { resolve({ status: res.statusCode, body: {} }); }
-      });
-    });
-    req.on("error", reject);
-    if (bodyStr) req.write(bodyStr);
-    req.end();
-  });
-}
-
-/* ─── ZONE ENTITY NAMING ──────────────────────────────────── */
-// Must match haZoneSlug() in app.js exactly
-function zoneSlug(name) {
-  return (name || "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "_")
-    .replace(/^_+|_+$/g, "")
-    .slice(0, 40) || "zone";
-}
-
-function zoneEntityIds(zone) {
-  const slug = zoneSlug(zone.name || zone.id);
-  return {
-    armed:     `input_boolean.overwatch_zone_${slug}_armed`,
-    triggered: `input_boolean.overwatch_zone_${slug}_triggered`,
-    slug,
-  };
-}
-
-/* ─── HA ENTITY SETUP ─────────────────────────────────────── */
-async function setupHAEntities(zones, cfg) {
-  const results = [];
-  const errors  = [];
-
-  // Master entities
-  const masterEntities = [
-    { id: "input_boolean.overwatch_master_armed",     name: "Overwatch Master Armed",     icon: "mdi:shield-home",  state: "off" },
-    { id: "input_boolean.overwatch_master_triggered", name: "Overwatch Master Triggered", icon: "mdi:shield-alert", state: "off" },
-  ];
-
-  for (const e of masterEntities) {
-    try {
-      const r = await haRestCall("POST", `/api/states/${e.id}`,
-        { state: e.state, attributes: { friendly_name: e.name, icon: e.icon } }, cfg);
-      results.push({ entity_id: e.id, status: r.status });
-    } catch (ex) { errors.push({ entity_id: e.id, error: ex.message }); }
-  }
-
-  // Per-zone entities
-  for (const zone of zones) {
-    const ids = zoneEntityIds(zone);
-    for (const [key, entityId] of [["armed", ids.armed], ["triggered", ids.triggered]]) {
-      const isArmed     = key === "armed";
-      const name        = `Overwatch Zone ${zone.name || zone.id} ${isArmed ? "Armed" : "Triggered"}`;
-      const icon        = isArmed ? "mdi:shield-check" : "mdi:shield-alert";
-      const initialState = isArmed ? (zone.enabled !== false ? "on" : "off") : "off";
-      try {
-        const r = await haRestCall("POST", `/api/states/${entityId}`,
-          { state: initialState, attributes: { friendly_name: name, icon, zone_id: zone.id, zone_slug: ids.slug } }, cfg);
-        results.push({ entity_id: entityId, status: r.status });
-      } catch (ex) { errors.push({ entity_id: entityId, error: ex.message }); }
-    }
-  }
-
-  return { results, errors };
-}
-
-/* ─── ZONE STATE SYNC ─────────────────────────────────────── */
-async function syncZoneState(zoneId, zoneName, state, cfg) {
-  const ids = zoneEntityIds({ id: zoneId, name: zoneName });
-  const isTriggered = state === "triggered";
-  const isDisabled  = state === "disabled" || state === "off";
-  await haRestCall("POST", `/api/states/${ids.triggered}`,
-    { state: isTriggered ? "on" : "off",
-      attributes: { friendly_name: `Overwatch Zone ${zoneName} Triggered`, icon: "mdi:shield-alert", zone_id: zoneId } }, cfg);
-  await haRestCall("POST", `/api/states/${ids.armed}`,
-    { state: isDisabled ? "off" : "on",
-      attributes: { friendly_name: `Overwatch Zone ${zoneName} Armed`, icon: "mdi:shield-check", zone_id: zoneId } }, cfg);
-}
-
 /* ─── REQUEST HANDLER ─────────────────────────────────────── */
 const server = http.createServer(async (req, res) => {
   // CORS preflight
@@ -552,179 +326,27 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  /* ── /api/ha-setup-zones ─────────────────────────────────── */
-  if (pathname === "/ow/ha-setup-zones" && req.method === "POST") {
+  /* ── /ow/zones — component fetches zone/group/camera structure ── */
+  if (pathname === "/ow/zones" && req.method === "GET") {
     try {
-      const cfg   = getHAConfig(loadConfig());
-      const zones = loadZones();
-      if (!cfg.ha_url || !cfg.ha_token) {
-        err(res, "HA URL or token not configured. Save settings first (standalone mode only).", 400);
-        return;
-      }
-      const { results, errors } = await setupHAEntities(zones, cfg);
-      const entityMap = {
-        master: {
-          armed:     "input_boolean.overwatch_master_armed",
-          triggered: "input_boolean.overwatch_master_triggered",
-        },
-        zones: zones.map(z => ({ id: z.id, name: z.name, ...zoneEntityIds(z) })),
-      };
-      json(res, { ok: true, created: results.length, errors, entityMap, isAddon: cfg.isAddon });
-    } catch (e) { err(res, e.message, 500); }
-    return;
-  }
-
-  /* ── /api/ha-sync-zone ───────────────────────────────────── */
-  if (pathname === "/ow/ha-sync-zone" && req.method === "POST") {
-    try {
-      const body = await readBody(req);
-      const cfg  = getHAConfig(loadConfig());
-      if (!cfg.ha_url || !cfg.ha_token) { json(res, { ok: true, skipped: true }); return; }
-      await syncZoneState(body.zoneId, body.zoneName, body.state, cfg);
-      json(res, { ok: true });
-    } catch (e) {
-      console.error("[HA-Overwatch] ha-sync-zone error:", e.message);
-      err(res, e.message, 500);
-    }
-    return;
-  }
-
-  /* ── /api/ha-sync-master ─────────────────────────────────── */
-  if (pathname === "/ow/ha-sync-master" && req.method === "POST") {
-    try {
-      const body = await readBody(req);
-      const cfg  = getHAConfig(loadConfig());
-      if (!cfg.ha_url || !cfg.ha_token) { json(res, { ok: true, skipped: true }); return; }
-      await haRestCall("POST", "/api/states/input_boolean.overwatch_master_armed",
-        { state: body.armed ? "on" : "off",
-          attributes: { friendly_name: "Overwatch Master Armed", icon: "mdi:shield-home" } }, cfg);
-      json(res, { ok: true });
-    } catch (e) { err(res, e.message, 500); }
-    return;
-  }
-
-  /* ── /ow/register-webhook — HA integration registers its webhook URL ── */
-  if (pathname === "/ow/register-webhook" && req.method === "POST") {
-    try {
-      const body = await readBody(req);
-      if (body.url) {
-        haWebhookUrl = body.url;
-        console.log("[HA-Overwatch] Webhook registered:", haWebhookUrl);
-      }
-      json(res, { ok: true });
-    } catch (e) { err(res, e.message); }
-    return;
-  }
-
-  /* ── /ow/entity-states — HA component polls this ─────────── */
-  if (pathname === "/ow/entity-states" && req.method === "GET") {
-    try {
-      json(res, buildEntityPayload());
-    } catch (e) { err(res, e.message, 500); }
-    return;
-  }
-
-  /* ── /ow/entity-states/wait — long-poll: returns when state changes ── */
-  if (pathname === "/ow/entity-states/wait" && req.method === "GET") {
-    const clientVer = parseInt(req.headers["x-state-version"] || "0", 10);
-    if (clientVer < stateVersion) {
-      // Already have a newer version — return immediately
-      res.setHeader("x-state-version", String(stateVersion));
-      json(res, buildEntityPayload());
-      return;
-    }
-    // Same version — hold until change or 4s timeout
-    let resolved = false;
-    const timeout = setTimeout(() => {
-      if (!resolved) {
-        resolved = true;
-        res.setHeader("x-state-version", String(stateVersion));
-        json(res, buildEntityPayload());
-      }
-    }, 4000);
-    stateChangeListeners.push(() => {
-      if (!resolved) {
-        resolved = true;
-        clearTimeout(timeout);
-        try {
-          res.setHeader("x-state-version", String(stateVersion));
-          json(res, buildEntityPayload());
-        } catch {}
-      }
-    });
-    req.on("close", () => { resolved = true; clearTimeout(timeout); });
-    return;
-  }
-
-  /* ── /ow/entity-set — browser or HA component sets state ─── */
-  if (pathname === "/ow/entity-set" && req.method === "POST") {
-    try {
-      const body  = await readBody(req);
-      const { type, key, state } = body; // type: master|group|zone|camera_all|camera_group|camera_zone|camera
-      const es = loadEntityState();
-
-      if (type === "master") {
-        es.master = !!state;
-        const zones  = loadZones();
-        const groups = loadGroups();
-        groups.forEach(g => { es.groups[g.id] = !!state; });
-        zones.forEach(z => {
-          es.zones[z.id] = !!state;
-          updateZoneEnabledInFile(z.id, !!state);
-        });
-      } else if (type === "group") {
-        es.groups[key] = !!state;
-        const groups = loadGroups();
-        const group  = groups.find(g => g.id === key);
-        if (group) group.zone_ids.forEach(zid => {
-          es.zones[zid] = !!state;
-          updateZoneEnabledInFile(zid, !!state);
-        });
-      } else if (type === "zone") {
-        es.zones[key] = !!state;
-        updateZoneEnabledInFile(key, !!state);
-      } else if (type === "camera_all") {
-        const zones = loadZones();
-        const cams  = new Set();
-        zones.forEach(z => (z.cameras || []).forEach(c => cams.add(c)));
-        cams.forEach(c => { es.cameras[c] = !!state; });
-        const groups = loadGroups();
-        groups.forEach(g => { es.groups["cam_" + g.id] = !!state; });
-        zones.forEach(z => { es.zones["cam_" + z.id] = !!state; });
-      } else if (type === "camera_group") {
-        es.groups["cam_" + key] = !!state;
-        const groups = loadGroups();
-        const group  = groups.find(g => g.id === key);
-        if (group) {
-          const zones = loadZones();
-          group.zone_ids.forEach(zid => {
-            es.zones["cam_" + zid] = !!state;
-            const z = zones.find(z => z.id === zid);
-            if (z) (z.cameras || []).forEach(c => { es.cameras[c] = !!state; });
-          });
-        }
-      } else if (type === "camera_zone") {
-        es.zones["cam_" + key] = !!state;
-        const zones = loadZones();
-        const zone  = zones.find(z => z.id === key);
-        if (zone) (zone.cameras || []).forEach(c => { es.cameras[c] = !!state; });
-      } else if (type === "camera") {
-        es.cameras[key] = !!state;
-      }
-
-      saveEntityState(es);
-
-      // Build updated payload
-      const payload = buildEntityPayload();
-
-      // Notify long-poll listeners immediately (dashboard→HA path)
-      notifyStateChange();
-
-      // Push to HA coordinator via webhook and binary sensor REST
-      pushToHAWebhook(payload);
-      pushStateToHA(payload).catch(() => {});
-
-      json(res, { ok: true, state: payload });
+      const zones  = loadZones();
+      const groups = loadGroups();
+      const cameraSet = new Set();
+      zones.forEach(z => (z.cameras || []).forEach(c => cameraSet.add(c)));
+      json(res, {
+        zones:  zones.map(z => ({ id: z.id, name: z.name || z.id })),
+        groups: groups.map(g => ({ id: g.id, name: g.name || g.id, zone_ids: g.zone_ids || [] })),
+        camera_groups: groups
+          .filter(g => (g.zone_ids || []).some(zid =>
+            zones.find(z => z.id === zid && (z.cameras || []).length > 0)))
+          .map(g => ({ id: g.id, name: g.name || g.id })),
+        camera_zones: zones
+          .filter(z => (z.cameras || []).length > 0)
+          .map(z => ({ id: z.id, name: z.name || z.id })),
+        cameras: [...cameraSet].map(id => ({
+          id, name: id.replace(/^camera\./, '').replace(/_/g, ' '),
+        })),
+      });
     } catch (e) { err(res, e.message, 500); }
     return;
   }
@@ -843,10 +465,7 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log(`[HA-Overwatch] Server running at http://0.0.0.0:${PORT}`);
   console.log(`[HA-Overwatch] App directory:  ${APP_DIR}`);
   console.log(`[HA-Overwatch] Data directory: ${DATA_DIR}`);
-
-  // Write custom component files immediately — must exist before HA loads
   writeCustomComponent();
-  // Start server-side HA listener (small delay to let HA be ready)
   setTimeout(startHAListener, 3000);
 });
 
@@ -854,7 +473,6 @@ server.listen(PORT, "0.0.0.0", () => {
 const COMPONENT_FILES = {
   "__init__.py": `"""HA Overwatch integration."""
 from __future__ import annotations
-import asyncio
 import logging
 from datetime import timedelta
 import aiohttp
@@ -878,14 +496,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     try:
         await coordinator.async_config_entry_first_refresh()
     except Exception as err:
-        _LOGGER.error("Failed to connect to Overwatch add-on: %s", err)
+        _LOGGER.error("Failed to fetch zone structure from Overwatch: %s", err)
         return False
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    # Start long-poll listener in background
-    entry.async_create_background_task(
-        hass, coordinator.async_long_poll_loop(), "overwatch_long_poll"
-    )
     return True
 
 
@@ -897,80 +511,35 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 class OverwatchCoordinator(DataUpdateCoordinator):
+    """Fetches zone/group/camera structure from the add-on (rarely changes)."""
+
     def __init__(self, hass: HomeAssistant, url: str) -> None:
         super().__init__(
             hass, _LOGGER, name="HA Overwatch",
-            update_interval=timedelta(seconds=30),
+            update_interval=timedelta(hours=1),
         )
         self.url = url
-        self._last_state_json: str = ""
-        self._long_poll_running = True
 
     async def _async_update_data(self) -> dict:
-        """Background 30s fallback poll."""
+        """Fetch zone structure — only needed at startup and when zones change."""
         try:
-            async with aiohttp.ClientSession(
-                connector=aiohttp.TCPConnector(force_close=True),
-            ) as session:
+            async with aiohttp.ClientSession() as session:
                 async with session.get(
-                    f"{self.url}/ow/entity-states",
+                    f"{self.url}/ow/zones",
                     timeout=aiohttp.ClientTimeout(total=10),
                 ) as resp:
                     if resp.status != 200:
                         raise UpdateFailed(f"Add-on returned {resp.status}")
-                    return await resp.json(content_type=None)
+                    data = await resp.json(content_type=None)
+                    _LOGGER.info(
+                        "Overwatch: %d zones, %d groups, %d cameras",
+                        len(data.get("zones", [])),
+                        len(data.get("groups", [])),
+                        len(data.get("cameras", [])),
+                    )
+                    return data
         except aiohttp.ClientError as err:
             raise UpdateFailed(f"Cannot reach Overwatch add-on: {err}") from err
-
-    async def async_long_poll_loop(self) -> None:
-        """Long-poll the add-on for near-instant state updates (dashboard -> HA)."""
-        current_version = 0
-        while True:
-            try:
-                async with aiohttp.ClientSession(
-                    connector=aiohttp.TCPConnector(force_close=True),
-                ) as session:
-                    async with session.get(
-                        f"{self.url}/ow/entity-states/wait",
-                        headers={"x-state-version": str(current_version)},
-                        timeout=aiohttp.ClientTimeout(total=10),
-                    ) as resp:
-                        if resp.status == 200:
-                            server_ver = int(resp.headers.get("x-state-version", current_version + 1))
-                            if server_ver != current_version:
-                                current_version = server_ver
-                                data = await resp.json(content_type=None)
-                                self.async_set_updated_data(data)
-            except asyncio.CancelledError:
-                break
-            except Exception:
-                await asyncio.sleep(2)
-
-    async def async_set_entity(
-        self, entity_type: str, entity_key: str, state: bool
-    ) -> None:
-        """Push HA toggle to add-on instantly."""
-        for attempt in range(3):
-            try:
-                async with aiohttp.ClientSession(
-                    connector=aiohttp.TCPConnector(force_close=True),
-                ) as session:
-                    async with session.post(
-                        f"{self.url}/ow/entity-set",
-                        json={"type": entity_type, "key": entity_key, "state": state},
-                        timeout=aiohttp.ClientTimeout(total=5),
-                    ) as resp:
-                        if resp.status == 200:
-                            data = await resp.json(content_type=None)
-                            if data.get("state"):
-                                self.async_set_updated_data(data["state"])
-                            return
-                        _LOGGER.warning("entity-set returned %s", resp.status)
-            except aiohttp.ClientError as err:
-                if attempt < 2:
-                    await asyncio.sleep(0.1)
-                else:
-                    _LOGGER.error("Cannot push state to Overwatch: %s", err)
 `,
   "const.py": `"""Constants for HA Overwatch integration."""
 DOMAIN = "ha_overwatch"
@@ -996,31 +565,28 @@ class OverwatchConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             url = user_input[CONF_URL].rstrip("/")
             try:
                 async with aiohttp.ClientSession() as session:
-                    async with session.get(
-                        f"{url}/ow/health",
-                        timeout=aiohttp.ClientTimeout(total=5),
-                    ) as resp:
+                    async with session.get(f"{url}/ow/health",
+                        timeout=aiohttp.ClientTimeout(total=5)) as resp:
                         if resp.status == 200:
                             data = await resp.json(content_type=None)
                             if data.get("ok"):
                                 await self.async_set_unique_id(DOMAIN)
                                 self._abort_if_unique_id_configured()
-                                return self.async_create_entry(
-                                    title="HA Overwatch",
-                                    data={CONF_URL: url},
-                                )
+                                return self.async_create_entry(title="HA Overwatch", data={CONF_URL: url})
                 errors["base"] = "cannot_connect"
             except Exception:
                 errors["base"] = "cannot_connect"
         return self.async_show_form(
             step_id="user",
-            data_schema=vol.Schema({
-                vol.Required(CONF_URL, default=DEFAULT_URL): str,
-            }),
-            errors=errors,
-        )
+            data_schema=vol.Schema({vol.Required(CONF_URL, default=DEFAULT_URL): str}),
+            errors=errors)
 `,
-  "switch.py": `"""Switch platform for HA Overwatch."""
+  "switch.py": `"""Switch platform for HA Overwatch.
+
+Switch entities store their state in HA directly (restored across restarts).
+async_turn_on/off just writes the state — HA is the single source of truth.
+The dashboard reads switch states from haStates via the existing WS proxy.
+"""
 from __future__ import annotations
 import logging
 from homeassistant.components.switch import SwitchEntity
@@ -1028,6 +594,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import DOMAIN
 from . import OverwatchCoordinator
@@ -1036,14 +603,11 @@ _LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(
-    hass: HomeAssistant,
-    entry: ConfigEntry,
+    hass: HomeAssistant, entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     coordinator: OverwatchCoordinator = hass.data[DOMAIN][entry.entry_id]
     data = coordinator.data or {}
-    _LOGGER.debug("switch setup: zones=%d groups=%d cameras=%d",
-        len(data.get("zones", [])), len(data.get("groups", [])), len(data.get("cameras", [])))
 
     entities = [OverwatchMasterSwitch(coordinator)]
     for g in data.get("groups", []):
@@ -1059,7 +623,7 @@ async def async_setup_entry(
         entities.append(OverwatchCameraSwitch(coordinator, c))
 
     _LOGGER.info("Overwatch: registering %d switch entities", len(entities))
-    async_add_entities(entities, update_before_add=True)
+    async_add_entities(entities, update_before_add=False)
 
 
 def _dev(coordinator: OverwatchCoordinator) -> DeviceInfo:
@@ -1072,126 +636,74 @@ def _dev(coordinator: OverwatchCoordinator) -> DeviceInfo:
     )
 
 
-class OWSwitch(CoordinatorEntity, SwitchEntity):
+class OWSwitch(CoordinatorEntity, SwitchEntity, RestoreEntity):
+    """Base switch — state lives in HA, restored across restarts."""
+
     _attr_should_poll = False
 
-    def __init__(self, coordinator, uid, name, etype, ekey, icon="mdi:shield"):
+    def __init__(self, coordinator, uid, name, icon="mdi:shield"):
         super().__init__(coordinator)
         self._attr_unique_id = uid
         self._attr_name = name
         self._attr_icon = icon
         self._attr_device_info = _dev(coordinator)
-        self._etype = etype
-        self._ekey = ekey
+        self._is_on = True
 
     @property
     def is_on(self) -> bool:
-        return True
+        return self._is_on
 
-    async def async_turn_on(self, **kwargs):
-        await self.coordinator.async_set_entity(self._etype, self._ekey, True)
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        if (state := await self.async_get_last_state()) is not None:
+            self._is_on = state.state != "off"
 
-    async def async_turn_off(self, **kwargs):
-        await self.coordinator.async_set_entity(self._etype, self._ekey, False)
+    async def async_turn_on(self, **kwargs) -> None:
+        self._is_on = True
+        self.async_write_ha_state()
+
+    async def async_turn_off(self, **kwargs) -> None:
+        self._is_on = False
+        self.async_write_ha_state()
 
 
 class OverwatchMasterSwitch(OWSwitch):
     def __init__(self, c):
-        super().__init__(c, "overwatch_zone_master", "Overwatch Zone Master",
-                         "master", "master", "mdi:shield-home")
-
-    @property
-    def is_on(self) -> bool:
-        return bool((self.coordinator.data or {}).get("master", True))
-
+        super().__init__(c, "overwatch_zone_master", "Overwatch Zone Master", "mdi:shield-home")
 
 class OverwatchGroupSwitch(OWSwitch):
     def __init__(self, c, g):
-        gid = g["id"]
-        name = g.get("name", gid)
-        super().__init__(c, f"overwatch_zone_group_{gid}", f"Zone Group: {name}",
-                         "group", gid, "mdi:layers")
-        self._gid = gid
-
-    @property
-    def is_on(self) -> bool:
-        gs = (self.coordinator.data or {}).get("groups", [])
-        g = next((x for x in gs if x["id"] == self._gid), None)
-        return bool(g.get("enabled", True)) if g else True
-
+        super().__init__(c, f"overwatch_zone_group_{g['id']}", f"Zone Group: {g.get('name', g['id'])}", "mdi:layers")
 
 class OverwatchZoneSwitch(OWSwitch):
     def __init__(self, c, z):
-        zid = z["id"]
-        name = z.get("name", zid)
-        super().__init__(c, f"overwatch_zone_{zid}", f"Zone: {name}",
-                         "zone", zid, "mdi:map-marker-radius")
-        self._zid = zid
-
-    @property
-    def is_on(self) -> bool:
-        zs = (self.coordinator.data or {}).get("zones", [])
-        z = next((x for x in zs if x["id"] == self._zid), None)
-        return bool(z.get("enabled", True)) if z else True
-
+        super().__init__(c, f"overwatch_zone_{z['id']}", f"Zone: {z.get('name', z['id'])}", "mdi:map-marker-radius")
 
 class OverwatchCameraAllSwitch(OWSwitch):
     def __init__(self, c):
-        super().__init__(c, "overwatch_camera_all", "Camera All",
-                         "camera_all", "all", "mdi:cctv")
-
-    @property
-    def is_on(self) -> bool:
-        cs = (self.coordinator.data or {}).get("cameras", [])
-        return all(x.get("enabled", True) for x in cs) if cs else True
-
+        super().__init__(c, "overwatch_camera_all", "Camera All", "mdi:cctv")
 
 class OverwatchCameraGroupSwitch(OWSwitch):
     def __init__(self, c, g):
-        gid = g["id"]
-        name = g.get("name", gid)
-        super().__init__(c, f"overwatch_camera_group_{gid}", f"Camera Group: {name}",
-                         "camera_group", gid, "mdi:cctv")
-        self._gid = gid
-
-    @property
-    def is_on(self) -> bool:
-        gs = (self.coordinator.data or {}).get("camera_groups", [])
-        g = next((x for x in gs if x["id"] == self._gid), None)
-        return bool(g.get("enabled", True)) if g else True
-
+        super().__init__(c, f"overwatch_camera_group_{g['id']}", f"Camera Group: {g.get('name', g['id'])}", "mdi:cctv")
 
 class OverwatchCameraZoneSwitch(OWSwitch):
     def __init__(self, c, z):
-        zid = z["id"]
-        name = z.get("name", zid)
-        super().__init__(c, f"overwatch_camera_zone_{zid}", f"Camera Zone: {name}",
-                         "camera_zone", zid, "mdi:cctv")
-        self._zid = zid
-
-    @property
-    def is_on(self) -> bool:
-        zs = (self.coordinator.data or {}).get("camera_zones", [])
-        z = next((x for x in zs if x["id"] == self._zid), None)
-        return bool(z.get("enabled", True)) if z else True
-
+        super().__init__(c, f"overwatch_camera_zone_{z['id']}", f"Camera Zone: {z.get('name', z['id'])}", "mdi:cctv")
 
 class OverwatchCameraSwitch(OWSwitch):
     def __init__(self, c, cam):
         cid = cam["id"]
         safe = cid.replace(".", "_").replace("-", "_")
-        name = cam.get("name", cid)
-        super().__init__(c, f"overwatch_camera_{safe}", f"Camera: {name}",
-                         "camera", cid, "mdi:cctv")
-        self._cid = cid
-
-    @property
-    def is_on(self) -> bool:
-        cs = (self.coordinator.data or {}).get("cameras", [])
-        c = next((x for x in cs if x["id"] == self._cid), None)
-        return bool(c.get("enabled", True)) if c else True
+        super().__init__(c, f"overwatch_camera_{safe}", f"Camera: {cam.get('name', cid)}", "mdi:cctv")
 `,
-  "binary_sensor.py": `"""Binary sensor platform for HA Overwatch."""
+  "binary_sensor.py": `"""Binary sensor platform for HA Overwatch.
+
+Triggered states are pushed directly by the server-side HA listener
+via POST /api/states/binary_sensor.overwatch_zone_*
+These entities are created here so HA knows about them,
+but their state is written externally by the server.
+"""
 from __future__ import annotations
 import logging
 from homeassistant.components.binary_sensor import BinarySensorDeviceClass, BinarySensorEntity
@@ -1207,8 +719,7 @@ _LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(
-    hass: HomeAssistant,
-    entry: ConfigEntry,
+    hass: HomeAssistant, entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     coordinator: OverwatchCoordinator = hass.data[DOMAIN][entry.entry_id]
@@ -1219,7 +730,7 @@ async def async_setup_entry(
     for z in data.get("zones", []):
         entities.append(OverwatchZoneTriggered(coordinator, z))
     _LOGGER.info("Overwatch: registering %d binary sensor entities", len(entities))
-    async_add_entities(entities, update_before_add=True)
+    async_add_entities(entities, update_before_add=False)
 
 
 def _dev(coordinator: OverwatchCoordinator) -> DeviceInfo:
@@ -1250,44 +761,31 @@ class OWSensor(CoordinatorEntity, BinarySensorEntity):
 
 class OverwatchMasterTriggered(OWSensor):
     def __init__(self, c):
-        super().__init__(c, "overwatch_zone_master_triggered",
-                         "Overwatch Zone Master Triggered")
-
-    @property
-    def is_on(self) -> bool:
-        return any(z.get("triggered", False)
-                   for z in (self.coordinator.data or {}).get("zones", []))
-
+        super().__init__(c, "overwatch_zone_master_triggered", "Overwatch Zone Master Triggered")
 
 class OverwatchGroupTriggered(OWSensor):
     def __init__(self, c, g):
-        gid = g["id"]
-        name = g.get("name", gid)
-        super().__init__(c, f"overwatch_zone_group_{gid}_triggered",
-                         f"Zone Group Triggered: {name}")
-        self._gid = gid
-        self._zids = g.get("zone_ids", [])
-
-    @property
-    def is_on(self) -> bool:
-        return any(z.get("triggered", False)
-                   for z in (self.coordinator.data or {}).get("zones", [])
-                   if z["id"] in self._zids)
-
+        super().__init__(c, f"overwatch_zone_group_{g['id']}_triggered",
+                         f"Zone Group Triggered: {g.get('name', g['id'])}")
 
 class OverwatchZoneTriggered(OWSensor):
     def __init__(self, c, z):
-        zid = z["id"]
-        name = z.get("name", zid)
-        super().__init__(c, f"overwatch_zone_{zid}_triggered",
-                         f"Zone Triggered: {name}")
-        self._zid = zid
-
-    @property
-    def is_on(self) -> bool:
-        zs = (self.coordinator.data or {}).get("zones", [])
-        z = next((x for x in zs if x["id"] == self._zid), None)
-        return bool(z.get("triggered", False)) if z else False
+        super().__init__(c, f"overwatch_zone_{z['id']}_triggered",
+                         f"Zone Triggered: {z.get('name', z['id'])}")
+`,
+  "manifest.json": `{
+  "domain": "ha_overwatch",
+  "name": "HA Overwatch",
+  "version": "1.03.0",
+  "documentation": "https://github.com/DM-AU/ha-overwatch",
+  "issue_tracker": "https://github.com/DM-AU/ha-overwatch/issues",
+  "codeowners": [],
+  "requirements": [],
+  "dependencies": [],
+  "after_dependencies": [],
+  "config_flow": true,
+  "iot_class": "local_push"
+}
 `,
   "strings.json": `{
   "config": {
@@ -1298,10 +796,7 @@ class OverwatchZoneTriggered(OWSensor):
         "data": { "url": "Add-on URL" }
       }
     },
-    "error": {
-      "cannot_connect": "Cannot connect to HA Overwatch add-on.",
-      "unknown": "Unexpected error."
-    },
+    "error": { "cannot_connect": "Cannot connect to HA Overwatch add-on.", "unknown": "Unexpected error." },
     "abort": { "already_configured": "HA Overwatch is already configured." }
   }
 }
@@ -1315,26 +810,9 @@ class OverwatchZoneTriggered(OWSensor):
         "data": { "url": "Add-on URL" }
       }
     },
-    "error": {
-      "cannot_connect": "Cannot connect to HA Overwatch add-on.",
-      "unknown": "Unexpected error."
-    },
+    "error": { "cannot_connect": "Cannot connect to HA Overwatch add-on.", "unknown": "Unexpected error." },
     "abort": { "already_configured": "HA Overwatch is already configured." }
   }
-}
-`,
-  "manifest.json": `{
-  "domain": "ha_overwatch",
-  "name": "HA Overwatch",
-  "version": "1.00.0",
-  "documentation": "https://github.com/DM-AU/ha-overwatch",
-  "issue_tracker": "https://github.com/DM-AU/ha-overwatch/issues",
-  "codeowners": [],
-  "requirements": [],
-  "dependencies": [],
-  "after_dependencies": [],
-  "config_flow": true,
-  "iot_class": "local_polling"
 }
 `,
 };
@@ -1360,116 +838,146 @@ function writeCustomComponent() {
 }
 
 
-/* ─── WEBHOOK PUSH TO HA COORDINATOR ──────────────────────── */
-let haWebhookUrl = null;
-
-async function pushToHAWebhook(payload) {
-  if (!haWebhookUrl) return;
-  try {
-    const parsed  = new URL(haWebhookUrl);
-    const isHttps = parsed.protocol === "https:";
-    const lib     = isHttps ? https : http;
-    const body    = JSON.stringify(payload);
-    const req = lib.request({
-      hostname: parsed.hostname,
-      port:     parsed.port || (isHttps ? 443 : 80),
-      path:     parsed.pathname + (parsed.search || ""),
-      method:   "POST",
-      headers:  { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
-    }, res => { res.resume(); });
-    req.on("error", () => {});
-    req.write(body); req.end();
-  } catch { /* ignore — coordinator still polls every 30s */ }
-}
-
 /* ─── SERVER-SIDE HA WEBSOCKET LISTENER ────────────────────── */
 // Maintains a persistent server-to-HA WebSocket connection.
 // Watches zone sensor states and updates serverState.triggeredZones,
 // then pushes binary_sensor states to HA whenever a zone triggers/clears.
+/* ─── SERVER-SIDE HA STATE LISTENER ────────────────────────── */
+// Watches HA entity state changes via supervisor WebSocket API.
+// When a zone's sensors trigger/clear, pushes binary_sensor state to HA.
+// Uses supervisor token + internal supervisor API — no login warnings.
+
 function startHAListener() {
   if (!process.env.SUPERVISOR_TOKEN) return;
-  const net = require("net");
 
-  let msgId     = 1;
-  let authDone  = false;
-  let subId     = null;
-  let recBuf    = Buffer.alloc(0);
   let reconnectDelay = 5000;
+  let msgId = 1;
 
   function connect() {
-    const sock = net.connect({ host: "homeassistant", port: 8123 });
-
-    // Upgrade to WebSocket manually
     const crypto = require("crypto");
     const wsKey  = crypto.randomBytes(16).toString("base64");
-    sock.write(
-      "GET /api/websocket HTTP/1.1\r\n" +
-      "Host: homeassistant\r\n" +
-      "Upgrade: websocket\r\n" +
-      "Connection: Upgrade\r\n" +
-      `Sec-WebSocket-Key: ${wsKey}\r\n` +
-      "Sec-WebSocket-Version: 13\r\n\r\n"
-    );
 
-    function send(obj) {
-      sendWsFrame(sock, JSON.stringify({ ...obj, id: msgId++ }));
-    }
-
-    let httpDone = false;
-    sock.on("data", chunk => {
-      if (!httpDone) {
-        const s = chunk.toString();
-        if (s.includes("\r\n\r\n")) {
-          httpDone = true;
-          const rest = chunk.slice(chunk.indexOf("\r\n\r\n") + 4);
-          if (rest.length > 0) processChunk(rest);
-        }
-        return;
-      }
-      processChunk(chunk);
+    // Use supervisor internal hostname — avoids "login failed" warnings
+    const haReq = http.request({
+      hostname: "supervisor",
+      port:     80,
+      path:     "/core/api/websocket",
+      headers: {
+        "Host":                  "supervisor",
+        "Upgrade":               "websocket",
+        "Connection":            "Upgrade",
+        "Sec-WebSocket-Key":     wsKey,
+        "Sec-WebSocket-Version": "13",
+        "Authorization":         `Bearer ${process.env.SUPERVISOR_TOKEN}`,
+      },
     });
 
-    function processChunk(chunk) {
-      recBuf = Buffer.concat([recBuf, chunk]);
-      while (true) {
-        const text = extractWsPayload(recBuf);
-        if (text === null) break;
-        // advance buffer past this frame
-        const used = frameLength(recBuf);
-        if (used <= 0) break;
-        recBuf = recBuf.slice(used);
-        try { handleMsg(JSON.parse(text)); } catch {}
-      }
-    }
+    haReq.on("upgrade", (haRes, sock) => {
+      console.log("[HA-Overwatch] HA listener connected via supervisor API");
+      reconnectDelay = 5000;
+      let buf = Buffer.alloc(0);
 
-    function handleMsg(msg) {
-      if (msg.type === "auth_required") {
-        sendWsFrame(sock, JSON.stringify({
-          type: "auth", access_token: process.env.SUPERVISOR_TOKEN,
-        }));
-        return;
+      function send(obj) {
+        sendWsFrame(sock, JSON.stringify({ ...obj, id: msgId++ }));
       }
-      if (msg.type === "auth_ok") {
-        authDone = true;
-        reconnectDelay = 5000;
-        console.log("[HA-Overwatch] Server HA listener authenticated");
-        // Subscribe to all state_changed events
-        send({ type: "subscribe_events", event_type: "state_changed" });
-        return;
-      }
-      if (msg.type === "result" && msg.success && !subId) {
-        subId = msg.id;
-        return;
-      }
-      if (msg.type === "event" && msg.event?.event_type === "state_changed") {
-        const { entity_id, new_state } = msg.event.data || {};
-        if (!entity_id || !new_state) return;
-        onStateChanged(entity_id, new_state.state);
-      }
-    }
 
-    sock.on("error", e  => { console.error("[HA-Overwatch] HA listener error:", e.message); scheduleReconnect(); });
-    sock.on("close", () => { console.log("[HA-Overwatch] HA listener disconnected"); scheduleReconnect(); });
+      sock.on("data", chunk => {
+        buf = Buffer.concat([buf, chunk]);
+        while (true) {
+          const text = extractWsPayload(buf);
+          if (text === null) break;
+          const used = frameLength(buf);
+          if (used <= 0) break;
+          buf = buf.slice(used);
+          try { handleMsg(JSON.parse(text), send, sock); } catch {}
+        }
+      });
+
+      sock.on("close", () => {
+        console.log("[HA-Overwatch] HA listener disconnected");
+        scheduleReconnect();
+      });
+      sock.on("error", e => {
+        console.error("[HA-Overwatch] HA listener error:", e.message);
+        scheduleReconnect();
+      });
+    });
+
+    haReq.on("error", e => {
+      console.error("[HA-Overwatch] HA listener connect error:", e.message);
+      scheduleReconnect();
+    });
+
+    haReq.end();
+  }
+
+  const triggeredZones = {}; // zoneId -> bool
+
+  function handleMsg(msg, send, sock) {
+    if (msg.type === "auth_required") {
+      // Send auth using supervisor token
+      sendWsFrame(sock, JSON.stringify({
+        type: "auth", access_token: process.env.SUPERVISOR_TOKEN,
+      }));
+      return;
+    }
+    if (msg.type === "auth_ok") {
+      send({ type: "subscribe_events", event_type: "state_changed" });
+      return;
+    }
+    if (msg.type === "event" && msg.event?.event_type === "state_changed") {
+      const { entity_id, new_state } = msg.event.data || {};
+      if (!entity_id || !new_state) return;
+      onStateChanged(entity_id, new_state.state || "");
+    }
+  }
+
+  function onStateChanged(entityId, state) {
+    const zones = loadZones();
+    const triggered = ["on","open","detected","home","triggered"]
+      .includes((state || "").toLowerCase());
+    let changed = false;
+
+    zones.forEach(zone => {
+      if (!(zone.sensors || []).includes(entityId)) return;
+      const wasTriggered = !!triggeredZones[zone.id];
+      // Zone is triggered if ANY of its sensors are triggered
+      const sensors = zone.sensors || [];
+      // We only have this one sensor's new state — keep others as-is
+      // Use a per-sensor map for accuracy
+      triggeredZones[`${zone.id}::${entityId}`] = triggered;
+      const zoneNowTriggered = sensors.some(sid =>
+        triggeredZones[`${zone.id}::${sid}`] === true);
+      if (zoneNowTriggered !== wasTriggered) {
+        triggeredZones[zone.id] = zoneNowTriggered;
+        pushBinarySensor(zone, zoneNowTriggered);
+        changed = true;
+      }
+    });
+  }
+
+  function pushBinarySensor(zone, isTriggered) {
+    if (!process.env.SUPERVISOR_TOKEN) return;
+    const entityId = `binary_sensor.overwatch_zone_${zone.id}_triggered`;
+    const name     = `Zone Triggered: ${zone.name || zone.id}`;
+    const body = JSON.stringify({
+      state: isTriggered ? "on" : "off",
+      attributes: { friendly_name: name, device_class: "motion" },
+    });
+    const req = http.request({
+      hostname: "supervisor",
+      port:     80,
+      path:     `/core/api/states/${entityId}`,
+      method:   "POST",
+      headers:  {
+        "Authorization":  `Bearer ${process.env.SUPERVISOR_TOKEN}`,
+        "Content-Type":   "application/json",
+        "Content-Length": Buffer.byteLength(body),
+      },
+    }, res => { res.resume(); });
+    req.on("error", () => {});
+    req.write(body);
+    req.end();
   }
 
   function scheduleReconnect() {
@@ -1477,44 +985,7 @@ function startHAListener() {
     reconnectDelay = Math.min(reconnectDelay * 2, 60000);
   }
 
-  // Called when any HA entity state changes
-  function onStateChanged(entityId, state) {
-    const zones  = loadZones();
-    const groups = loadGroups();
-
-    // Build map of sensor → zone(s)
-    let changed = false;
-    zones.forEach(zone => {
-      const sensors = zone.sensors || [];
-      if (!sensors.includes(entityId)) return;
-      const isTriggered = ["on", "open", "detected", "home", "triggered"].includes((state || "").toLowerCase());
-      if (!!serverState.triggeredZones[zone.id] !== isTriggered) {
-        serverState.triggeredZones[zone.id] = isTriggered;
-        changed = true;
-      }
-    });
-
-    if (changed) {
-      const payload = buildEntityPayload();
-      notifyStateChange();
-      pushToHAWebhook(payload);
-      pushStateToHA(payload).catch(() => {});
-    }
-  }
-
   connect();
-}
-
-// Calculate byte length of a WS frame (to advance buffer)
-function frameLength(buf) {
-  if (buf.length < 2) return -1;
-  let len = buf[1] & 0x7f;
-  let offset = 2;
-  if (len === 126) { if (buf.length < 4) return -1; len = buf.readUInt16BE(2); offset = 4; }
-  else if (len === 127) return -1;
-  const masked = (buf[1] & 0x80) !== 0;
-  if (masked) offset += 4;
-  return offset + len;
 }
 
 // WebSocket proxy — only active in add-on mode (SUPERVISOR_TOKEN present).

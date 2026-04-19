@@ -718,17 +718,21 @@ function getGroupState(group) {
   const members = (group.zone_ids || []).map(id => zones.find(z => z.id === id)).filter(Boolean);
   if (!members.length) return { anyTriggered: false, anyArmed: false, allDisarmed: true };
   const anyTriggered = members.some(z => getZoneState(z) === "triggered");
-  const anyArmed     = members.some(z => z.enabled !== false && masterEnabled);
-  const allDisarmed  = members.every(z => z.enabled === false || !masterEnabled);
+  const anyArmed     = members.some(z => getZoneState(z) !== "disabled");
+  const allDisarmed  = members.every(z => getZoneState(z) === "disabled");
   return { anyTriggered, anyArmed, allDisarmed };
 }
 
 function setGroupArmed(groupId, armed) {
   const group = groups.find(g => g.id === groupId);
   if (!group) return;
-  (group.zone_ids || []).forEach(zoneId => setZoneEnabled(zoneId, armed));
-  // Also sync group as a unit to HA
-  owEntitySet("group", groupId, armed);
+  // Toggle each member zone switch in HA
+  (group.zone_ids || []).forEach(zoneId => {
+    const z = zones.find(z => z.id === zoneId);
+    if (z) owCallSwitch(`switch.overwatch_zone_${zoneId}`, armed);
+  });
+  // Toggle the group switch in HA
+  owCallSwitch(`switch.overwatch_zone_group_${groupId}`, armed);
   renderZonesEditor();
 }
 
@@ -823,33 +827,38 @@ function getZoneFadeAlpha(zoneId) {
 }
 
 /* ─── MASTER ALARM STATE ──────────────────────────────────── */
-// masterEnabled is the dashboard-level arm toggle (independent of HA entity)
-// Persisted to localStorage so it survives page refresh
+// masterEnabled reads from the HA switch entity (switch.overwatch_zone_master).
+// Falls back to localStorage for initial render before HA connects.
 let masterEnabled = localStorage.getItem("masterEnabled") !== "false";
 
 function setMasterEnabled(val) {
   masterEnabled = !!val;
   localStorage.setItem("masterEnabled", masterEnabled);
+  // Call HA switch service — state flows back via WS and updates all consumers
+  owCallSwitch("switch.overwatch_zone_master", val);
+  // Also toggle all group and zone switches to match master
+  for (const g of groups) {
+    owCallSwitch(`switch.overwatch_zone_group_${g.id}`, val);
+  }
+  for (const z of zones) {
+    owCallSwitch(`switch.overwatch_zone_${z.id}`, val);
+  }
   updateStatusDropdownInPlace();
   renderZones();
-  logEvent("info", masterEnabled ? "Master alarm enabled." : "Master alarm disabled.", "system");
-  syncMasterToHA(masterEnabled);
+  logEvent("info", val ? "Master alarm enabled." : "Master alarm disabled.", "system");
 }
 
 function setZoneEnabled(zoneId, val) {
   const zone = zones.find(z => z.id === zoneId);
   if (!zone) return;
-  zone.enabled = !!val;
-  saveZone(zone);
-  updateStatusDropdownInPlace();
-  renderZones();
+  // Call HA switch service — state flows back via WS haStates
+  owCallSwitch(`switch.overwatch_zone_${zoneId}`, !!val);
   logEvent(
     "info",
-    zone.enabled ? `Zone enabled: ${zone.name || zone.id}` : `Zone disabled: ${zone.name || zone.id}`,
+    val ? `Zone enabled: ${zone.name || zone.id}` : `Zone disabled: ${zone.name || zone.id}`,
     "zone",
     { zoneName: zone.name || zone.id, zoneColour: zone.colorHex || "#0096ff" }
   );
-  syncZoneToHA(zone, zone.enabled ? "normal" : "disabled");
 }
 
 // Issue 30: hide/show a zone visually — no HA entity, no alarm impact
@@ -868,27 +877,34 @@ function setZoneHidden(zoneId, hidden) {
   );
 }
 
-/* ─── ENTITY SYNC (dashboard → server → HA) ───────────────── */
-// Fire-and-forget — errors never block the UI
-async function owEntitySet(type, key, state) {
-  if (!serverApiAvailable) return;
-  try {
-    await fetch(apiPath("ow/entity-set"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type, key, state }),
-    });
-  } catch { /* server unreachable */ }
+/* ─── ENTITY SYNC (dashboard → HA via service call) ──────── */
+// Toggle a zone/group/master switch entity in HA directly.
+// The dashboard reads the state back from haStates (WS subscription).
+function owCallSwitch(entityId, on) {
+  if (!haConnected || !haSocket) return;
+  haSocket.send(JSON.stringify({
+    id: haMsgId++, type: "call_service",
+    domain: "switch",
+    service: on ? "turn_on" : "turn_off",
+    service_data: { entity_id: entityId },
+  }));
 }
 
-async function syncZoneToHA(zone, zoneState) {
-  // Map visual state to enabled boolean
-  const enabled = zoneState !== "disabled";
-  await owEntitySet("zone", zone.id, enabled);
+function zoneEntityId(zone) {
+  return `switch.overwatch_zone_${zone.id}`;
 }
 
-async function syncMasterToHA(armed) {
-  await owEntitySet("master", "master", armed);
+function masterEntityId() {
+  return "switch.overwatch_zone_master";
+}
+
+function syncZoneToHA(zone, zoneState) {
+  const on = zoneState !== "disabled";
+  owCallSwitch(zoneEntityId(zone), on);
+}
+
+function syncMasterToHA(armed) {
+  owCallSwitch(masterEntityId(), armed);
 }
 
 /* ─── ZONE STATE COMPUTATION ──────────────────────────────── */
@@ -903,8 +919,14 @@ function isEntityTriggered(entityId) {
 const zonePrevState = {};
 
 function getZoneState(zone) {
-  // Respect zone-level and master enabled toggles
-  if (zone.enabled === false || !masterEnabled) return "disabled";
+  // Read enabled state from HA switch entity — HA is the source of truth.
+  // Falls back to zone.enabled (YAML) if the HA entity doesn't exist yet.
+  const switchState = haStates[`switch.overwatch_zone_${zone.id}`];
+  const enabled = switchState ? switchState.state !== "off" : zone.enabled !== false;
+  const masterSwitch = haStates["switch.overwatch_zone_master"];
+  const masterOn = masterSwitch ? masterSwitch.state !== "off" : masterEnabled;
+
+  if (!enabled || !masterOn) return "disabled";
   if (!haConnected) return "normal";
   const sensors = zone.sensors || [];
   if (!sensors.length) return "normal";
@@ -927,7 +949,7 @@ function checkZoneStateChanges() {
     const sensors = zone.sensors || [];
     // Compute raw state without the prev-state side effects
     let state = "normal";
-    if (zone.enabled === false || !masterEnabled) {
+    if (getZoneState(zone) === "disabled") {
       state = "disabled";
     } else {
       const anyTriggered   = sensors.some(isEntityTriggered);
@@ -1018,7 +1040,7 @@ setInterval(() => {
         const zone = zones.find(z => z.id === dot.dataset.zoneId);
         if (!zone) return;
         const st = getZoneState(zone);
-        const isOff = zone.enabled === false || !masterEnabled;
+        const isOff = getZoneState(zone) === "disabled";
         const sensors = zone.sensors || [];
         const anyActive = sensors.some(isEntityTriggered);
         const isDisarmedActive = isOff && anyActive;
@@ -1057,8 +1079,8 @@ setInterval(() => {
         }
 
         const anyTriggered  = members.some(z => getZoneState(z) === "triggered");
-        const allArmed      = members.every(z => z.enabled !== false && masterEnabled);
-        const allDisarmed   = members.every(z => z.enabled === false || !masterEnabled);
+        const allArmed      = members.every(z => getZoneState(z) !== 'disabled');
+        const allDisarmed   = members.every(z => getZoneState(z) === "disabled");
         const someArmed     = !allArmed && !allDisarmed; // mixed
 
         // Colour logic:
@@ -1464,7 +1486,7 @@ function renderZonesEditor() {
 
   function buildZoneItem(z, indented) {
     const state = getZoneState(z);
-    const isOff = z.enabled === false || !masterEnabled;
+    const isOff = getZoneState(z) === "disabled";
     const dotColour = isOff ? "#444" :
       state === "triggered" ? resolveColour(entityTypeColour(detectEntityType((z.sensors||[])[0]||""))) :
       state === "fault" ? "#ff9500" : (z.colorHex || "#0096ff");
@@ -2632,6 +2654,15 @@ function connectHA() {
         const prev = haStates[data.entity_id];
         haStates[data.entity_id] = data.new_state;
 
+        // Sync masterEnabled when the HA master switch changes
+        if (data.entity_id === "switch.overwatch_zone_master") {
+          const newMaster = (data.new_state.state || "").toLowerCase() !== "off";
+          if (masterEnabled !== newMaster) {
+            masterEnabled = newMaster;
+            localStorage.setItem("masterEnabled", masterEnabled);
+          }
+        }
+
         // Always update status bar for the configured alarm entity or any alarm_control_panel
         // This runs regardless of haSubscribedEntities to prevent missed status updates
         const alarmEntity = uiConfig.alarm_entity || "";
@@ -3639,12 +3670,13 @@ function updateStatusDropdownInPlace() {
   body.querySelectorAll(".zone-enabled-chk[data-zone-id]").forEach(chk => {
     const zone = zones.find(z => z.id === chk.dataset.zoneId);
     if (!zone) return;
-    chk.checked  = zone.enabled !== false;
-    chk.disabled = !masterEnabled;
+    const _zst  = getZoneState(zone);
+    chk.checked  = _zst !== "disabled";
+    chk.disabled = false;
 
     const row = chk.closest(".status-dd-zone");
     if (!row) return;
-    const isOff = zone.enabled === false || !masterEnabled;
+    const isOff = _zst === "disabled";
     const st    = getZoneState(zone);
     const isTriggeredZone = st === "triggered";
     const sensors = zone.sensors || [];
@@ -3680,12 +3712,12 @@ function updateStatusDropdownInPlace() {
     const group = groups.find(g => g.id === chk.dataset.groupId);
     if (!group) return;
     const members = (group.zone_ids || []).map(id => zones.find(z => z.id === id)).filter(Boolean);
-    const allArmed = members.length > 0 && members.every(z => z.enabled !== false && masterEnabled);
+    const allArmed = members.length > 0 && members.every(z => getZoneState(z) !== 'disabled');
     chk.checked = allArmed;
 
     const hdr = chk.closest(".status-dd-group-header");
     if (!hdr) return;
-    const allDisarmed  = members.every(z => z.enabled === false || !masterEnabled);
+    const allDisarmed  = members.every(z => getZoneState(z) === "disabled");
     const someArmed    = !allArmed && !allDisarmed;
     const anyTriggered = members.some(z => getZoneState(z) === "triggered");
     const gHex  = group.colorHex || "#ff3b30";
@@ -3705,8 +3737,8 @@ function updateStatusDropdownInPlace() {
   if (ungroupedChk) {
     const groupedIds = new Set(groups.flatMap(g => g.zone_ids || []));
     const ung = zones.filter(z => !groupedIds.has(z.id));
-    const allArmed   = ung.length > 0 && ung.every(z => z.enabled !== false && masterEnabled);
-    const allDisarmed = ung.every(z => z.enabled === false || !masterEnabled);
+    const allArmed   = ung.length > 0 && ung.every(z => getZoneState(z) !== 'disabled');
+    const allDisarmed = ung.every(z => getZoneState(z) === "disabled");
     const someArmed  = !allArmed && !allDisarmed;
     const anyTriggered = ung.some(z => getZoneState(z) === "triggered");
     ungroupedChk.checked = allArmed;
@@ -3740,7 +3772,7 @@ function renderStatusDropdown() {
   // Build zone row HTML (shared by group members and ungrouped)
   function zoneRow(z, indented = false) {
     const state = getZoneState(z);
-    const isOff = z.enabled === false || !masterEnabled;
+    const isOff = getZoneState(z) === 'disabled';
     const isTriggeredZone = state === "triggered";
     const sensors = z.sensors || [];
     const anyActive = haConnected && sensors.some(isEntityTriggered);
@@ -3762,7 +3794,7 @@ function renderStatusDropdown() {
           style="background:none;border:none;padding:0 2px;cursor:pointer;color:${z.hidden ? 'rgba(255,255,255,0.25)' : 'rgba(255,255,255,0.65)'};line-height:0;flex-shrink:0;"
         >${z.hidden ? eyeClosed : eyeOpen}</button>
         <label class="zone-toggle-switch" style="flex-shrink:0;">
-          <input type="checkbox" class="zone-enabled-chk" data-zone-id="${z.id}" ${z.enabled !== false ? "checked" : ""} ${!masterEnabled ? "disabled" : ""}>
+          <input type="checkbox" class="zone-enabled-chk" data-zone-id="${z.id}" ${getZoneState(z) !== "disabled" ? "checked" : ""}>
           <span class="zone-toggle-track"></span>
         </label>
       </div>`;
@@ -3774,8 +3806,8 @@ function renderStatusDropdown() {
       .map(id => zones.find(z => z.id === id))
       .filter(Boolean)
       .sort((a, b) => (a.name||a.id).localeCompare(b.name||b.id));
-    const allArmed    = members.length > 0 && members.every(z => z.enabled !== false && masterEnabled);
-    const allDisarmed = members.length === 0 || members.every(z => z.enabled === false || !masterEnabled);
+    const allArmed    = members.length > 0 && members.every(z => getZoneState(z) !== 'disabled');
+    const allDisarmed = members.length === 0 || members.every(z => getZoneState(z) === 'disabled');
     const anyTriggered = members.some(z => getZoneState(z) === "triggered");
     const allMembHidden = members.length > 0 && members.every(z => z.hidden);
     const gHex        = g.colorHex || "#ff3b30";
@@ -3811,7 +3843,7 @@ function renderStatusDropdown() {
   function ungroupedSection(ungroupedZones) {
     const storageKey  = "ddGroup___ungrouped";
     const collapsed   = localStorage.getItem(storageKey) !== "expanded";
-    const allArmed    = ungroupedZones.length > 0 && ungroupedZones.every(z => z.enabled !== false && masterEnabled);
+    const allArmed    = ungroupedZones.length > 0 && ungroupedZones.every(z => getZoneState(z) !== 'disabled');
     const allDisarmed = ungroupedZones.every(z => z.enabled === false || !masterEnabled);
     const anyTriggered = ungroupedZones.some(z => getZoneState(z) === "triggered");
     const someArmed   = !allArmed && !allDisarmed;
@@ -4052,32 +4084,6 @@ function bindZonesButton() {
 // Zone flash interval is declared alongside renderZones above.
 // This stub kept for clarity.
 function startLiveRefresh() { /* flash driven by interval in renderZones block */ }
-
-// Poll add-on for entity state changes (e.g. HA toggling a zone from automations)
-// Uses long-poll so updates arrive within ~100ms of HA changing state
-(async function watchEntityState() {
-  let currentVer = 0;
-  while (true) {
-    try {
-      const res = await fetch(apiPath("ow/entity-states/wait"), {
-        headers: { "x-state-version": String(currentVer) },
-        signal: AbortSignal.timeout ? AbortSignal.timeout(10000) : undefined,
-      });
-      if (res.ok) {
-        const serverVer = parseInt(res.headers.get("x-state-version") || "0", 10);
-        if (serverVer !== currentVer) {
-          currentVer = serverVer;
-          // Re-read zone files to pick up enabled state changes from HA
-          await loadZones();
-          renderZones();
-          updateStatusDropdownInPlace();
-        }
-      }
-    } catch { /* ignore — server offline or timeout */ }
-    // Small delay between polls to avoid hammering on errors
-    await new Promise(r => setTimeout(r, 200));
-  }
-})();
 
 /* ─── INIT ────────────────────────────────────────────────── */
 function initFloorplan() {
