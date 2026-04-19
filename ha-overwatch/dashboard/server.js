@@ -1223,7 +1223,7 @@ server.on("upgrade", (req, socket, head) => {
     return;
   }
 
-  openWSProxy(socket, supervisorToken);
+  openWSProxy(socket, haToken);
 });
 
 function openWSProxy(socket, haToken) {
@@ -1243,17 +1243,19 @@ function openWSProxy(socket, haToken) {
     "\r\n"
   );
 
-  // Connect to HA Core WebSocket — use internal hostname 'homeassistant' on port 8123
+  // Connect via supervisor API — avoids external auth/login warning events
+  const supervisorTok = process.env.SUPERVISOR_TOKEN || "";
   const haReq = http.request({
-    hostname: "homeassistant",
-    port:     8123,
-    path:     "/api/websocket",
+    hostname: "supervisor",
+    port:     80,
+    path:     "/core/api/websocket",
     headers: {
-      "Host":                  "homeassistant",
+      "Host":                  "supervisor",
       "Upgrade":               "websocket",
       "Connection":            "Upgrade",
       "Sec-WebSocket-Key":     crypto.randomBytes(16).toString("base64"),
       "Sec-WebSocket-Version": "13",
+      "Authorization":         `Bearer ${supervisorTok}`,
     },
   });
 
@@ -1276,8 +1278,9 @@ function openWSProxy(socket, haToken) {
         console.log("[HA-Overwatch] WS proxy HA msg:", msg.type);
 
         if (authState === "waiting_for_ha" && msg.type === "auth_required") {
-          // Forward auth_required to browser so it knows to send auth
-          try { socket.write(haBuf); } catch {}
+          // Self-auth using SUPERVISOR_TOKEN — don't involve browser
+          const tok = process.env.SUPERVISOR_TOKEN || haToken;
+          sendWsFrame(haSocket, JSON.stringify({ type: "auth", access_token: tok }));
           haBuf = Buffer.alloc(0);
           authState = "forwarded_to_browser";
           return;
@@ -1311,9 +1314,8 @@ function openWSProxy(socket, haToken) {
       try {
         const msg = JSON.parse(payload);
         if (msg.type === "auth") {
-          // Replace whatever token browser sent with our real token
-          console.log("[HA-Overwatch] WS proxy: replacing browser auth token with supervisor token");
-          sendWsFrame(haSocket, JSON.stringify({ type: "auth", access_token: haToken }));
+          // Discard — already authed with SUPERVISOR_TOKEN when HA sent auth_required
+          console.log("[HA-Overwatch] WS proxy: discarding browser auth (already authed via supervisor)");
           broBuf = Buffer.alloc(0);
           return;
         }
