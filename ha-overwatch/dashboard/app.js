@@ -2674,10 +2674,28 @@ function connectHA() {
             masterEnabled = newMaster;
             localStorage.setItem("masterEnabled", masterEnabled);
           }
+          // Cascade master to all zones and groups
+          const on = newMaster;
+          for (const g of groups) owCallSwitch(`switch.overwatch_zone_group_${groupSlug(g)}`, on);
+          for (const z of zones)  owCallSwitch(`switch.overwatch_zone_${zoneSlug(z)}`, on);
         }
 
-        // Re-render status dropdown when any overwatch switch changes
-        // (so group checkboxes stay in sync with member zone states)
+        // When a group switch changes in HA, cascade to member zones
+        if (data.entity_id.startsWith("switch.overwatch_zone_group_")) {
+          const groupSwitchId = data.entity_id; // e.g. switch.overwatch_zone_group_house
+          const on = (data.new_state.state || "").toLowerCase() !== "off";
+          // Find which group this is
+          const matchGroup = groups.find(g =>
+            `switch.overwatch_zone_group_${groupSlug(g)}` === groupSwitchId);
+          if (matchGroup) {
+            (matchGroup.zone_ids || []).forEach(zid => {
+              const z = zones.find(z => z.id === zid);
+              if (z) owCallSwitch(`switch.overwatch_zone_${zoneSlug(z)}`, on);
+            });
+          }
+        }
+
+        // Re-render when any overwatch switch changes
         if (data.entity_id.startsWith("switch.overwatch_")) {
           updateStatusDropdownInPlace();
           renderZones();

@@ -878,7 +878,7 @@ class OverwatchZoneTriggered(OWSensor):
   "manifest.json": `{
   "domain": "ha_overwatch",
   "name": "HA Overwatch",
-  "version": "1.11.0",
+  "version": "1.12.0",
   "documentation": "https://github.com/DM-AU/ha-overwatch",
   "issue_tracker": "https://github.com/DM-AU/ha-overwatch/issues",
   "codeowners": [],
@@ -1042,17 +1042,31 @@ function startHAListener() {
     haReq.end();
   }
 
-  const triggeredZones = {}; // zoneId -> bool
+  const triggeredZones = {};  // "zone.id::sensor_id" -> bool, "zone.id" -> bool
+  let   cachedZones    = [];  // refreshed every 60s and on auth_ok
+  let   sensorToZones  = {};  // entityId -> [zone, ...] for fast lookup
+
+  function refreshZoneCache() {
+    cachedZones   = loadZones();
+    sensorToZones = {};
+    cachedZones.forEach(zone => {
+      (zone.sensors || []).forEach(sid => {
+        if (!sensorToZones[sid]) sensorToZones[sid] = [];
+        sensorToZones[sid].push(zone);
+      });
+    });
+  }
 
   function handleMsg(msg, send, sock) {
     if (msg.type === "auth_required") {
-      // Send auth using supervisor token
       sendWsFrame(sock, JSON.stringify({
         type: "auth", access_token: process.env.SUPERVISOR_TOKEN,
       }));
       return;
     }
     if (msg.type === "auth_ok") {
+      refreshZoneCache();
+      setInterval(refreshZoneCache, 60000); // keep cache fresh
       send({ type: "subscribe_events", event_type: "state_changed" });
       return;
     }
@@ -1064,25 +1078,20 @@ function startHAListener() {
   }
 
   function onStateChanged(entityId, state) {
-    const zones = loadZones();
-    const triggered = ["on","open","detected","home","triggered"]
+    const zones = sensorToZones[entityId];
+    if (!zones || !zones.length) return; // not a tracked sensor — fast exit
+
+    const triggered = ["on","open","detected","home","triggered","motion"]
       .includes((state || "").toLowerCase());
-    let changed = false;
 
     zones.forEach(zone => {
-      if (!(zone.sensors || []).includes(entityId)) return;
       const wasTriggered = !!triggeredZones[zone.id];
-      // Zone is triggered if ANY of its sensors are triggered
-      const sensors = zone.sensors || [];
-      // We only have this one sensor's new state — keep others as-is
-      // Use a per-sensor map for accuracy
       triggeredZones[`${zone.id}::${entityId}`] = triggered;
-      const zoneNowTriggered = sensors.some(sid =>
+      const zoneNowTriggered = (zone.sensors || []).some(sid =>
         triggeredZones[`${zone.id}::${sid}`] === true);
       if (zoneNowTriggered !== wasTriggered) {
         triggeredZones[zone.id] = zoneNowTriggered;
         pushBinarySensor(zone, zoneNowTriggered);
-        changed = true;
       }
     });
   }
