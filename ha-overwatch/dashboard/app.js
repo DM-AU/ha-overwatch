@@ -2795,6 +2795,55 @@ function scheduleReconnect() {
   }, haReconnectDelay);
 }
 
+// Direct Mode state poller — replaces WebSocket in Direct Mode.
+// Polls /ow/states every 3s, populates haStates identically to the WS path.
+let directModePollTimer = null;
+function startDirectModePoller() {
+  if (!IS_DIRECT_MODE) return;
+  async function poll() {
+    try {
+      const res = await fetch("ow/states", { cache: "no-store" });
+      if (res.ok) {
+        const states = await res.json();
+        let changed = false;
+        Object.values(states).forEach(st => {
+          if (st.entity_id) {
+            haStates[st.entity_id] = st;
+            changed = true;
+          }
+        });
+        if (changed && !haConnected) {
+          haConnected = true;
+          haEverConnected = true;
+          setHAStatus("connected");
+          logEvent("ok", "Direct Mode: state cache loaded from backend.", "ha");
+          // Run the same post-connect steps as auth_ok
+          subscribeHAEntities();
+          renderZones();
+          const alarmEntity = uiConfig.alarm_entity;
+          if (alarmEntity && haStates[alarmEntity]) {
+            updateStatusFromAlarm(alarmEntity, haStates[alarmEntity]);
+          }
+        } else if (changed) {
+          renderZones();
+          const alarmEntity = uiConfig.alarm_entity;
+          if (alarmEntity && haStates[alarmEntity]) {
+            updateStatusFromAlarm(alarmEntity, haStates[alarmEntity]);
+          }
+        }
+      }
+    } catch (e) {
+      if (haConnected) {
+        haConnected = false;
+        setHAStatus("error");
+        logEvent("warn", "Direct Mode: lost contact with backend.", "ha");
+      }
+    }
+    directModePollTimer = setTimeout(poll, 3000);
+  }
+  poll();
+}
+
 function showReconnectBanner(show) {
   let banner = document.getElementById("owReconnectBanner");
   if (show) {
@@ -4236,7 +4285,13 @@ async function init() {
 
   await startServerHealthCheck();
 
-  if (!haConnected) connectHA();
+  if (!haConnected) {
+    if (IS_DIRECT_MODE) {
+      startDirectModePoller(); // Direct Mode: poll /ow/states, no WebSocket
+    } else {
+      connectHA();             // Ingress Mode: WebSocket via proxy
+    }
+  }
 
   startLiveRefresh();
   logEvent("info", "HA-Overwatch initialised.", "system");

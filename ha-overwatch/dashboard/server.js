@@ -217,6 +217,10 @@ function nameSlug(name) {
 // Zone triggered states — written by startHAListener, read by /ow/triggered endpoint
 const globalTriggeredZones = {}; // nameSlug(zone.name) -> bool
 
+// Full HA entity state cache — written by startHAListener, read by /ow/states endpoint
+// Keyed by entity_id, value is the full HA state object {entity_id, state, attributes, ...}
+const serverHaStates = {};
+
 /* ─── REQUEST HANDLER ─────────────────────────────────────── */
 const server = http.createServer(async (req, res) => {
   // CORS preflight
@@ -359,6 +363,12 @@ const server = http.createServer(async (req, res) => {
   /* ── /ow/triggered — coordinator polls for zone triggered states ── */
   if (pathname === "/ow/triggered" && req.method === "GET") {
     json(res, globalTriggeredZones);
+    return;
+  }
+
+  /* ── /ow/states — direct mode frontend polls for full HA entity states ── */
+  if (pathname === "/ow/states" && req.method === "GET") {
+    json(res, serverHaStates);
     return;
   }
 
@@ -1128,11 +1138,21 @@ function startHAListener() {
       refreshZoneCache();
       setInterval(refreshZoneCache, 60000); // keep cache fresh
       send({ type: "subscribe_events", event_type: "state_changed" });
+      // Fetch all current entity states into cache for /ow/states endpoint
+      send({ type: "get_states" });
+      return;
+    }
+    // Populate serverHaStates from get_states response
+    if (msg.type === "result" && Array.isArray(msg.result)) {
+      msg.result.forEach(st => { if (st.entity_id) serverHaStates[st.entity_id] = st; });
+      console.log(`[HA-Overwatch] State cache populated: ${Object.keys(serverHaStates).length} entities`);
       return;
     }
     if (msg.type === "event" && msg.event?.event_type === "state_changed") {
       const { entity_id, new_state } = msg.event.data || {};
       if (!entity_id || !new_state) return;
+      // Keep full state cache up to date
+      serverHaStates[entity_id] = new_state;
       onStateChanged(entity_id, new_state.state || "");
     }
   }
