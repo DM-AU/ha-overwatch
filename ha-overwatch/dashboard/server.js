@@ -1036,6 +1036,17 @@ function writeCustomComponent() {
       written++;
     }
     console.log(`[HA-Overwatch] Custom component written to ${destDir} (${written} files)`);
+
+    // Also write icon to /config/www/brands/ — this is where HA loads custom integration icons from
+    const brandsDir = "/config/www/brands/ha_overwatch";
+    fs.mkdirSync(brandsDir, { recursive: true });
+    const iconBuf = COMPONENT_FILES["icon.png"];
+    if (Buffer.isBuffer(iconBuf)) {
+      fs.writeFileSync(path.join(brandsDir, "icon.png"),  iconBuf);
+      fs.writeFileSync(path.join(brandsDir, "logo.png"),  iconBuf);
+      console.log(`[HA-Overwatch] Brand icon written to ${brandsDir}`);
+    }
+
     console.log(`[HA-Overwatch] Restart Home Assistant to activate the HA Overwatch integration.`);
   } catch (e) {
     console.error("[HA-Overwatch] Failed to write custom component:", e.message);
