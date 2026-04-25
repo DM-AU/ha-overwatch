@@ -705,6 +705,15 @@ async function loadFloors() {
     const saved = localStorage.getItem("ow_active_floor");
     const match = floors.find(f => f.id === saved);
     activeFloorId = match ? match.id : (floors[0]?.id || null);
+    // Apply the saved floor's floorplan image immediately
+    const floor = activeFloor();
+    if (floor?.floorplan) {
+      const fp = document.getElementById("floorplanImage");
+      if (fp) {
+        fp.src = apiPath(floor.floorplan) + "?v=" + Date.now();
+        fp.onload = initFloorplan;
+      }
+    }
   } catch { floors = []; }
 }
 

@@ -497,29 +497,45 @@ const server = http.createServer(async (req, res) => {
   /* ── /ow/reload — trigger HA to reload ha_overwatch config entries ── */
   if (pathname === "/ow/reload" && req.method === "POST") {
     if (!process.env.SUPERVISOR_TOKEN) { json(res, { ok: false, reason: "not in addon mode" }); return; }
-    // Use homeassistant.reload_config_entry service — HA finds the entry by domain
-    const reloadBody = JSON.stringify({
-      domain: "homeassistant",
-      service: "reload_config_entry",
-      service_data: { domain: "ha_overwatch" }
-    });
-    const haReq = http.request({
+    // Step 1: GET /api/config/config_entries to find the ha_overwatch entry_id
+    const listReq = http.request({
       hostname: "supervisor", port: 80,
-      path: "/core/api/services/homeassistant/reload_config_entry",
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${process.env.SUPERVISOR_TOKEN}`,
-        "Content-Type": "application/json",
-        "Content-Length": Buffer.byteLength(reloadBody),
-      },
-    }, haRes => {
-      haRes.resume();
-      console.log(`[HA-Overwatch] /ow/reload → HA responded ${haRes.statusCode}`);
-      json(res, { ok: haRes.statusCode < 300 });
+      path: "/core/api/config/config_entries",
+      method: "GET",
+      headers: { "Authorization": `Bearer ${process.env.SUPERVISOR_TOKEN}` },
+    }, listRes => {
+      let body = "";
+      listRes.on("data", c => body += c);
+      listRes.on("end", () => {
+        try {
+          const entries = JSON.parse(body);
+          const entry = entries.find(e => e.domain === "ha_overwatch");
+          if (!entry) {
+            console.warn("[HA-Overwatch] /ow/reload: ha_overwatch config entry not found");
+            json(res, { ok: false, reason: "entry not found" });
+            return;
+          }
+          // Step 2: POST /api/config/config_entries/{entry_id}/reload
+          const reloadReq = http.request({
+            hostname: "supervisor", port: 80,
+            path: `/core/api/config/config_entries/${entry.entry_id}/reload`,
+            method: "POST",
+            headers: { "Authorization": `Bearer ${process.env.SUPERVISOR_TOKEN}` },
+          }, reloadRes => {
+            reloadRes.resume();
+            console.log(`[HA-Overwatch] /ow/reload → entry ${entry.entry_id} → HA responded ${reloadRes.statusCode}`);
+            json(res, { ok: reloadRes.statusCode < 300 });
+          });
+          reloadReq.on("error", e => { console.error("[HA-Overwatch] /ow/reload error:", e.message); json(res, { ok: false, reason: e.message }); });
+          reloadReq.end();
+        } catch (e) {
+          console.error("[HA-Overwatch] /ow/reload parse error:", e.message);
+          json(res, { ok: false, reason: e.message });
+        }
+      });
     });
-    haReq.on("error", e => { console.error("[HA-Overwatch] /ow/reload error:", e.message); json(res, { ok: false, reason: e.message }); });
-    haReq.write(reloadBody);
-    haReq.end();
+    listReq.on("error", e => json(res, { ok: false, reason: e.message }));
+    listReq.end();
     return;
   }
 
