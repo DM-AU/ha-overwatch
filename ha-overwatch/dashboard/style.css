@@ -2383,9 +2383,10 @@ body.sidebar-collapsed.sidebar-left .view-toggle-widget {
 
 /* ─── Multi-panel floor layout ──────────────────────────────── */
 .floor-panels-container {
-  width: 100%;
-  height: 100%;
+  position: absolute;
+  inset: 0;
   display: flex;
+  overflow: hidden;
 }
 
 .floor-panel {
@@ -2463,15 +2464,4 @@ body.sidebar-collapsed.sidebar-left .view-toggle-widget {
   letter-spacing: 0.03em;
 }
 
-/* Ensure floor-panels-container doesn't escape its parent */
-.floor-panels-container {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  overflow: hidden;
-}
-
-/* Override the flex shorthand set inline */
-.split-panel-map #main {
-  overflow: hidden;
-}
+/* split-panel-map #main already has overflow:hidden from .split-panel */

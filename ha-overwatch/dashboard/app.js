@@ -863,7 +863,13 @@ function renderPanelZones(idx) {
   if (!panelSvg || !floor) return;
 
   const img = getPanelImg(idx);
-  if (!img?.naturalWidth) return;
+  if (!img) return;
+  // If image not yet loaded, defer — onload will call renderPanelZones again
+  if (!img.naturalWidth) {
+    const prev = img.onload;
+    img.onload = () => { if (prev) prev(); renderPanelZones(idx); };
+    return;
+  }
 
   // Clear
   while (panelSvg.firstChild) panelSvg.removeChild(panelSvg.firstChild);
@@ -900,34 +906,26 @@ function bindPanelInteraction(idx) {
   // Select panel on click
   panelEl.addEventListener('pointerdown', () => setActivePanel(idx), { capture: true, passive: true });
 
-  // Pan — requires a minimum drag distance before activating (same as single-panel)
-  let panning = false, panStart = null, panBase = null, panActivated = false;
-  const PAN_THRESHOLD = 5; // pixels
+  // Pan — click and hold to drag, same approach as single-panel bindPan
+  let panning = false, panStart = null;
 
   panelEl.addEventListener('pointerdown', e => {
     if (e.button !== 0 && e.pointerType === 'mouse') return;
     if (e.target.closest('.zone-handle, .floor-panel-handle')) return;
-    panning      = true;
-    panActivated = false;
-    panStart     = { x: e.clientX, y: e.clientY };
-    panBase      = { ...PANEL_ZOOMS[idx] };
-    panelEl.setPointerCapture(e.pointerId);
+    panning  = true;
+    // Store offset the same way as single-panel bindPan
+    panStart = { x: e.clientX - PANEL_ZOOMS[idx].x, y: e.clientY - PANEL_ZOOMS[idx].y };
   });
 
   panelEl.addEventListener('pointermove', e => {
     if (!panning) return;
-    const dx = e.clientX - panStart.x;
-    const dy = e.clientY - panStart.y;
-    // Only activate pan after threshold — prevents micro-moves registering as drags
-    if (!panActivated && Math.hypot(dx, dy) < PAN_THRESHOLD) return;
-    panActivated = true;
-    PANEL_ZOOMS[idx].x = panBase.x + dx;
-    PANEL_ZOOMS[idx].y = panBase.y + dy;
+    PANEL_ZOOMS[idx].x = e.clientX - panStart.x;
+    PANEL_ZOOMS[idx].y = e.clientY - panStart.y;
     applyPanelTransform(idx);
   });
 
-  panelEl.addEventListener('pointerup',    () => { panning = false; panActivated = false; });
-  panelEl.addEventListener('pointercancel',() => { panning = false; panActivated = false; });
+  panelEl.addEventListener('pointerup',    () => { panning = false; });
+  panelEl.addEventListener('pointercancel',() => { panning = false; });
 
   // Scroll zoom — always applies to hovered panel regardless of selection
   panelEl.addEventListener('wheel', e => {
@@ -1015,10 +1013,11 @@ function applyFloorPanels() {
     panelDiv.dataset.panelIdx = i;
     panelDiv.style.cssText = 'flex:1;position:relative;overflow:hidden;min-width:0;min-height:0;';
 
-    // Floor label
+    // Floor label — hidden if user disabled it
     const label = document.createElement('div');
     label.className = 'floor-panel-label';
     label.textContent = floor?.name || 'Floor ' + (i + 1);
+    if (localStorage.getItem('ow_hide_floor_label') === 'true') label.style.display = 'none';
 
     // Wrapper (panned/scaled)
     const wrapper = document.createElement('div');
@@ -3927,6 +3926,9 @@ function renderSettingsPanel() {
                 return mpNote
                   + '<div style="' + disStyle + 'display:flex;flex-direction:column;gap:8px;">'
                   + '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;">'
+                  + '<input type="checkbox" id="hideFloorLabelChk" ' + (localStorage.getItem('ow_hide_floor_label')==='true' ? 'checked' : '') + '>'
+                  + '<span>Hide floor name label on panels</span></label>'
+                  + '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;">'
                   + '<input type="checkbox" id="camFloorOnlyChk" ' + (localStorage.getItem('ow_cam_floor_only')==='true' ? 'checked' : '') + (multiPanel ? ' disabled' : '') + '>'
                   + '<span>Show cameras for current floor only</span></label>'
                   + '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;">'
@@ -4351,6 +4353,12 @@ function renderSettingsPanel() {
   };
 
   // ── Floor settings ────────────────────────────────────────────
+  const hideFloorLabelChk = document.getElementById("hideFloorLabelChk");
+  if (hideFloorLabelChk) hideFloorLabelChk.onchange = () => {
+    localStorage.setItem('ow_hide_floor_label', hideFloorLabelChk.checked);
+    applyFloorPanels(); // rebuild panels to show/hide labels
+  };
+
   const camFloorOnlyChk = document.getElementById("camFloorOnlyChk");
   const autoFloorChk    = document.getElementById("autoFloorChk");
   const defaultFloorSel = document.getElementById("defaultFloorSel");
