@@ -162,11 +162,30 @@ function parseZoneYaml(text) {
     const key = line.slice(0, colonIdx).trim();
     const val = line.slice(colonIdx + 1).trim()
                     .replace(/^"(.*)"$/, "$1").replace(/^'(.*)'$/, "$1");
-    if      (key === "id")      z.id      = val;
-    else if (key === "name")    z.name    = val;
-    else if (key === "enabled") z.enabled = val !== "false";
+    if      (key === "id")       z.id       = val;
+    else if (key === "name")     z.name     = val;
+    else if (key === "enabled")  z.enabled  = val !== "false";
+    else if (key === "floor_id") z.floor_id = val;
   }
   return z;
+}
+
+/* ─── FLOORS ──────────────────────────────────────────────── */
+const FLOORS_FILE = () => path.join(DATA_DIR, "config", "floors.json");
+
+function loadFloors() {
+  try {
+    return JSON.parse(fs.readFileSync(FLOORS_FILE(), "utf8"));
+  } catch {
+    // No floors file yet — return a single default floor using the existing floorplan
+    const cfg = loadConfig();
+    return [{ id: "floor_default", name: "Ground Floor", floorplan: cfg.floorplan || "img/floorplan.png" }];
+  }
+}
+
+function saveFloors(floors) {
+  fs.mkdirSync(path.dirname(FLOORS_FILE()), { recursive: true });
+  fs.writeFileSync(FLOORS_FILE(), JSON.stringify(floors, null, 2), "utf8");
 }
 
 /* ─── GROUPS ──────────────────────────────────────────────── */
@@ -428,6 +447,53 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  /* ── /ow/floors — floor list r/w ───────────────────────────── */
+  if (pathname === "/ow/floors" && req.method === "GET") {
+    json(res, loadFloors());
+    return;
+  }
+
+  if (pathname === "/ow/save-floor" && req.method === "POST") {
+    try {
+      const body   = await readBody(req);
+      const floors = loadFloors();
+      const idx    = floors.findIndex(f => f.id === body.id);
+      if (idx >= 0) {
+        floors[idx] = { ...floors[idx], ...body };
+      } else {
+        // New floor — generate id from name
+        const id = "floor_" + (body.name || "floor").toLowerCase().replace(/[^a-z0-9]+/g, "_") + "_" + Date.now();
+        floors.push({ id, name: body.name || "New Floor", floorplan: body.floorplan || "" });
+      }
+      saveFloors(floors);
+      json(res, { ok: true, floors });
+    } catch (e) { err(res, e.message); }
+    return;
+  }
+
+  if (pathname === "/ow/delete-floor" && req.method === "POST") {
+    try {
+      const body   = await readBody(req);
+      const floors = loadFloors().filter(f => f.id !== body.id);
+      saveFloors(floors);
+      json(res, { ok: true, floors });
+    } catch (e) { err(res, e.message); }
+    return;
+  }
+
+  if (pathname === "/ow/reorder-floors" && req.method === "POST") {
+    try {
+      const body = await readBody(req); // expects { ids: ["floor_a", "floor_b", ...] }
+      const floors = loadFloors();
+      const ordered = (body.ids || []).map(id => floors.find(f => f.id === id)).filter(Boolean);
+      // Append any floors not in the ids list at the end
+      floors.forEach(f => { if (!ordered.find(o => o.id === f.id)) ordered.push(f); });
+      saveFloors(ordered);
+      json(res, { ok: true, floors: ordered });
+    } catch (e) { err(res, e.message); }
+    return;
+  }
+
   /* ── /ow/zones — component fetches zone/group/camera structure ── */
   if (pathname === "/ow/zones" && req.method === "GET") {
     try {
@@ -443,9 +509,10 @@ const server = http.createServer(async (req, res) => {
 
       json(res, {
         zones: zones.map(z => ({
-          id:     nameSlug(z.name) || z.id,
-          name:   z.name || z.id,
-          raw_id: z.id,
+          id:       nameSlug(z.name) || z.id,
+          name:     z.name || z.id,
+          raw_id:   z.id,
+          floor_id: z.floor_id || null,
         })),
         groups: groups.map(g => ({
           id:       nameSlug(g.name) || g.id,

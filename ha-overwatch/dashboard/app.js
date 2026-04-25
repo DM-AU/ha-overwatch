@@ -95,6 +95,8 @@ let pollingTimer = null;
 /* ─── ZONES STATE ─────────────────────────────────────────── */
 let zones = [];
 let groups = [];          // Zone groups
+let floors = [];          // Floor definitions [{id, name, floorplan}]
+let activeFloorId = null; // Currently displayed floor id
 let selectedZoneId  = null;
 let selectedGroupId = null; // "group" or "zone" selection in editor
 let editorMode = false;
@@ -529,6 +531,7 @@ function zoneToYaml(z) {
   out += `color: "${z.colorHex || "#0096ff"}"\n`;
   out += `enabled: ${z.enabled !== false}\n`;
   out += `hidden: ${z.hidden === true}\n`;
+  if (z.floor_id) out += `floor_id: ${z.floor_id}\n`;
   out += `points:\n`;
   (z.points || []).forEach(p => { out += ` - [${Math.round(p.x)}, ${Math.round(p.y)}]\n`; });
   out += `sensors:\n`;
@@ -573,11 +576,12 @@ function parseZoneYaml(text) {
       const key = line.slice(0, colonIdx).trim();
       let val = line.slice(colonIdx + 1).trim();
       val = val.replace(/^"(.*)"$/, "$1").replace(/^'(.*)'$/, "$1");
-      if (key === "id")      z.id = val;
-      else if (key === "name")    z.name = val;
-      else if (key === "enabled") z.enabled = val !== "false";
-      else if (key === "hidden")  z.hidden  = val === "true";
-      else if (key === "color")   { z.colorHex = val; z.color = hexToRgba(val, 0.25); }
+      if (key === "id")       z.id       = val;
+      else if (key === "name")     z.name     = val;
+      else if (key === "enabled")  z.enabled  = val !== "false";
+      else if (key === "hidden")   z.hidden   = val === "true";
+      else if (key === "floor_id") z.floor_id = val;
+      else if (key === "color")    { z.colorHex = val; z.color = hexToRgba(val, 0.25); }
     }
   }
 
@@ -690,6 +694,69 @@ async function loadGroups() {
     }));
     groups = loaded.filter(Boolean);
   } catch { groups = []; }
+}
+
+async function loadFloors() {
+  try {
+    const res = await fetch(apiPath("ow/floors") + "?v=" + Date.now());
+    if (!res.ok) { floors = []; return; }
+    floors = await res.json();
+    // Set active floor to saved preference or first floor
+    const saved = localStorage.getItem("ow_active_floor");
+    const match = floors.find(f => f.id === saved);
+    activeFloorId = match ? match.id : (floors[0]?.id || null);
+  } catch { floors = []; }
+}
+
+async function saveFloor(floor) {
+  const res = await fetch(apiPath("ow/save-floor"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(floor),
+  });
+  const data = await res.json();
+  if (data.floors) floors = data.floors;
+  return data;
+}
+
+async function deleteFloor(id) {
+  const res = await fetch(apiPath("ow/delete-floor"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id }),
+  });
+  const data = await res.json();
+  if (data.floors) floors = data.floors;
+  return data;
+}
+
+function setActiveFloor(id) {
+  const floor = floors.find(f => f.id === id);
+  if (!floor) return;
+  activeFloorId = id;
+  localStorage.setItem("ow_active_floor", id);
+  applyActiveFloor();
+}
+
+function activeFloor() {
+  return floors.find(f => f.id === activeFloorId) || floors[0] || null;
+}
+
+function applyActiveFloor() {
+  const floor = activeFloor();
+  if (!floor) return;
+  // Update floorplan image
+  const fp = document.getElementById("floorplanImage");
+  if (fp && floor.floorplan) {
+    const newSrc = apiPath(floor.floorplan) + "?v=" + Date.now();
+    if (!fp.src.includes(floor.floorplan.split("?")[0])) {
+      fp.src = newSrc;
+      fp.onload = initFloorplan;
+    }
+  }
+  renderZones();
+  renderStatusDropdown();
+  if (window.renderCameraStatusBar) window.renderCameraStatusBar();
 }
 
 async function saveGroup(group) {
@@ -4440,6 +4507,7 @@ async function init() {
 
   await loadZones();
   await loadGroups();
+  await loadFloors();
   bindZonesSvgEvents();
   renderZonesEditor();
   renderZones();
@@ -4465,6 +4533,10 @@ async function init() {
   window.OW = {
     get zones()         { return zones; },
     get groups()        { return groups; },
+    get floors()        { return floors; },
+    get activeFloorId() { return activeFloorId; },
+    activeFloor,
+    setActiveFloor,
     get haStates()      { return haStates; },
     get haConnected()   { return haConnected; },
     get uiConfig()      { return uiConfig; },
