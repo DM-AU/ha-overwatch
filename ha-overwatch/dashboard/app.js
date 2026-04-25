@@ -1202,6 +1202,96 @@ function checkZoneStateChanges() {
 
     zonePrevState[zone.id] = state;
   }
+
+  // ── Auto floor switching ──────────────────────────────────────
+  if (floors.length > 1 && localStorage.getItem("ow_auto_floor") === "true") {
+    _evaluateAutoFloor();
+  }
+}
+
+// Auto floor switch state
+let _autoFloorStayTimer   = null;
+let _autoFloorReturnTimer = null;
+let _autoFloorLocked      = false; // true while stay timer is running
+
+function _evaluateAutoFloor() {
+  // Find all currently triggered zones and their floors
+  const triggered = zones.filter(z => {
+    const state = getZoneState(z);
+    return state === "triggered";
+  });
+
+  if (triggered.length === 0) {
+    // Nothing triggered — if we're not locked, nothing to do
+    // If stay timer already running, let it run
+    return;
+  }
+
+  // Collision resolution: armed beats disarmed, then most recent sensor change
+  function zoneScore(z) {
+    const isArmed  = getZoneState(z) !== "disabled";
+    const sensors  = z.sensors || [];
+    const lastSeen = sensors.reduce((best, sid) => {
+      const st = haStates[sid];
+      if (!st) return best;
+      const ts = new Date(st.last_changed || 0).getTime();
+      return ts > best ? ts : best;
+    }, 0);
+    return { isArmed, lastSeen };
+  }
+
+  const winner = triggered.sort((a, b) => {
+    const sa = zoneScore(a), sb = zoneScore(b);
+    if (sa.isArmed !== sb.isArmed) return sa.isArmed ? -1 : 1;
+    return sb.lastSeen - sa.lastSeen;
+  })[0];
+
+  const fi    = floors.findIndex(f => f.id === winner.floor_id) >= 0
+    ? floors.findIndex(f => f.id === winner.floor_id)
+    : 0;
+  const targetFloorId = floors[fi]?.id;
+
+  if (!targetFloorId || targetFloorId === activeFloorId) {
+    // Already on the right floor — reset stay timer
+    if (_autoFloorStayTimer) { clearTimeout(_autoFloorStayTimer); _autoFloorStayTimer = null; }
+    _startStayTimer();
+    return;
+  }
+
+  // Switch to winning floor
+  _autoFloorLocked = true;
+  if (_autoFloorReturnTimer) { clearTimeout(_autoFloorReturnTimer); _autoFloorReturnTimer = null; }
+  setActiveFloor(targetFloorId);
+  renderZones();
+  if (editorMode) renderZonesEditor();
+  if (document.getElementById("floorFlyout")) renderFloorFlyout();
+
+  _startStayTimer();
+}
+
+function _startStayTimer() {
+  if (_autoFloorStayTimer) clearTimeout(_autoFloorStayTimer);
+  const staySecs = parseInt(localStorage.getItem("ow_floor_stay_secs") || "30");
+  _autoFloorStayTimer = setTimeout(() => {
+    _autoFloorStayTimer = null;
+    _startReturnTimer();
+  }, staySecs * 1000);
+}
+
+function _startReturnTimer() {
+  if (_autoFloorReturnTimer) clearTimeout(_autoFloorReturnTimer);
+  const returnSecs = parseInt(localStorage.getItem("ow_floor_return_secs") || "60");
+  _autoFloorReturnTimer = setTimeout(() => {
+    _autoFloorReturnTimer = null;
+    _autoFloorLocked = false;
+    const defaultFloorId = localStorage.getItem("ow_default_floor") || floors[0]?.id;
+    if (defaultFloorId && defaultFloorId !== activeFloorId) {
+      setActiveFloor(defaultFloorId);
+      renderZones();
+      if (editorMode) renderZonesEditor();
+      if (document.getElementById("floorFlyout")) renderFloorFlyout();
+    }
+  }, returnSecs * 1000);
 }
 // Flash phase: alternates between high/low opacity — JS-driven, no CSS animation needed
 let flashPhase = false;
@@ -3392,6 +3482,37 @@ function renderSettingsPanel() {
         </div>
 
         <div class="settings-section">
+          <div class="settings-section-title">Floor Settings ${perDeviceBadge}</div>
+          ${floors.length > 1 ? `
+          <div class="settings-field" style="display:flex;flex-direction:column;gap:8px;">
+            <label class="settings-checkbox-row" style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+              <input type="checkbox" id="camFloorOnlyChk" ${localStorage.getItem('ow_cam_floor_only')==='true' ? 'checked' : ''}>
+              <span>Show cameras for current floor only</span>
+            </label>
+            <label class="settings-checkbox-row" style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+              <input type="checkbox" id="autoFloorChk" ${localStorage.getItem('ow_auto_floor')==='true' ? 'checked' : ''}>
+              <span>Auto-switch floor on motion</span>
+            </label>
+            <div style="padding-left:24px;display:flex;flex-direction:column;gap:6px;${localStorage.getItem('ow_auto_floor')!=='true' ? 'opacity:0.4;pointer-events:none;' : ''}">
+              <div class="settings-field" style="flex-direction:row;align-items:center;gap:8px;margin:0;">
+                <label style="flex:1;font-size:12px;">Default floor</label>
+                <select id="defaultFloorSel" style="background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:4px 8px;color:#fff;font-size:12px;">
+                  ${floors.map(f => '<option value="' + f.id + '"' + (localStorage.getItem('ow_default_floor')===f.id ? ' selected' : '') + '>' + escapeHtml(f.name) + '</option>').join('')}
+                </select>
+              </div>
+              <div class="settings-field" style="flex-direction:row;align-items:center;gap:8px;margin:0;">
+                <label style="flex:1;font-size:12px;">Stay on triggered floor (s)</label>
+                <input type="number" id="floorStayChk" min="5" max="600" value="${localStorage.getItem('ow_floor_stay_secs')||'30'}" style="width:60px;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:4px 8px;color:#fff;font-size:12px;">
+              </div>
+              <div class="settings-field" style="flex-direction:row;align-items:center;gap:8px;margin:0;">
+                <label style="flex:1;font-size:12px;">Return-to-default cooldown (s)</label>
+                <input type="number" id="floorReturnChk" min="5" max="600" value="${localStorage.getItem('ow_floor_return_secs')||'60'}" style="width:60px;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:4px 8px;color:#fff;font-size:12px;">
+              </div>
+            </div>
+          </div>` : '<div style="font-size:11px;color:#666;">Add multiple floors in the Zones tab to enable floor settings.</div>'}
+        </div>
+
+        <div class="settings-section">
           <div class="settings-section-title">Status Panels ${perDeviceBadge}</div>
           <div class="settings-field">
             <label class="settings-checkbox-row">
@@ -3763,6 +3884,35 @@ function renderSettingsPanel() {
   if (hideCamChk) hideCamChk.onchange = () => {
     localStorage.setItem("ow_hide_camera_status", hideCamChk.checked);
     applyStatusVisibility();
+  };
+
+  // ── Floor settings ────────────────────────────────────────────
+  const camFloorOnlyChk = document.getElementById("camFloorOnlyChk");
+  const autoFloorChk    = document.getElementById("autoFloorChk");
+  const defaultFloorSel = document.getElementById("defaultFloorSel");
+  const floorStayInput  = document.getElementById("floorStayChk");
+  const floorReturnInput = document.getElementById("floorReturnChk");
+  const floorSubSettings = autoFloorChk?.closest(".settings-field")?.nextElementSibling;
+
+  if (camFloorOnlyChk) camFloorOnlyChk.onchange = () => {
+    localStorage.setItem("ow_cam_floor_only", camFloorOnlyChk.checked);
+    if (window.renderCameraStatusBar) window.renderCameraStatusBar();
+    if (window.camUpdate) window.camUpdate();
+  };
+  if (autoFloorChk) autoFloorChk.onchange = () => {
+    localStorage.setItem("ow_auto_floor", autoFloorChk.checked);
+    // Toggle sub-settings opacity
+    const sub = document.querySelector("#autoFloorChk")?.closest("label")?.nextElementSibling;
+    if (sub) sub.style.cssText = `padding-left:24px;display:flex;flex-direction:column;gap:6px;${!autoFloorChk.checked ? 'opacity:0.4;pointer-events:none;' : ''}`;
+  };
+  if (defaultFloorSel) defaultFloorSel.onchange = () => {
+    localStorage.setItem("ow_default_floor", defaultFloorSel.value);
+  };
+  if (floorStayInput) floorStayInput.onchange = () => {
+    localStorage.setItem("ow_floor_stay_secs", floorStayInput.value);
+  };
+  if (floorReturnInput) floorReturnInput.onchange = () => {
+    localStorage.setItem("ow_floor_return_secs", floorReturnInput.value);
   };
 
   // ── Save zone behaviour to localStorage ──────────────────────

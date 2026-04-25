@@ -177,9 +177,22 @@ function getActiveCameras() {
   const globalOn = camIsEnabled('global', 'all');
   if (!globalOn) return [];
 
+  // Floor filter — when enabled, only show cameras whose zones are on the active floor
+  const camFloorOnly  = localStorage.getItem('ow_cam_floor_only') === 'true';
+  const activeFloorId = OW.activeFloorId;
+  const allFloors     = OW.floors || [];
+  const isFirstFloor  = !activeFloorId || allFloors.length === 0 || allFloors[0]?.id === activeFloorId;
+
   const cameraSet = new Map();
 
   zones.forEach(zone => {
+    // Floor filter — skip zones not on active floor
+    if (camFloorOnly && allFloors.length > 1) {
+      const zFloor = zone.floor_id;
+      if (zFloor && zFloor !== activeFloorId) return;
+      if (!zFloor && !isFirstFloor) return;
+    }
+
     const zoneOn   = camIsEnabled('zone', zone.id);
     if (!zoneOn) return;
 
