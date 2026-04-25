@@ -853,17 +853,41 @@ function getZoneFadeAlpha(zoneId) {
 // Falls back to localStorage for initial render before HA connects.
 let masterEnabled = localStorage.getItem("masterEnabled") !== "false";
 
+/* ─── ZONE TOGGLE SOURCE ──────────────────────────────────── */
+// 'server' (default) = HA entities are source of truth, toggles call HA switches
+// 'device'           = localStorage per-device, toggles don't affect HA
+const ZONE_MODE_KEY        = 'ow_zone_source';
+const ZONE_LOCAL_PREFIX    = 'ow_zone_enabled_';
+const ZONE_LOCAL_MASTER    = 'ow_zone_master';
+const ZONE_LOCAL_GROUP     = 'ow_zone_group_';
+
+function zoneUseServerState() {
+  return localStorage.getItem(ZONE_MODE_KEY) !== 'device';
+}
+
+// Read zone enabled state — from HA entities (server mode) or localStorage (device mode)
+function zoneIsEnabled(zoneOrId) {
+  const zone = typeof zoneOrId === 'string' ? zones.find(z => z.id === zoneOrId) : zoneOrId;
+  if (!zoneUseServerState()) {
+    return localStorage.getItem(ZONE_LOCAL_PREFIX + (zone?.id || zoneOrId)) !== 'false';
+  }
+  // Server mode — read from haStates (same as getZoneState does)
+  return getZoneState(zone) !== 'disabled';
+}
+
 function setMasterEnabled(val) {
   masterEnabled = !!val;
   localStorage.setItem("masterEnabled", masterEnabled);
-  // Call HA switch service — state flows back via WS and updates all consumers
-  owCallSwitch("switch.overwatch_zone_master", val);
-  // Also toggle all group and zone switches to match master
-  for (const g of groups) {
-    owCallSwitch(`switch.overwatch_zone_group_${groupSlug(g)}`, val);
-  }
-  for (const z of zones) {
-    owCallSwitch(`switch.overwatch_zone_${zoneSlug(z)}`, val);
+  if (zoneUseServerState()) {
+    // Server mode: call HA switch, cascade to all groups and zones
+    owCallSwitch("switch.overwatch_zone_master", val);
+    for (const g of groups) owCallSwitch(`switch.overwatch_zone_group_${groupSlug(g)}`, val);
+    for (const z of zones)  owCallSwitch(`switch.overwatch_zone_${zoneSlug(z)}`, val);
+  } else {
+    // Device mode: store in localStorage
+    localStorage.setItem(ZONE_LOCAL_MASTER, val ? 'true' : 'false');
+    for (const z of zones) localStorage.setItem(ZONE_LOCAL_PREFIX + z.id, val ? 'true' : 'false');
+    for (const g of groups) localStorage.setItem(ZONE_LOCAL_GROUP + g.id, val ? 'true' : 'false');
   }
   updateStatusDropdownInPlace();
   renderZones();
@@ -873,8 +897,13 @@ function setMasterEnabled(val) {
 function setZoneEnabled(zoneId, val) {
   const zone = zones.find(z => z.id === zoneId);
   if (!zone) return;
-  // Call HA switch service — state flows back via WS haStates
-  owCallSwitch(`switch.overwatch_zone_${zoneSlug(zones.find(z=>z.id===zoneId)||{name:"",id:zoneId})}`, !!val);
+  if (zoneUseServerState()) {
+    owCallSwitch(`switch.overwatch_zone_${zoneSlug(zone)}`, !!val);
+  } else {
+    localStorage.setItem(ZONE_LOCAL_PREFIX + zoneId, val ? 'true' : 'false');
+    updateStatusDropdownInPlace();
+    renderZones();
+  }
   logEvent(
     "info",
     val ? `Zone enabled: ${zone.name || zone.id}` : `Zone disabled: ${zone.name || zone.id}`,
@@ -963,12 +992,17 @@ function isEntityTriggered(entityId) {
 const zonePrevState = {};
 
 function getZoneState(zone) {
-  // Read enabled state from HA switch entity — HA is the source of truth.
-  // Falls back to zone.enabled (YAML) if the HA entity doesn't exist yet.
-  const switchState = haStates[`switch.overwatch_zone_${zoneSlug(zone)}`];
-  const enabled = switchState ? switchState.state !== "off" : zone.enabled !== false;
-  const masterSwitch = haStates["switch.overwatch_zone_master"];
-  const masterOn = masterSwitch ? masterSwitch.state !== "off" : masterEnabled;
+  // Read enabled state — from localStorage (device mode) or HA switch entities (server mode)
+  let enabled, masterOn;
+  if (!zoneUseServerState()) {
+    enabled  = localStorage.getItem(ZONE_LOCAL_PREFIX + zone.id) !== 'false';
+    masterOn = localStorage.getItem(ZONE_LOCAL_MASTER) !== 'false';
+  } else {
+    const switchState = haStates[`switch.overwatch_zone_${zoneSlug(zone)}`];
+    enabled = switchState ? switchState.state !== "off" : zone.enabled !== false;
+    const masterSwitch = haStates["switch.overwatch_zone_master"];
+    masterOn = masterSwitch ? masterSwitch.state !== "off" : masterEnabled;
+  }
 
   if (!enabled || !masterOn) return "disabled";
   if (!haConnected) return "normal";
@@ -3246,6 +3280,15 @@ function renderSettingsPanel() {
         </div>
 
         <div class="settings-section">
+          <div class="settings-section-title">Zone Toggle Source ${perDeviceBadge}</div>
+          <div class="settings-toggle-row">
+            <button class="settings-toggle ${localStorage.getItem('ow_zone_source') !== 'device' ? 'active' : ''}" data-zonesource="server">HA defaults (server)</button>
+            <button class="settings-toggle ${localStorage.getItem('ow_zone_source') === 'device' ? 'active' : ''}" data-zonesource="device">Per device (this browser)</button>
+          </div>
+          <div style="font-size:11px;color:#777;margin-top:4px;"><b>HA defaults:</b> zone toggles reflect HA switch state. Locked on remote browsers (no WebSocket).<br><b>Per device:</b> each browser stores its own zone on/off state independently of HA.</div>
+        </div>
+
+        <div class="settings-section">
           <div class="settings-section-title">Floorplan Behaviour ${perDeviceBadge}</div>
           <div style="font-size:11px;color:#666;margin-bottom:4px;">Saved per device. Admin sets the default via ui.yaml; browser overrides locally.</div>
           <div class="settings-field">
@@ -3416,6 +3459,17 @@ function renderSettingsPanel() {
       // Re-render both the status bar (dropdown locked state + dots) and grid
       if (window.renderCameraStatusBar) window.renderCameraStatusBar();
       if (window.camUpdate) window.camUpdate();
+    };
+  });
+
+  // ── Zone source toggle (server/device) ──────────────────────
+  panel.querySelectorAll(".settings-toggle[data-zonesource]").forEach(btn => {
+    btn.onclick = () => {
+      panel.querySelectorAll(".settings-toggle[data-zonesource]").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      localStorage.setItem(ZONE_MODE_KEY, btn.dataset.zonesource);
+      renderStatusDropdown();
+      renderZones();
     };
   });
 
@@ -3871,15 +3925,22 @@ function updateStatusDropdownInPlace() {
 
   // Master toggle
   const masterChk = body.querySelector("#masterToggleChk");
-  if (masterChk) masterChk.checked = masterEnabled;
+  if (masterChk) {
+    masterChk.checked  = masterEnabled;
+    const mLocked = zoneUseServerState() && IS_DIRECT_MODE;
+    masterChk.disabled = mLocked;
+    if (masterChk.closest('label')) masterChk.closest('label').style.opacity = mLocked ? '0.4' : '';
+  }
 
   // Per-zone: toggle, eye, dot, state label
   body.querySelectorAll(".zone-enabled-chk[data-zone-id]").forEach(chk => {
     const zone = zones.find(z => z.id === chk.dataset.zoneId);
     if (!zone) return;
     const _zst  = getZoneState(zone);
+    const zLocked = zoneUseServerState() && IS_DIRECT_MODE;
     chk.checked  = _zst !== "disabled";
-    chk.disabled = false;
+    chk.disabled = zLocked;
+    if (chk.closest('label')) chk.closest('label').style.opacity = zLocked ? '0.4' : '';
 
     const row = chk.closest(".status-dd-zone");
     if (!row) return;
@@ -3920,7 +3981,10 @@ function updateStatusDropdownInPlace() {
     if (!group) return;
     const members = (group.zone_ids || []).map(id => zones.find(z => z.id === id)).filter(Boolean);
     const allArmed = members.length > 0 && members.every(z => getZoneState(z) !== 'disabled');
-    chk.checked = allArmed;
+    const gLocked = zoneUseServerState() && IS_DIRECT_MODE;
+    chk.checked  = allArmed;
+    chk.disabled = gLocked;
+    if (chk.closest('label')) chk.closest('label').style.opacity = gLocked ? '0.4' : '';
 
     const hdr = chk.closest(".status-dd-group-header");
     if (!hdr) return;
@@ -3984,6 +4048,8 @@ function renderStatusDropdown() {
     const sensors = z.sensors || [];
     const anyActive = haConnected && sensors.some(isEntityTriggered);
     const isDisarmedActive = isOff && anyActive;
+    // Locked = server mode on a Direct Mode browser (no WS to call HA switches)
+    const zoneLocked = zoneUseServerState() && IS_DIRECT_MODE;
     const dotColour = isTriggeredZone ? "#ff3b30"
       : isDisarmedActive ? resolveColour(entityTypeColourOff(detectEntityType(sensors.find(isEntityTriggered) || "")))
       : state === "fault" ? "#ff9500"
@@ -4000,8 +4066,8 @@ function renderStatusDropdown() {
         <button class="zone-eye-btn" data-zone-id="${z.id}"
           style="background:none;border:none;padding:0 2px;cursor:pointer;color:${z.hidden ? 'rgba(255,255,255,0.25)' : 'rgba(255,255,255,0.65)'};line-height:0;flex-shrink:0;"
         >${z.hidden ? eyeClosed : eyeOpen}</button>
-        <label class="zone-toggle-switch" style="flex-shrink:0;">
-          <input type="checkbox" class="zone-enabled-chk" data-zone-id="${z.id}" ${getZoneState(z) !== "disabled" ? "checked" : ""}>
+        <label class="zone-toggle-switch" style="flex-shrink:0;${zoneLocked ? 'opacity:0.4;' : ''}">
+          <input type="checkbox" class="zone-enabled-chk" data-zone-id="${z.id}" ${getZoneState(z) !== "disabled" ? "checked" : ""} ${zoneLocked ? "disabled" : ""}>
           <span class="zone-toggle-track"></span>
         </label>
       </div>`;
@@ -4037,8 +4103,8 @@ function renderStatusDropdown() {
         <button class="zone-eye-btn group-eye-btn" data-group-id="${g.id}"
           style="background:none;border:none;padding:0 2px;cursor:pointer;color:${allMembHidden ? 'rgba(255,255,255,0.25)' : 'rgba(255,255,255,0.65)'};line-height:0;flex-shrink:0;"
         >${allMembHidden ? eyeClosed : eyeOpen}</button>
-        <label class="zone-toggle-switch" style="flex-shrink:0;">
-          <input type="checkbox" class="group-armed-chk" data-group-id="${g.id}" ${allArmed ? "checked" : ""}>
+        <label class="zone-toggle-switch" style="flex-shrink:0;${zoneUseServerState() && IS_DIRECT_MODE ? 'opacity:0.4;' : ''}">
+          <input type="checkbox" class="group-armed-chk" data-group-id="${g.id}" ${allArmed ? "checked" : ""} ${zoneUseServerState() && IS_DIRECT_MODE ? "disabled" : ""}>
           <span class="zone-toggle-track"></span>
         </label>
       </div>
@@ -4070,8 +4136,8 @@ function renderStatusDropdown() {
         <button class="zone-eye-btn ungrouped-eye-btn"
           style="background:none;border:none;padding:0 2px;cursor:pointer;color:${allHidn ? 'rgba(255,255,255,0.25)' : 'rgba(255,255,255,0.65)'};line-height:0;flex-shrink:0;"
         >${allHidn ? eyeClosed : eyeOpen}</button>
-        <label class="zone-toggle-switch" style="flex-shrink:0;">
-          <input type="checkbox" class="ungrouped-armed-chk" ${allArmed ? "checked" : ""}>
+        <label class="zone-toggle-switch" style="flex-shrink:0;${zoneUseServerState() && IS_DIRECT_MODE ? 'opacity:0.4;' : ''}">
+          <input type="checkbox" class="ungrouped-armed-chk" ${allArmed ? "checked" : ""} ${zoneUseServerState() && IS_DIRECT_MODE ? "disabled" : ""}>
           <span class="zone-toggle-track"></span>
         </label>
       </div>
@@ -4096,8 +4162,8 @@ function renderStatusDropdown() {
         <button class="zone-eye-btn" id="masterEyeBtn"
           style="background:none;border:none;padding:0 2px;cursor:pointer;color:${allHidden ? 'rgba(255,255,255,0.25)' : 'rgba(255,255,255,0.65)'};line-height:0;flex-shrink:0;"
         >${allHidden ? eyeClosed : eyeOpen}</button>
-        <label class="zone-toggle-switch" style="flex-shrink:0;">
-          <input type="checkbox" id="masterToggleChk" ${masterEnabled ? "checked" : ""}>
+        <label class="zone-toggle-switch" style="flex-shrink:0;${zoneUseServerState() && IS_DIRECT_MODE ? 'opacity:0.4;' : ''}">
+          <input type="checkbox" id="masterToggleChk" ${masterEnabled ? "checked" : ""} ${zoneUseServerState() && IS_DIRECT_MODE ? "disabled" : ""}>
           <span class="zone-toggle-track"></span>
         </label>
       </div>
