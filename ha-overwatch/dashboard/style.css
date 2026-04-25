@@ -2380,3 +2380,85 @@ body.sidebar-collapsed.sidebar-left .view-toggle-widget {
 #floorFlyout button:hover {
   background: rgba(255,255,255,0.06) !important;
 }
+
+/* ─── Multi-panel floor layout ──────────────────────────────── */
+.floor-panels-container {
+  width: 100%;
+  height: 100%;
+  display: flex;
+}
+
+.floor-panel {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  min-width: 0;
+  min-height: 0;
+  cursor: grab;
+  border: 2px solid transparent;
+  transition: border-color 0.15s;
+  box-sizing: border-box;
+}
+
+.floor-panel:active { cursor: grabbing; }
+
+.floor-panel.fp-active {
+  border-color: rgba(0, 150, 255, 0.5);
+}
+
+.fp-wrapper {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: top left;
+}
+
+.fp-img {
+  display: block;
+  user-select: none;
+  pointer-events: none;
+  max-width: none;
+}
+
+.fp-svg {
+  position: absolute;
+  top: 0;
+  left: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.floor-panel-label {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(14, 14, 14, 0.75);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  padding: 3px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.7);
+  letter-spacing: 0.04em;
+  z-index: 10;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+/* Divider between panels */
+.floor-panels-container.fp-dir-h .floor-panel + .floor-panel {
+  border-left: 1px solid rgba(255, 255, 255, 0.08);
+}
+.floor-panels-container.fp-dir-v .floor-panel + .floor-panel {
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+/* Sidebar zoom hint when multi-panel active */
+.fp-zoom-hint {
+  font-size: 9px;
+  color: rgba(255,255,255,0.3);
+  text-align: center;
+  margin-top: 2px;
+  letter-spacing: 0.03em;
+}

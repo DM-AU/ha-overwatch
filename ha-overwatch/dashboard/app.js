@@ -767,6 +767,15 @@ async function deleteFloor(id) {
 function setActiveFloor(id) {
   const floor = floors.find(f => f.id === id);
   if (!floor) return;
+
+  // In multi-panel mode, update the active panel's floor assignment
+  if (getNumPanels() > 1) {
+    const key = activePanelIdx === 0 ? 'ow_panel_0_floor' : 'ow_panel_1_floor';
+    localStorage.setItem(key, id);
+    applyFloorPanels(); // rebuild panels with new floor
+    return;
+  }
+
   activeFloorId = id;
   localStorage.setItem("ow_active_floor", id);
   // Clear saved zoom so the new floor's image fits to the panel automatically
@@ -797,17 +806,317 @@ function applyActiveFloor() {
   if (window.renderCameraStatusBar) window.renderCameraStatusBar();
 }
 
-// Apply multi-panel floor layout — builds or rebuilds floor panel DOM inside #mapPanel
-// Implemented in Step 2; stub here keeps settings wiring intact
+// ─── MULTI-PANEL FLOOR RENDERER ────────────────────────────────────────────
+//
+// When getNumPanels() === 1: normal single-panel mode (existing engine unchanged)
+// When getNumPanels() === 2: replaces #main contents with two .floor-panel divs,
+//   each with its own img, svg, zoom state, and pan binding.
+//
+// activePanelIdx tracks which panel sidebar zoom/reset applies to.
+// Mouse scroll always applies to whichever panel the pointer is over.
+
+const PANEL_ZOOMS = [
+  { scale: 1, x: 0, y: 0 },
+  { scale: 1, x: 0, y: 0 },
+];
+
+function getPanelEl(idx)      { return document.querySelector(`.floor-panel[data-panel-idx="${idx}"]`); }
+function getPanelWrapper(idx) { return document.querySelector(`.floor-panel[data-panel-idx="${idx}"] .fp-wrapper`); }
+function getPanelImg(idx)     { return document.querySelector(`.floor-panel[data-panel-idx="${idx}"] .fp-img`); }
+function getPanelSvg(idx)     { return document.querySelector(`.floor-panel[data-panel-idx="${idx}"] .fp-svg`); }
+
+function applyPanelTransform(idx) {
+  const wrapper = getPanelWrapper(idx);
+  if (!wrapper) return;
+  const z = PANEL_ZOOMS[idx];
+  wrapper.style.transform = `translate(${z.x}px, ${z.y}px) scale(${z.scale})`;
+  if (editorMode) renderAllPanelZones();
+}
+
+function fitPanelToContainer(idx) {
+  const panelEl = getPanelEl(idx);
+  const img     = getPanelImg(idx);
+  if (!panelEl || !img || !img.naturalWidth) return;
+  const vw = panelEl.offsetWidth  || 300;
+  const vh = panelEl.offsetHeight || 300;
+  const iw = img.naturalWidth, ih = img.naturalHeight;
+  const z  = PANEL_ZOOMS[idx];
+  z.scale  = Math.min(vw / iw, vh / ih, 1);
+  z.x      = (vw - iw * z.scale) / 2;
+  z.y      = (vh - ih * z.scale) / 2;
+  applyPanelTransform(idx);
+  renderAllPanelZones();
+}
+
+function setActivePanel(idx) {
+  activePanelIdx = idx;
+  document.querySelectorAll('.floor-panel').forEach((el, i) => {
+    el.classList.toggle('fp-active', i === idx);
+  });
+  // Sync sidebar zoom/reset label if needed
+}
+
+// Render zones onto a specific panel's SVG
+function renderPanelZones(idx) {
+  const svg   = getPanelSvg(idx);
+  const floor = getPanelFloor(idx);
+  if (!svg || !floor) return;
+
+  // Temporarily swap globals so renderZones() draws to this panel
+  const origSvgId = 'zonesSvg';
+  svg.id = origSvgId + '_tmp_' + idx;
+
+  // Build a filtered zone list for this floor
+  const fi         = floors.indexOf(floor);
+  const isFirst    = fi === 0;
+  const panelZones = zones.filter(z => z.floor_id === floor.id || (!z.floor_id && isFirst));
+
+  // Clear and redraw
+  while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+  const img = getPanelImg(idx);
+  if (!img?.naturalWidth) return;
+
+  svg.setAttribute('width',   img.naturalWidth);
+  svg.setAttribute('height',  img.naturalHeight);
+  svg.setAttribute('viewBox', `0 0 ${img.naturalWidth} ${img.naturalHeight}`);
+
+  // Render each zone manually using the same drawing logic as renderZones
+  // We temporarily override activeFloorId so getZoneState works per-panel
+  const savedFloorId = activeFloorId;
+  activeFloorId = floor.id;
+
+  // Patch zonesSvg reference temporarily
+  const realSvg = document.getElementById('zonesSvg');
+  // Swap svg id so renderZones draws here
+  if (realSvg) realSvg.id = '__zonesSvg_hidden__';
+  svg.id = 'zonesSvg';
+
+  renderZones(); // draws into this svg
+
+  // Restore
+  svg.id = 'fp-svg-' + idx;
+  if (realSvg) realSvg.id = 'zonesSvg';
+  activeFloorId = savedFloorId;
+}
+
+function renderAllPanelZones() {
+  const n = getNumPanels();
+  for (let i = 0; i < n; i++) renderPanelZones(i);
+}
+
+// Build zoom/pan binding for a panel
+function bindPanelInteraction(idx) {
+  const panelEl = getPanelEl(idx);
+  if (!panelEl) return;
+
+  // Select panel on click
+  panelEl.addEventListener('pointerdown', () => setActivePanel(idx), { capture: true, passive: true });
+
+  // Pan
+  let panning = false, panStart = null, panBase = null;
+
+  panelEl.addEventListener('pointerdown', e => {
+    if (e.button !== 0 && e.pointerType === 'mouse') return;
+    if (e.target.closest('.zone-handle, .zone-polygon')) return;
+    panning  = true;
+    panStart = { x: e.clientX, y: e.clientY };
+    panBase  = { ...PANEL_ZOOMS[idx] };
+    panelEl.setPointerCapture(e.pointerId);
+  });
+
+  panelEl.addEventListener('pointermove', e => {
+    if (!panning) return;
+    PANEL_ZOOMS[idx].x = panBase.x + e.clientX - panStart.x;
+    PANEL_ZOOMS[idx].y = panBase.y + e.clientY - panStart.y;
+    applyPanelTransform(idx);
+  });
+
+  panelEl.addEventListener('pointerup',    () => { panning = false; });
+  panelEl.addEventListener('pointercancel',() => { panning = false; });
+
+  // Scroll zoom — always applies to hovered panel regardless of selection
+  panelEl.addEventListener('wheel', e => {
+    e.preventDefault();
+    const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+    const rect   = panelEl.getBoundingClientRect();
+    const cx     = e.clientX - rect.left;
+    const cy     = e.clientY - rect.top;
+    const z      = PANEL_ZOOMS[idx];
+    z.x          = cx - (cx - z.x) * factor;
+    z.y          = cy - (cy - z.y) * factor;
+    z.scale      = Math.min(10, Math.max(0.1, z.scale * factor));
+    applyPanelTransform(idx);
+  }, { passive: false });
+
+  // Touch pinch-zoom
+  let touches = null, pinchDist0 = null, pinchZoom0 = null;
+  panelEl.addEventListener('touchstart', e => {
+    if (e.touches.length === 2) {
+      touches    = e.touches;
+      pinchDist0 = Math.hypot(e.touches[0].clientX - e.touches[1].clientX,
+                               e.touches[0].clientY - e.touches[1].clientY);
+      pinchZoom0 = PANEL_ZOOMS[idx].scale;
+      panning    = false;
+    }
+  }, { passive: true });
+  panelEl.addEventListener('touchmove', e => {
+    if (e.touches.length === 2 && pinchDist0) {
+      e.preventDefault();
+      const d = Math.hypot(e.touches[0].clientX - e.touches[1].clientX,
+                            e.touches[0].clientY - e.touches[1].clientY);
+      PANEL_ZOOMS[idx].scale = Math.min(10, Math.max(0.1, pinchZoom0 * d / pinchDist0));
+      applyPanelTransform(idx);
+    }
+  }, { passive: false });
+  panelEl.addEventListener('touchend', () => { pinchDist0 = null; }, { passive: true });
+}
+
+// Build/rebuild the multi-panel DOM inside #main
 function applyFloorPanels() {
-  if (getNumPanels() <= 1) {
-    // Single panel — restore normal single-floor view
-    activeFloorId = getPanelFloor(0)?.id || floors[0]?.id || null;
-    setActiveFloor(activeFloorId);
+  const n      = getNumPanels();
+  const dir    = getPanelsDir();
+  const mainEl = document.getElementById('main');
+  if (!mainEl) return;
+
+  if (n <= 1) {
+    // ── Single panel ── restore original DOM if needed
+    if (mainEl.querySelector('.floor-panel')) {
+      mainEl.innerHTML = `
+        <div id="floorplanWrapper" class="floorplan-wrapper">
+          <img id="floorplanImage" src="img/floorplan.png" />
+          <svg id="zonesSvg" class="zones-svg"></svg>
+          <div id="deviceLayer"></div>
+        </div>`;
+      // Re-init with saved floor
+      activeFloorId = getPanelFloor(0)?.id || floors[0]?.id || null;
+      const fp = document.getElementById('floorplanImage');
+      const floor = activeFloor();
+      if (fp && floor?.floorplan) {
+        fp.onload = () => { initFloorplan(); renderZones(); };
+        fp.src = apiPath(floor.floorplan) + '?v=' + Date.now();
+        if (fp.complete) { initFloorplan(); renderZones(); }
+      }
+      bindPan(); // re-bind single-panel pan
+    }
+    // Hide sidebar zoom when returning to single panel
+    _updateZoomBtnsVisibility();
     return;
   }
-  // Multi-panel — Step 2 will implement full DOM construction
-  renderZones();
+
+  // ── Multi-panel ── build panel container
+  mainEl.innerHTML = ''; // clear existing content
+  const container = document.createElement('div');
+  container.className = 'floor-panels-container fp-dir-' + dir;
+  container.style.cssText = 'width:100%;height:100%;display:flex;' +
+    (dir === 'v' ? 'flex-direction:column;' : 'flex-direction:row;');
+
+  for (let i = 0; i < n; i++) {
+    const floor   = getPanelFloor(i);
+    const fi      = floors.indexOf(floor);
+    const isFirst = fi === 0;
+
+    const panelDiv = document.createElement('div');
+    panelDiv.className = 'floor-panel' + (i === activePanelIdx ? ' fp-active' : '');
+    panelDiv.dataset.panelIdx = i;
+    panelDiv.style.cssText = 'flex:1;position:relative;overflow:hidden;min-width:0;min-height:0;';
+
+    // Floor label
+    const label = document.createElement('div');
+    label.className = 'floor-panel-label';
+    label.textContent = floor?.name || 'Floor ' + (i + 1);
+
+    // Wrapper (panned/scaled)
+    const wrapper = document.createElement('div');
+    wrapper.className = 'fp-wrapper';
+    wrapper.style.cssText = 'position:absolute;top:0;left:0;transform-origin:top left;';
+
+    // Image
+    const img = document.createElement('img');
+    img.className = 'fp-img';
+    img.style.cssText = 'display:block;user-select:none;pointer-events:none;max-width:none;';
+    const imgSrc = floor?.floorplan ? apiPath(floor.floorplan) : 'img/floorplan.png';
+
+    // SVG
+    const svg = document.createElement('svg');
+    svg.className = 'fp-svg zones-svg';
+    svg.id = 'fp-svg-' + i;
+    svg.style.cssText = 'position:absolute;top:0;left:0;overflow:visible;pointer-events:none;';
+
+    wrapper.appendChild(img);
+    wrapper.appendChild(svg);
+    panelDiv.appendChild(label);
+    panelDiv.appendChild(wrapper);
+    container.appendChild(panelDiv);
+
+    // Load image then fit and render
+    const panelIdx = i;
+    img.onload = () => {
+      wrapper.style.width  = img.naturalWidth  + 'px';
+      wrapper.style.height = img.naturalHeight + 'px';
+      svg.setAttribute('width',   img.naturalWidth);
+      svg.setAttribute('height',  img.naturalHeight);
+      svg.setAttribute('viewBox', `0 0 ${img.naturalWidth} ${img.naturalHeight}`);
+      fitPanelToContainer(panelIdx);
+      renderPanelZones(panelIdx);
+    };
+    img.src = imgSrc + '?v=' + Date.now();
+  }
+
+  mainEl.appendChild(container);
+
+  // Bind interactions for each panel
+  for (let i = 0; i < n; i++) bindPanelInteraction(i);
+
+  // Update zoom buttons
+  _updateZoomBtnsVisibility();
+  setActivePanel(activePanelIdx < n ? activePanelIdx : 0);
+}
+
+// Show/hide sidebar zoom buttons based on panel count
+function _updateZoomBtnsVisibility() {
+  const multi = getNumPanels() > 1;
+  ['zoomIn','zoomOut','zoomReset'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.style.opacity = multi ? '0.45' : '';
+    // Don't disable — just visually indicate they apply to selected panel
+  });
+}
+
+// Override sidebar zoom/reset to apply to active panel in multi-panel mode
+function bindZoomControlsMultiPanel() {
+  const zoomIn    = document.getElementById('zoomIn');
+  const zoomOut   = document.getElementById('zoomOut');
+  const zoomReset = document.getElementById('zoomReset');
+  if (!zoomIn) return;
+
+  function zoomPanel(factor) {
+    if (getNumPanels() <= 1) return; // handled by existing bindZoomControls
+    const panelEl = getPanelEl(activePanelIdx);
+    if (!panelEl) return;
+    const vw = panelEl.offsetWidth / 2;
+    const vh = panelEl.offsetHeight / 2;
+    const z  = PANEL_ZOOMS[activePanelIdx];
+    z.x      = vw - (vw - z.x) * factor;
+    z.y      = vh - (vh - z.y) * factor;
+    z.scale  = Math.min(10, Math.max(0.1, z.scale * factor));
+    applyPanelTransform(activePanelIdx);
+  }
+
+  // Wrap existing onclick handlers to intercept multi-panel mode
+  const origIn    = zoomIn.onclick;
+  const origOut   = zoomOut.onclick;
+  const origReset = zoomReset.onclick;
+
+  zoomIn.onclick = () => {
+    if (getNumPanels() > 1) zoomPanel(1.15); else origIn?.();
+  };
+  zoomOut.onclick = () => {
+    if (getNumPanels() > 1) zoomPanel(1 / 1.15); else origOut?.();
+  };
+  zoomReset.onclick = () => {
+    if (getNumPanels() > 1) fitPanelToContainer(activePanelIdx); else origReset?.();
+  };
 }
 
 async function saveGroup(group) {
@@ -1411,6 +1720,12 @@ setInterval(() => {
 }, 700);
 
 function renderZones() {
+  // In multi-panel mode, render to each panel's SVG instead of the single zonesSvg
+  if (getNumPanels() > 1 && document.querySelector('.floor-panel')) {
+    renderAllPanelZones();
+    return;
+  }
+
   const svg = document.getElementById("zonesSvg");
   if (!svg) return;
   while (svg.firstChild) svg.removeChild(svg.firstChild);
@@ -3547,34 +3862,39 @@ function renderSettingsPanel() {
         </div>
 
         <div class="settings-section">
+        <div class="settings-section">
           <div class="settings-section-title">Floor Settings ${perDeviceBadge}</div>
-          ${floors.length > 1 ? `
-          <div class="settings-field" style="display:flex;flex-direction:column;gap:8px;">
-            <label class="settings-checkbox-row" style="display:flex;align-items:center;gap:8px;cursor:pointer;">
-              <input type="checkbox" id="camFloorOnlyChk" ${localStorage.getItem('ow_cam_floor_only')==='true' ? 'checked' : ''}>
-              <span>Show cameras for current floor only</span>
-            </label>
-            <label class="settings-checkbox-row" style="display:flex;align-items:center;gap:8px;cursor:pointer;">
-              <input type="checkbox" id="autoFloorChk" ${localStorage.getItem('ow_auto_floor')==='true' ? 'checked' : ''}>
-              <span>Auto-switch floor on motion</span>
-            </label>
-            <div style="padding-left:24px;display:flex;flex-direction:column;gap:6px;${localStorage.getItem('ow_auto_floor')!=='true' ? 'opacity:0.4;pointer-events:none;' : ''}">
-              <div class="settings-field" style="flex-direction:row;align-items:center;gap:8px;margin:0;">
-                <label style="flex:1;font-size:12px;">Default floor</label>
-                <select id="defaultFloorSel" style="background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:4px 8px;color:#fff;font-size:12px;">
-                  ${floors.map(f => '<option value="' + f.id + '"' + (localStorage.getItem('ow_default_floor')===f.id ? ' selected' : '') + '>' + escapeHtml(f.name) + '</option>').join('')}
-                </select>
-              </div>
-              <div class="settings-field" style="flex-direction:row;align-items:center;gap:8px;margin:0;">
-                <label style="flex:1;font-size:12px;">Stay on triggered floor (s)</label>
-                <input type="number" id="floorStayChk" min="5" max="600" value="${localStorage.getItem('ow_floor_stay_secs')||'30'}" style="width:60px;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:4px 8px;color:#fff;font-size:12px;">
-              </div>
-              <div class="settings-field" style="flex-direction:row;align-items:center;gap:8px;margin:0;">
-                <label style="flex:1;font-size:12px;">Return-to-default cooldown (s)</label>
-                <input type="number" id="floorReturnChk" min="5" max="600" value="${localStorage.getItem('ow_floor_return_secs')||'60'}" style="width:60px;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:4px 8px;color:#fff;font-size:12px;">
-              </div>
-            </div>
-          </div>` : '<div style="font-size:11px;color:#666;">Add multiple floors in the Zones tab to enable floor settings.</div>'}
+          ${floors.length <= 1
+            ? '<div style="font-size:11px;color:#666;">Add multiple floors in the Zones tab to enable floor settings.</div>'
+            : (() => {
+                const multiPanel = getNumPanels() > 1;
+                const disStyle   = multiPanel ? 'opacity:0.35;pointer-events:none;' : '';
+                const mpNote     = multiPanel ? '<div style="font-size:10px;color:#666;padding-bottom:6px;">Multi-panel active — auto-switch and camera floor filter are unavailable.</div>' : '';
+                const autoOn     = localStorage.getItem('ow_auto_floor') === 'true';
+                const subStyle   = autoOn ? '' : 'opacity:0.4;pointer-events:none;';
+                return mpNote
+                  + '<div style="' + disStyle + 'display:flex;flex-direction:column;gap:8px;">'
+                  + '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;">'
+                  + '<input type="checkbox" id="camFloorOnlyChk" ' + (localStorage.getItem('ow_cam_floor_only')==='true' ? 'checked' : '') + '>'
+                  + '<span>Show cameras for current floor only</span></label>'
+                  + '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;">'
+                  + '<input type="checkbox" id="autoFloorChk" ' + (autoOn ? 'checked' : '') + '>'
+                  + '<span>Auto-switch floor on motion</span></label>'
+                  + '<div style="padding-left:24px;display:flex;flex-direction:column;gap:6px;' + subStyle + '">'
+                  + '<div style="display:flex;align-items:center;gap:8px;">'
+                  + '<label style="flex:1;font-size:12px;">Default floor</label>'
+                  + '<select id="defaultFloorSel" style="background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:4px 8px;color:#fff;font-size:12px;">'
+                  + floors.map(f => '<option value="' + f.id + '"' + (localStorage.getItem('ow_default_floor')===f.id?' selected':'') + '>' + escapeHtml(f.name) + '</option>').join('')
+                  + '</select></div>'
+                  + '<div style="display:flex;align-items:center;gap:8px;">'
+                  + '<label style="flex:1;font-size:12px;">Stay on triggered floor (s)</label>'
+                  + '<input type="number" id="floorStayChk" min="5" max="600" value="' + (localStorage.getItem('ow_floor_stay_secs')||'30') + '" style="width:60px;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:4px 8px;color:#fff;font-size:12px;"></div>'
+                  + '<div style="display:flex;align-items:center;gap:8px;">'
+                  + '<label style="flex:1;font-size:12px;">Return-to-default cooldown (s)</label>'
+                  + '<input type="number" id="floorReturnChk" min="5" max="600" value="' + (localStorage.getItem('ow_floor_return_secs')||'60') + '" style="width:60px;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:4px 8px;color:#fff;font-size:12px;"></div>'
+                  + '</div></div>';
+              })()
+          }
         </div>
 
         <div class="settings-section">
@@ -5054,6 +5374,7 @@ async function init() {
   await loadModule("zonesEditorContainer", "zones-editor.html");
 
   bindZoomControls();
+  bindZoomControlsMultiPanel(); // wraps zoom/reset for multi-panel mode
   bindPan();
   // initFloorplan() called after loadFloors() so the saved floor image is used
   bindZonesButton();
@@ -5076,6 +5397,7 @@ async function init() {
   await loadFloors();   // sets activeFloorId, loads correct floor image, calls initFloorplan
   window._updateFloorBtn?.(); // show/hide floor switcher based on floor count
   bindZonesSvgEvents();
+  applyFloorPanels();   // build single or multi-panel layout based on saved settings
   renderZonesEditor();
   renderZones();
   await loadConfig();
