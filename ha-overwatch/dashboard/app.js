@@ -1267,6 +1267,8 @@ function renderZones() {
 
   // ── Group member highlight layer ────────────────────────────
   // Works in both editor mode (selectedGroupId) and live mode (highlightedGroupId from dropdown).
+  const _curFloorId   = activeFloorId;
+  const _isFirstFloor = !_curFloorId || floors.length === 0 || floors[0]?.id === _curFloorId;
   const activeGrpId  = (editorMode && selectedGroupId) ? selectedGroupId
                      : showGroupHighlight ? highlightedGroupId : null;
   if (activeGrpId) {
@@ -1285,6 +1287,12 @@ function renderZones() {
       (activeGrp.zone_ids || []).forEach(zid => {
         const zone = zones.find(z => z.id === zid);
         if (!zone || !zone.points?.length || zone.hidden) return;
+        // Only highlight members on the active floor
+        if (floors.length > 1) {
+          const zFloor = zone.floor_id;
+          const onActiveFloor = zFloor === _curFloorId || (!zFloor && _isFirstFloor);
+          if (!onActiveFloor) return;
+        }
         const poly = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
         poly.setAttribute("points", zone.points.map(p => `${p.x},${p.y}`).join(" "));
         fillGroup.appendChild(poly);
@@ -1313,8 +1321,8 @@ function renderZones() {
   }
 
   // Filter to active floor — zones with no floor_id belong to the first floor
-  const currentFloorId = activeFloorId;
-  const isFirstFloor   = !currentFloorId || floors.length === 0 || floors[0]?.id === currentFloorId;
+  const currentFloorId = _curFloorId;
+  const isFirstFloor   = _isFirstFloor;
 
   zones.forEach(zone => {
     // Skip zones not on the active floor
