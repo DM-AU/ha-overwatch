@@ -983,7 +983,8 @@ class OverwatchZoneTriggered(OWSensor):
   "dependencies": [],
   "after_dependencies": [],
   "config_flow": true,
-  "iot_class": "local_push"
+  "iot_class": "local_push",
+  "icon": "mdi:security"
 }
 `,
   "strings.json": `{
