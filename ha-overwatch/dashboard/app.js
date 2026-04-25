@@ -1951,6 +1951,7 @@ function _renderZonesInternal(targetSvg) {
       const type = detectEntityType(triggeredEntity || "");
       const hex  = resolveColour(entityTypeColour(type));
       const fillAlpha   = flashPhase ? 0.18 : 0.65;
+      poly.style.transition  = 'none'; // bypass CSS transition so flash is instant
       poly.style.fill        = hexToRgba(hex, fillAlpha);
       poly.style.stroke      = hexToRgba(hex, fillAlpha * 0.7);
       poly.style.strokeWidth = String(1 / zoom.scale);
