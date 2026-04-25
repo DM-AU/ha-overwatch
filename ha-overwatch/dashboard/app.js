@@ -1870,11 +1870,10 @@ function _renderZonesInternal(targetSvg) {
   zones.forEach(zone => {
     const zoneFloor = zone.floor_id;
     if (currentFloorId && floors.length > 1) {
-      // Zones with floor_id assigned: only show on their floor's panel
-      // Zones without floor_id: show on all panels (unassigned)
+      // Zones with floor_id: only show on their assigned floor's panel
       if (zoneFloor && zoneFloor !== currentFloorId) return;
-      // Unassigned zones: show only on first floor panel in single mode
-      if (!zoneFloor && !isFirstFloor && !inMultiPanel) return;
+      // Zones without floor_id: belong to first floor only
+      if (!zoneFloor && !isFirstFloor) return;
     }
 
     const pts = zone.points || [];
@@ -2295,6 +2294,13 @@ function renderZonesEditor() {
               : `<svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M1 12C1 12 5 5 12 5s11 7 11 7-4 7-11 7S1 12 1 12z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2"/></svg>`
             }</button>
           </div>
+          ${floors.length > 1 ? `
+          <div class="zones-editor-row" style="align-items:center;">
+            <label style="flex:0 0 auto;">Floor</label>
+            <select id="zoneFloorSelect" style="flex:1;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:5px 8px;color:#fff;font-size:12px;">
+              ${floors.map(f => `<option value="${f.id}" ${(selectedZone.floor_id || floors[0]?.id) === f.id ? 'selected' : ''}>${escapeHtml(f.name)}</option>`).join('')}
+            </select>
+          </div>` : ''}
           <div class="ha-section" style="margin-top:2px;flex:1;display:flex;flex-direction:column;">
             <div class="ha-device-tabs" id="haDeviceTabs">
               <button class="ha-device-tab active" data-tab="sensors">Sensors</button>
@@ -2538,6 +2544,12 @@ function renderZonesEditor() {
 
     document.getElementById("zoneHiddenToggle")?.addEventListener("click", () => {
       setZoneHidden(selectedZone.id, !selectedZone.hidden); renderZonesEditor();
+    });
+
+    document.getElementById("zoneFloorSelect")?.addEventListener("change", e => {
+      selectedZone.floor_id = e.target.value;
+      saveZone(selectedZone);
+      renderZones(); renderZonesEditor();
     });
 
     // Device tabs
