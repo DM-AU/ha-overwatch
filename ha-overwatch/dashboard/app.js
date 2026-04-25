@@ -461,6 +461,8 @@ function bindPan() {
   let dragging = false, startX = 0, startY = 0;
 
   outer.addEventListener("pointerdown", e => {
+    // In multi-panel mode, floor panels handle their own pan
+    if (getNumPanels() > 1 && e.target.closest('.floor-panel')) return;
     if (editorMode) {
       const t = e.target;
       // Don't start pan if clicking zone handles, polygons, or the zones-editor panel
@@ -477,6 +479,7 @@ function bindPan() {
 
   outer.addEventListener("pointermove", e => {
     if (!dragging) return;
+    if (getNumPanels() > 1) { dragging = false; return; }
     zoom.x = e.clientX - startX;
     zoom.y = e.clientY - startY;
     applyTransform();
@@ -770,9 +773,15 @@ function setActiveFloor(id) {
 
   // In multi-panel mode, update the active panel's floor assignment
   if (getNumPanels() > 1) {
-    const key = activePanelIdx === 0 ? 'ow_panel_0_floor' : 'ow_panel_1_floor';
-    localStorage.setItem(key, id);
-    applyFloorPanels(); // rebuild panels with new floor
+    // Only update if a panel is actually selected
+    if (activePanelIdx >= 0) {
+      const key = activePanelIdx === 0 ? 'ow_panel_0_floor' : 'ow_panel_1_floor';
+      const current = localStorage.getItem(key);
+      if (current !== id) {
+        localStorage.setItem(key, id);
+        applyFloorPanels(); // rebuild panels with new floor assignment
+      }
+    }
     return;
   }
 
@@ -931,7 +940,6 @@ function bindPanelInteraction(idx) {
     if (e.target.closest('.zone-handle, .floor-panel-handle')) return;
     panning  = true;
     panStart = { x: e.clientX - PANEL_ZOOMS[idx].x, y: e.clientY - PANEL_ZOOMS[idx].y };
-    panelEl.setPointerCapture(e.pointerId);
   });
 
   panelEl.addEventListener('pointermove', e => {
@@ -1940,7 +1948,7 @@ function _renderZonesInternal(targetSvg) {
         || (zones.find(z => groupFlashZoneIds.has(z.id) && getZoneState(z) === 'triggered')?.sensors || []).find(isEntityTriggered);
       const type = detectEntityType(triggeredEntity || "");
       const hex  = resolveColour(entityTypeColour(type));
-      const fillAlpha   = flashPhase ? 0.18 : 0.65;
+      const fillAlpha   = flashPhase ? 0.35 : 0.75;
       poly.style.fill        = hexToRgba(hex, fillAlpha);
       poly.style.stroke      = hexToRgba(hex, fillAlpha * 0.7);
       poly.style.strokeWidth = String(1 / zoom.scale);
