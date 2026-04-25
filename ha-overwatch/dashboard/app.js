@@ -1722,15 +1722,6 @@ function renderZonesEditor() {
           <div class="zones-editor-row"><label>Colour</label>
             <input type="color" id="zoneColorInput" value="${selectedZone.colorHex || '#0096ff'}">
           </div>
-          ${floors.length > 1 ? (
-            '<div class="zones-editor-row"><label>Floor</label>'
-            + '<select id="zoneFloorSelect" style="flex:1;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:5px 8px;color:#fff;font-size:12px;">'
-            + floors.map((f, fi) => {
-                const sel = selectedZone.floor_id === f.id || (!selectedZone.floor_id && fi === 0);
-                return '<option value="' + f.id + '"' + (sel ? ' selected' : '') + '>' + escapeHtml(f.name) + '</option>';
-              }).join('')
-            + '</select></div>'
-          ) : ''}
           <div class="zones-editor-row" style="align-items:center;gap:8px;">
             <label style="flex:0 0 auto;">Armed</label>
             <label class="zone-toggle-switch">
@@ -1789,7 +1780,13 @@ function renderZonesEditor() {
       </div>
       <div class="zed-body">
         <!-- LEFT PANEL -->
-        <div class="zed-left" style="${(!selectedZone && !selectedGroup) ? 'border-right:none;width:100%;' : ''}">
+          <div class="zed-left" style="${(!selectedZone && !selectedGroup) ? 'border-right:none;width:100%;' : '' }">
+          ${floors.length > 1 ? (
+            '<div style="padding:6px 8px 4px;border-bottom:1px solid rgba(255,255,255,0.06);">'
+            + '<select id="editorFloorSelect" style="width:100%;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:5px 8px;color:#fff;font-size:12px;">'
+            + floors.map(f => '<option value="' + f.id + '"' + (f.id === activeFloorId ? ' selected' : '') + '>' + escapeHtml(f.name) + '</option>').join('')
+            + '</select></div>'
+          ) : ''}
           <div class="zed-list" id="zonesList">${buildZoneList()}</div>
           <div class="zed-actions">
             <button id="addGroupBtn">+ Group</button>
@@ -1841,11 +1838,21 @@ function renderZonesEditor() {
     };
   });
 
+  // Floor selector — switches active floor, reloads floorplan and re-renders zone list
+  document.getElementById("editorFloorSelect")?.addEventListener("change", e => {
+    setActiveFloor(e.target.value);
+    selectedZoneId  = null;
+    selectedGroupId = null;
+    renderZonesEditor();
+    renderZones();
+  });
+
   // Add Zone
   document.getElementById("addZoneBtn")?.addEventListener("click", () => {
     const id = "zone_" + Date.now();
     const nz = { id, name: "New Zone", colorHex: "#0096ff", color: hexToRgba("#0096ff", 0.25),
-                 points: [], sensors: [], cameras: [], lights: [], sirens: [], enabled: true, hidden: false };
+                 points: [], sensors: [], cameras: [], lights: [], sirens: [], enabled: true, hidden: false,
+                 floor_id: activeFloorId || null };
     pushUndo(); zones.push(nz);
     selectedZoneId = id; selectedGroupId = null;
     isCreatingZone = true; isEditingPoints = false; currentNewZone = nz;
@@ -1953,15 +1960,6 @@ function renderZonesEditor() {
       selectedZone.colorHex = e.target.value;
       selectedZone.color = hexToRgba(e.target.value, 0.25);
       saveZone(selectedZone); renderZones();
-    });
-
-    document.getElementById("zoneFloorSelect")?.addEventListener("change", e => {
-      selectedZone.floor_id = e.target.value;
-      saveZone(selectedZone);
-      // Refresh HA floor entities now that zone assignment changed
-      const fl = floors.find(f => f.id === e.target.value);
-      if (fl) logEvent("info", `Zone "${selectedZone.name}" assigned to floor "${fl.name}"`, "zone",
-        { zoneName: selectedZone.name, zoneColour: selectedZone.colorHex || "#0096ff" });
     });
 
     document.getElementById("zoneEnabledToggle")?.addEventListener("change", e => {
