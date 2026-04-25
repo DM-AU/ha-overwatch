@@ -2802,32 +2802,33 @@ let directModePollTimer = null;
 function startDirectModePoller() {
   if (!IS_DIRECT_MODE) return;
   async function poll() {
+    let nextPoll = 3000;
     try {
       const res = await fetch("ow/states", { cache: "no-store" });
       if (res.ok) {
         const states = await res.json();
-        let changed = false;
-        Object.values(states).forEach(st => {
-          if (st.entity_id) {
-            haStates[st.entity_id] = st;
-            changed = true;
+        const entityCount = Object.keys(states).length;
+
+        if (entityCount === 0) {
+          // Cache not ready yet — retry quickly
+          nextPoll = 1000;
+        } else {
+          Object.values(states).forEach(st => {
+            if (st.entity_id) haStates[st.entity_id] = st;
+          });
+
+          if (!haConnected) {
+            haConnected = true;
+            haEverConnected = true;
+            setHAStatus("connected");
+            logEvent("ok", `Direct Mode: ${entityCount} entity states loaded from backend.`, "ha");
+            subscribeHAEntities(); // builds the entity set (no WS send in direct mode)
           }
-        });
-        if (changed && !haConnected) {
-          haConnected = true;
-          haEverConnected = true;
-          setHAStatus("connected");
-          logEvent("ok", "Direct Mode: state cache loaded from backend.", "ha");
-          // Run the same post-connect steps as auth_ok
-          subscribeHAEntities();
+
+          // Always re-render on each poll so zone colours and alarm state stay live
           renderZones();
-          const alarmEntity = uiConfig.alarm_entity;
-          if (alarmEntity && haStates[alarmEntity]) {
-            updateStatusFromAlarm(alarmEntity, haStates[alarmEntity]);
-          }
-        } else if (changed) {
-          renderZones();
-          const alarmEntity = uiConfig.alarm_entity;
+          const alarmEntity = uiConfig.alarm_entity ||
+            Object.keys(haStates).find(id => id.startsWith("alarm_control_panel."));
           if (alarmEntity && haStates[alarmEntity]) {
             updateStatusFromAlarm(alarmEntity, haStates[alarmEntity]);
           }
@@ -2840,7 +2841,7 @@ function startDirectModePoller() {
         logEvent("warn", "Direct Mode: lost contact with backend.", "ha");
       }
     }
-    directModePollTimer = setTimeout(poll, 3000);
+    directModePollTimer = setTimeout(poll, nextPoll);
   }
   poll();
 }

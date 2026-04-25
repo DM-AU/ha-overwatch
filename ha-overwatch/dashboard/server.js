@@ -368,6 +368,35 @@ const server = http.createServer(async (req, res) => {
 
   /* ── /ow/states — direct mode frontend polls for full HA entity states ── */
   if (pathname === "/ow/states" && req.method === "GET") {
+    // If the HA listener hasn't populated the cache yet, do a one-shot REST fetch
+    if (Object.keys(serverHaStates).length === 0 && process.env.SUPERVISOR_TOKEN) {
+      const haReq = http.request({
+        hostname: "supervisor",
+        port:     80,
+        path:     "/core/api/states",
+        method:   "GET",
+        headers: {
+          "Authorization": `Bearer ${process.env.SUPERVISOR_TOKEN}`,
+          "Content-Type":  "application/json",
+        },
+      }, haRes => {
+        let body = "";
+        haRes.on("data", c => body += c);
+        haRes.on("end", () => {
+          try {
+            const states = JSON.parse(body);
+            if (Array.isArray(states)) {
+              states.forEach(st => { if (st.entity_id) serverHaStates[st.entity_id] = st; });
+              console.log(`[HA-Overwatch] /ow/states eager fetch: ${states.length} entities`);
+            }
+          } catch {}
+          json(res, serverHaStates);
+        });
+      });
+      haReq.on("error", () => json(res, serverHaStates));
+      haReq.end();
+      return;
+    }
     json(res, serverHaStates);
     return;
   }
