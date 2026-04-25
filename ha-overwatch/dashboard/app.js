@@ -837,8 +837,13 @@ function fitPanelToContainer(idx) {
   const panelEl = getPanelEl(idx);
   const img     = getPanelImg(idx);
   if (!panelEl || !img || !img.naturalWidth) return;
-  const vw = panelEl.offsetWidth  || 300;
-  const vh = panelEl.offsetHeight || 300;
+  const vw = panelEl.offsetWidth;
+  const vh = panelEl.offsetHeight;
+  // If panel has no size yet (not laid out), retry after layout
+  if (!vw || !vh) {
+    requestAnimationFrame(() => fitPanelToContainer(idx));
+    return;
+  }
   const iw = img.naturalWidth, ih = img.naturalHeight;
   const z  = PANEL_ZOOMS[idx];
   z.scale  = Math.min(vw / iw, vh / ih, 1);
@@ -877,18 +882,12 @@ function renderPanelZones(idx) {
   panelSvg.setAttribute('height',  img.naturalHeight);
   panelSvg.setAttribute('viewBox', `0 0 ${img.naturalWidth} ${img.naturalHeight}`);
 
-  // Temporarily set activeFloorId and swap the SVG the renderer uses.
-  // try/finally guarantees restoration even if renderZones throws.
+  // Pass the panel SVG directly — no ID swap, no DOM mutation
   const savedFloorId = activeFloorId;
-  const realSvg      = document.getElementById('zonesSvg');
   try {
     activeFloorId = floor.id;
-    if (realSvg)   realSvg.id   = '__ow_svg_hidden__';
-    panelSvg.id = 'zonesSvg';
-    _renderZonesInternal();
+    _renderZonesInternal(panelSvg);
   } finally {
-    panelSvg.id = 'fp-svg-' + idx;
-    if (realSvg) realSvg.id = 'zonesSvg';
     activeFloorId = savedFloorId;
   }
 }
@@ -918,7 +917,10 @@ function bindPanelInteraction(idx) {
   });
 
   panelEl.addEventListener('pointermove', e => {
-    if (!panning || e.buttons !== 1) return;
+    // For mouse: e.buttons===1 means left button physically held
+    // For touch/pen: always allow if panning flag is set
+    if (!panning) return;
+    if (e.pointerType === 'mouse' && e.buttons !== 1) { panning = false; return; }
     PANEL_ZOOMS[idx].x = e.clientX - panStart.x;
     PANEL_ZOOMS[idx].y = e.clientY - panStart.y;
     applyPanelTransform(idx);
@@ -1050,8 +1052,11 @@ function applyFloorPanels() {
       svg.setAttribute('width',   img.naturalWidth);
       svg.setAttribute('height',  img.naturalHeight);
       svg.setAttribute('viewBox', `0 0 ${img.naturalWidth} ${img.naturalHeight}`);
-      fitPanelToContainer(panelIdx);
-      renderPanelZones(panelIdx);
+      // Use rAF so panel has been laid out and has non-zero dimensions
+      requestAnimationFrame(() => {
+        fitPanelToContainer(panelIdx);
+        renderPanelZones(panelIdx);
+      });
     };
     img.src = imgSrc + '?v=' + Date.now();
   }
@@ -1762,8 +1767,8 @@ function renderZones() {
 
 // Internal zone drawing — draws into whatever element currently has id="zonesSvg"
 // Called by renderZones() (single panel) and renderPanelZones() (multi-panel via ID swap)
-function _renderZonesInternal() {
-  const svg = document.getElementById("zonesSvg");
+function _renderZonesInternal(targetSvg) {
+  const svg = targetSvg || document.getElementById("zonesSvg");
   if (!svg) return;
   while (svg.firstChild) svg.removeChild(svg.firstChild);
 
@@ -3924,12 +3929,13 @@ function renderSettingsPanel() {
                 const autoOn     = localStorage.getItem('ow_auto_floor') === 'true';
                 const subStyle   = autoOn ? '' : 'opacity:0.4;pointer-events:none;';
                 return mpNote
-                return mpNote
                   + '<div style="display:flex;flex-direction:column;gap:8px;">'
                   + '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;">'
                   + '<input type="checkbox" id="hideFloorLabelChk" ' + (localStorage.getItem('ow_hide_floor_label')==='true' ? 'checked' : '') + '>'
                   + '<span>Hide floor name label on panels</span></label>'
                   + '<div style="' + disStyle + 'display:flex;flex-direction:column;gap:8px;">'
+                  + '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;">'
+                  + '<input type="checkbox" id="camFloorOnlyChk" ' + (localStorage.getItem('ow_cam_floor_only')==='true' ? 'checked' : '') + (multiPanel ? ' disabled' : '') + '>'
                   + '<span>Show cameras for current floor only</span></label>'
                   + '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;">'
                   + '<input type="checkbox" id="autoFloorChk" ' + (autoOn ? 'checked' : '') + (multiPanel ? ' disabled' : '') + '>'
@@ -5587,6 +5593,12 @@ function initViewToggle() {
   }
 }
 function fitFloorplanToPanel() {
+  // Multi-panel mode — fit each panel independently
+  if (getNumPanels() > 1 && document.querySelector('.floor-panel')) {
+    const n = getNumPanels();
+    for (let i = 0; i < n; i++) fitPanelToContainer(i);
+    return;
+  }
   const img = document.getElementById('floorplanImage');
   if (!img || !img.naturalWidth) return;
   const panel = document.getElementById('mapPanel');
