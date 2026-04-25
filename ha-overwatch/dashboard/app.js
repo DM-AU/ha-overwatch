@@ -1439,8 +1439,8 @@ function renderZones() {
 
     svg.appendChild(poly);
 
-    // Handles only shown when actively editing points, not just selected
-    if (editorMode && isSelected && isEditingPoints) {
+    // Handles shown when editing points OR when actively creating this zone
+    if (editorMode && isSelected && (isEditingPoints || (isCreatingZone && zone.id === currentNewZone?.id))) {
       const handleR = 7 / zoom.scale;
       pts.forEach((p, idx) => {
         const c = document.createElementNS("http://www.w3.org/2000/svg", "circle");
@@ -1593,7 +1593,8 @@ function renderZonesEditor() {
   const selectedZone  = selectedZoneId  ? zones.find(z => z.id === selectedZoneId)   : null;
   const selectedGroup = selectedGroupId ? groups.find(g => g.id === selectedGroupId) : null;
 
-  const editPtsLabel    = isEditingPoints ? "✔ Done Editing" : "Edit Zone";
+  const needsPoints   = selectedZone && (selectedZone.points || []).length < 3;
+  const editPtsLabel  = isCreatingZone ? "✏️ Adding Points" : isEditingPoints ? "✔ Done Editing" : needsPoints ? "Add Points" : "Edit Zone";
   const hasSelection = !!(selectedZone || selectedGroup);
   const editorW = hasSelection ? editorSize.w : 260;
   const editorH = editorSize.h;
@@ -1889,7 +1890,17 @@ function renderZonesEditor() {
 
   // Edit Zone points
   document.getElementById("editPointsBtn")?.addEventListener("click", () => {
-    isEditingPoints = !isEditingPoints; isCreatingZone = false; currentNewZone = null;
+    const zone = zones.find(z => z.id === selectedZoneId);
+    if (zone && (zone.points || []).length < 3) {
+      // Zone not complete yet — resume creation mode so more points can be added
+      isCreatingZone  = true;
+      isEditingPoints = false;
+      currentNewZone  = zone;
+    } else {
+      isEditingPoints = !isEditingPoints;
+      isCreatingZone  = false;
+      currentNewZone  = null;
+    }
     renderZones(); renderZonesEditor();
   });
 
