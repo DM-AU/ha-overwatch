@@ -906,12 +906,9 @@ function renderPanelZones(idx) {
     });
     _renderZonesInternal(panelSvg);
     const afterCount = panelSvg.childNodes.length;
-    if (triggeredZones.length > 0 && afterCount < 2) {
-      console.warn(`[OW] Panel ${idx}: ${afterCount} SVG elements but ${triggeredZones.length} triggered zones! haConnected=${haConnected}, floor=${floor.id}, activeFloorId=${activeFloorId}`);
-      const wrapper = getPanelWrapper(idx);
-      const children = Array.from(panelSvg.childNodes).map(n => `${n.tagName}(fill=${n.style?.fill},points=${n.getAttribute?.('points')?.substring(0,20)})`).join(', ');
-      console.warn(`  Wrapper transform: "${wrapper?.style.transform}", SVG viewBox: "${panelSvg.getAttribute('viewBox')}", children: [${children}]`);
-      triggeredZones.forEach(z => console.warn(`  Zone: ${z.name}, floor_id=${z.floor_id}, pts=${(z.points||[]).length}, state=${getZoneState(z)}, hidden=${z.hidden}`));
+    if (triggeredZones.length > 0 && afterCount === 0) {
+      console.warn(`[OW] Panel ${idx}: 0 SVG elements but ${triggeredZones.length} triggered zones! haConnected=${haConnected}, floor=${floor.id}`);
+      triggeredZones.forEach(z => console.warn(`  Zone: ${z.name}, pts=${(z.points||[]).length}, state=${getZoneState(z)}, hidden=${z.hidden}`));
     } else {
       console.debug(`[OW] Panel ${idx}: ${afterCount} SVG elements (${triggeredZones.length} triggered)`);
     }
