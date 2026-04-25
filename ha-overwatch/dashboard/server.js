@@ -494,6 +494,28 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  /* ── /ow/reload — tell HA to refresh zone coordinator immediately ── */
+  if (pathname === "/ow/reload" && req.method === "POST") {
+    if (!process.env.SUPERVISOR_TOKEN) { json(res, { ok: false, reason: "not in addon mode" }); return; }
+    // Call HA webhook or service to reload the integration config entry
+    // Simplest: call homeassistant.reload_config_entry via REST
+    const reloadBody = JSON.stringify({ entry_id: "overwatch" });
+    const haReq = http.request({
+      hostname: "supervisor", port: 80,
+      path: "/core/api/config/config_entries/entry/reload",
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${process.env.SUPERVISOR_TOKEN}`,
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(reloadBody),
+      },
+    }, haRes => { haRes.resume(); json(res, { ok: haRes.statusCode < 300 }); });
+    haReq.on("error", e => json(res, { ok: false, reason: e.message }));
+    haReq.write(reloadBody);
+    haReq.end();
+    return;
+  }
+
   /* ── /ow/zones — component fetches zone/group/camera structure ── */
   if (pathname === "/ow/zones" && req.method === "GET") {
     try {
@@ -719,7 +741,7 @@ class ZoneCoordinator(DataUpdateCoordinator):
 
     def __init__(self, hass: HomeAssistant, url: str) -> None:
         super().__init__(hass, _LOGGER, name="HA Overwatch Zones",
-            update_interval=timedelta(hours=1))
+            update_interval=timedelta(minutes=5))
         self.url = url
 
     async def _async_update_data(self) -> dict:
@@ -825,27 +847,47 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     coordinator: ZoneCoordinator = hass.data[DOMAIN][entry.entry_id]["zone_coordinator"]
-    data = coordinator.data or {}
 
-    entities = [OverwatchMasterSwitch(coordinator)]
-    for g in data.get("groups", []):
-        entities.append(OverwatchGroupSwitch(coordinator, g))
-    for z in data.get("zones", []):
-        entities.append(OverwatchZoneSwitch(coordinator, z))
-    for f in data.get("floors", []):
-        entities.append(OverwatchZoneFloorSwitch(coordinator, f))
-    entities.append(OverwatchCameraAllSwitch(coordinator))
-    for g in data.get("camera_groups", []):
-        entities.append(OverwatchCameraGroupSwitch(coordinator, g))
-    for z in data.get("camera_zones", []):
-        entities.append(OverwatchCameraZoneSwitch(coordinator, z))
-    for f in data.get("floors", []):
-        entities.append(OverwatchCameraFloorSwitch(coordinator, f))
-    for c in data.get("cameras", []):
-        entities.append(OverwatchCameraSwitch(coordinator, c))
+    # Track which unique_ids have already been added so we can add new ones dynamically
+    known_unique_ids: set[str] = set()
 
-    _LOGGER.info("Overwatch: registering %d switch entities", len(entities))
-    async_add_entities(entities, update_before_add=False)
+    def _build_entities(data: dict) -> list:
+        entities = []
+        # Master (always one)
+        entities.append(OverwatchMasterSwitch(coordinator))
+        for g in data.get("groups", []):
+            entities.append(OverwatchGroupSwitch(coordinator, g))
+        for z in data.get("zones", []):
+            entities.append(OverwatchZoneSwitch(coordinator, z))
+        for f in data.get("floors", []):
+            entities.append(OverwatchZoneFloorSwitch(coordinator, f))
+        entities.append(OverwatchCameraAllSwitch(coordinator))
+        for g in data.get("camera_groups", []):
+            entities.append(OverwatchCameraGroupSwitch(coordinator, g))
+        for z in data.get("camera_zones", []):
+            entities.append(OverwatchCameraZoneSwitch(coordinator, z))
+        for f in data.get("floors", []):
+            entities.append(OverwatchCameraFloorSwitch(coordinator, f))
+        for c in data.get("cameras", []):
+            entities.append(OverwatchCameraSwitch(coordinator, c))
+        return entities
+
+    def _add_new_entities() -> None:
+        """Called on every coordinator update — adds any entities not yet registered."""
+        data = coordinator.data or {}
+        all_entities = _build_entities(data)
+        new_entities = [e for e in all_entities if e._attr_unique_id not in known_unique_ids]
+        if new_entities:
+            _LOGGER.info("Overwatch: adding %d new switch entities dynamically", len(new_entities))
+            for e in new_entities:
+                known_unique_ids.add(e._attr_unique_id)
+            async_add_entities(new_entities, update_before_add=False)
+
+    # Initial add
+    _add_new_entities()
+
+    # Re-run on every coordinator refresh so new zones/floors/cameras appear without HA restart
+    entry.async_on_unload(coordinator.async_add_listener(_add_new_entities))
 
 
 def _dev(coordinator: ZoneCoordinator) -> DeviceInfo:
@@ -1008,16 +1050,30 @@ async def async_setup_entry(
     data               = hass.data[DOMAIN][entry.entry_id]
     zone_coordinator   = data["zone_coordinator"]
     trig_coordinator   = data["triggered_coordinator"]
-    zones_data         = zone_coordinator.data or {}
 
-    entities = [OverwatchMasterTriggered(trig_coordinator, zone_coordinator)]
-    for g in zones_data.get("groups", []):
-        entities.append(OverwatchGroupTriggered(trig_coordinator, g))
-    for z in zones_data.get("zones", []):
-        entities.append(OverwatchZoneTriggered(trig_coordinator, z))
+    known_unique_ids: set[str] = set()
 
-    _LOGGER.info("Overwatch: registering %d binary sensor entities", len(entities))
-    async_add_entities(entities, update_before_add=False)
+    def _build_sensors(zones_data: dict) -> list:
+        entities = [OverwatchMasterTriggered(trig_coordinator, zone_coordinator)]
+        for g in zones_data.get("groups", []):
+            entities.append(OverwatchGroupTriggered(trig_coordinator, g))
+        for z in zones_data.get("zones", []):
+            entities.append(OverwatchZoneTriggered(trig_coordinator, z))
+        return entities
+
+    def _add_new_sensors() -> None:
+        """Called on every zone coordinator update — adds new binary sensors dynamically."""
+        zones_data = zone_coordinator.data or {}
+        all_sensors = _build_sensors(zones_data)
+        new_sensors = [s for s in all_sensors if s._attr_unique_id not in known_unique_ids]
+        if new_sensors:
+            _LOGGER.info("Overwatch: adding %d new binary sensor entities dynamically", len(new_sensors))
+            for s in new_sensors:
+                known_unique_ids.add(s._attr_unique_id)
+            async_add_entities(new_sensors, update_before_add=False)
+
+    _add_new_sensors()
+    entry.async_on_unload(zone_coordinator.async_add_listener(_add_new_sensors))
 
 
 def _dev(url: str) -> DeviceInfo:

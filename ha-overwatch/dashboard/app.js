@@ -998,6 +998,19 @@ function setZoneHidden(zoneId, hidden) {
 /* ─── ENTITY SYNC (dashboard → HA via service call) ──────── */
 // Toggle a zone/group/master switch entity in HA directly.
 // The dashboard reads the state back from haStates (WS subscription).
+// Trigger HA to reload the Overwatch integration so new entities appear without HA restart.
+// Debounced — multiple saves in quick succession only trigger one reload.
+let _haReloadTimer = null;
+function scheduleHAReload(delayMs = 3000) {
+  if (_haReloadTimer) clearTimeout(_haReloadTimer);
+  _haReloadTimer = setTimeout(async () => {
+    try {
+      await fetch(apiPath("ow/reload"), { method: "POST" });
+      logEvent("info", "HA integration reloaded — new entities now active.", "system");
+    } catch {}
+  }, delayMs);
+}
+
 // Convert friendly name to HA entity ID slug
 // "Asphalt Right" -> "asphalt_right" -> switch.overwatch_zone_asphalt_right
 // Must match the nameSlug() function in server.js /ow/zones endpoint
@@ -1866,6 +1879,7 @@ function renderZonesEditor() {
     selectedZoneId = id; selectedGroupId = null;
     isCreatingZone = true; isEditingPoints = false; currentNewZone = nz;
     saveZone(nz); renderZones(); renderZonesEditor();
+    scheduleHAReload(); // new zone = new HA entity needed
   });
 
   // Add Group
@@ -2343,6 +2357,7 @@ function bindZonesSvgEvents() {
     currentNewZone = null;
     saveZones();
     renderZonesEditor();
+    scheduleHAReload(); // zone is now complete — create HA entity
     e.stopPropagation();
   });
 
@@ -3818,6 +3833,7 @@ function renderSettingsPanel() {
         await saveFloor({ id: fid, name, floorplan });
         // If this is the active floor, update the floorplan image
         if (fid === activeFloorId) applyActiveFloor();
+        scheduleHAReload(); // floor entities need updating
         btn.textContent = "✓ Saved"; btn.style.color = "#32d74b";
         setTimeout(() => { btn.textContent = "Save floor"; btn.style.color = ""; btn.disabled = false; }, 2000);
       } catch (e) {
