@@ -1063,19 +1063,21 @@ function applyFloorPanels() {
 
     // Load image then fit and render
     const panelIdx = i;
-    img.onload = () => {
+    const onImgLoad = () => {
       wrapper.style.width  = img.naturalWidth  + 'px';
       wrapper.style.height = img.naturalHeight + 'px';
       svg.setAttribute('width',   img.naturalWidth);
       svg.setAttribute('height',  img.naturalHeight);
       svg.setAttribute('viewBox', `0 0 ${img.naturalWidth} ${img.naturalHeight}`);
-      // Use rAF so panel has been laid out and has non-zero dimensions
       requestAnimationFrame(() => {
         fitPanelToContainer(panelIdx);
         renderPanelZones(panelIdx);
       });
     };
+    img.onload = onImgLoad;
     img.src = imgSrc + '?v=' + imgCacheKey;
+    // If image was already cached and complete, onload won't fire — call manually
+    if (img.complete && img.naturalWidth) onImgLoad();
   }
 
   // Add draggable resize handle between panels
@@ -1864,27 +1866,17 @@ function _renderZonesInternal(targetSvg) {
   const inMultiPanel   = getNumPanels() > 1 && document.querySelector('.floor-panel');
 
   zones.forEach(zone => {
-    // Skip zones not on the active floor
+    // Floor filtering — single panel only
+    // In multi-panel mode, show all zones on all panels (coordinate space matches the drawn floor)
     const zoneFloor = zone.floor_id;
-    if (currentFloorId && floors.length > 1) {
-      if (inMultiPanel) {
-        // Multi-panel: show zones for this floor. If no zones assigned to this floor,
-        // fall back to showing all zones so panels aren't empty before assignment.
-        const floorHasZones = zones.some(z => z.floor_id === currentFloorId);
-        if (floorHasZones) {
-          if (zoneFloor && zoneFloor !== currentFloorId) return;
-          if (!zoneFloor) return; // unassigned zones don't duplicate across panels
-        }
-        // If no zones assigned to this floor — show all (fallback)
-      } else {
-        // Single panel: strict floor filter
-        if (zoneFloor && zoneFloor !== currentFloorId) return;
-        if (!zoneFloor && !isFirstFloor) return;
-      }
+    if (!inMultiPanel && currentFloorId && floors.length > 1) {
+      if (zoneFloor && zoneFloor !== currentFloorId) return;
+      if (!zoneFloor && !isFirstFloor) return;
     }
 
     const pts = zone.points || [];
     if (!pts.length) return;
+
 
     const isSelected     = zone.id === selectedZoneId;
     const isHighlight    = showHighlight && zone.id === highlightedZoneId;
