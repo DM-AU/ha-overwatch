@@ -784,7 +784,12 @@ function renderCameraStatusBar() {
       const on  = e.target.checked;
       const zone = zones.find(z => z.id === zid);
       await camSetEnabled('zone', zid, on);
-      if (!camUseServerState()) {
+      if (camUseServerState()) {
+        // Server mode: cascade zone → member cameras directly.
+        // HA has no built-in cascade for camera zone switches, so we call each entity.
+        (zone?.cameras || []).forEach(camId => camSetEnabled('camera', camId, on));
+        // Re-render will happen when HA WS state_changed events come back
+      } else {
         localStorage.setItem(CAM_ZONE_PREFIX + zid, on ? 'true' : 'false');
         (zone?.cameras || []).forEach(id => localStorage.setItem(CAM_TOGGLE_PREFIX + id, on ? 'true' : 'false'));
         renderCameraStatusBar(); renderCameraGrid();
