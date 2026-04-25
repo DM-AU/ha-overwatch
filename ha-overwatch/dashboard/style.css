@@ -2462,3 +2462,16 @@ body.sidebar-collapsed.sidebar-left .view-toggle-widget {
   margin-top: 2px;
   letter-spacing: 0.03em;
 }
+
+/* Ensure floor-panels-container doesn't escape its parent */
+.floor-panels-container {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  overflow: hidden;
+}
+
+/* Override the flex shorthand set inline */
+.split-panel-map #main {
+  overflow: hidden;
+}

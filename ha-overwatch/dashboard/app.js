@@ -900,27 +900,34 @@ function bindPanelInteraction(idx) {
   // Select panel on click
   panelEl.addEventListener('pointerdown', () => setActivePanel(idx), { capture: true, passive: true });
 
-  // Pan
-  let panning = false, panStart = null, panBase = null;
+  // Pan — requires a minimum drag distance before activating (same as single-panel)
+  let panning = false, panStart = null, panBase = null, panActivated = false;
+  const PAN_THRESHOLD = 5; // pixels
 
   panelEl.addEventListener('pointerdown', e => {
     if (e.button !== 0 && e.pointerType === 'mouse') return;
-    if (e.target.closest('.zone-handle, .zone-polygon')) return;
-    panning  = true;
-    panStart = { x: e.clientX, y: e.clientY };
-    panBase  = { ...PANEL_ZOOMS[idx] };
+    if (e.target.closest('.zone-handle, .floor-panel-handle')) return;
+    panning      = true;
+    panActivated = false;
+    panStart     = { x: e.clientX, y: e.clientY };
+    panBase      = { ...PANEL_ZOOMS[idx] };
     panelEl.setPointerCapture(e.pointerId);
   });
 
   panelEl.addEventListener('pointermove', e => {
     if (!panning) return;
-    PANEL_ZOOMS[idx].x = panBase.x + e.clientX - panStart.x;
-    PANEL_ZOOMS[idx].y = panBase.y + e.clientY - panStart.y;
+    const dx = e.clientX - panStart.x;
+    const dy = e.clientY - panStart.y;
+    // Only activate pan after threshold — prevents micro-moves registering as drags
+    if (!panActivated && Math.hypot(dx, dy) < PAN_THRESHOLD) return;
+    panActivated = true;
+    PANEL_ZOOMS[idx].x = panBase.x + dx;
+    PANEL_ZOOMS[idx].y = panBase.y + dy;
     applyPanelTransform(idx);
   });
 
-  panelEl.addEventListener('pointerup',    () => { panning = false; });
-  panelEl.addEventListener('pointercancel',() => { panning = false; });
+  panelEl.addEventListener('pointerup',    () => { panning = false; panActivated = false; });
+  panelEl.addEventListener('pointercancel',() => { panning = false; panActivated = false; });
 
   // Scroll zoom — always applies to hovered panel regardless of selection
   panelEl.addEventListener('wheel', e => {
@@ -995,8 +1002,8 @@ function applyFloorPanels() {
   mainEl.innerHTML = ''; // clear existing content
   const container = document.createElement('div');
   container.className = 'floor-panels-container fp-dir-' + dir;
-  container.style.cssText = 'width:100%;height:100%;display:flex;' +
-    (dir === 'v' ? 'flex-direction:column;' : 'flex-direction:row;');
+  // Direction only — size and position handled by CSS
+  container.style.flexDirection = dir === 'v' ? 'column' : 'row';
 
   for (let i = 0; i < n; i++) {
     const floor   = getPanelFloor(i);
@@ -1821,15 +1828,30 @@ function _renderZonesInternal() {
   }
 
   // Filter to active floor — zones with no floor_id belong to the first floor
+  // Exception: in multi-panel mode, unassigned zones show on ALL panels so
+  // panels aren't empty before users assign zones to floors.
   const currentFloorId = _curFloorId;
   const isFirstFloor   = _isFirstFloor;
+  const inMultiPanel   = getNumPanels() > 1 && document.querySelector('.floor-panel');
 
   zones.forEach(zone => {
     // Skip zones not on the active floor
     const zoneFloor = zone.floor_id;
     if (currentFloorId && floors.length > 1) {
-      if (zoneFloor && zoneFloor !== currentFloorId) return;
-      if (!zoneFloor && !isFirstFloor) return;
+      if (inMultiPanel) {
+        // Multi-panel: show zones for this floor. If no zones assigned to this floor,
+        // fall back to showing all zones so panels aren't empty before assignment.
+        const floorHasZones = zones.some(z => z.floor_id === currentFloorId);
+        if (floorHasZones) {
+          if (zoneFloor && zoneFloor !== currentFloorId) return;
+          if (!zoneFloor) return; // unassigned zones don't duplicate across panels
+        }
+        // If no zones assigned to this floor — show all (fallback)
+      } else {
+        // Single panel: strict floor filter
+        if (zoneFloor && zoneFloor !== currentFloorId) return;
+        if (!zoneFloor && !isFirstFloor) return;
+      }
     }
 
     const pts = zone.points || [];
