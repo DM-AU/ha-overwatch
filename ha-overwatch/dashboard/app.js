@@ -97,6 +97,23 @@ let zones = [];
 let groups = [];          // Zone groups
 let floors = [];          // Floor definitions [{id, name, floorplan}]
 let activeFloorId = null; // Currently displayed floor id
+
+// Multi-panel state
+let activePanelIdx = 0;   // Which floor panel is "selected" (zoom/reset target)
+let panelZooms = [        // Per-panel zoom state
+  { scale: 1, x: 0, y: 0 },
+  { scale: 1, x: 0, y: 0 },
+];
+
+function getNumPanels()  { return Math.min(parseInt(localStorage.getItem('ow_map_panels') || '1'), floors.length || 1); }
+function getPanelsDir()  { return localStorage.getItem('ow_panels_dir') || 'h'; }
+function getPanelFloor(idx) {
+  const key = idx === 0 ? 'ow_panel_0_floor' : 'ow_panel_1_floor';
+  const saved = localStorage.getItem(key);
+  const match = floors.find(f => f.id === saved);
+  if (match) return match;
+  return floors[idx] || floors[0] || null;
+}
 let selectedZoneId  = null;
 let selectedGroupId = null; // "group" or "zone" selection in editor
 let editorMode = false;
@@ -778,6 +795,19 @@ function applyActiveFloor() {
   renderZones();
   renderStatusDropdown();
   if (window.renderCameraStatusBar) window.renderCameraStatusBar();
+}
+
+// Apply multi-panel floor layout — builds or rebuilds floor panel DOM inside #mapPanel
+// Implemented in Step 2; stub here keeps settings wiring intact
+function applyFloorPanels() {
+  if (getNumPanels() <= 1) {
+    // Single panel — restore normal single-floor view
+    activeFloorId = getPanelFloor(0)?.id || floors[0]?.id || null;
+    setActiveFloor(activeFloorId);
+    return;
+  }
+  // Multi-panel — Step 2 will implement full DOM construction
+  renderZones();
 }
 
 async function saveGroup(group) {
@@ -3460,13 +3490,48 @@ function renderSettingsPanel() {
         <div class="settings-section">
           <div class="settings-section-title">Default View ${perDeviceBadge}</div>
           <div class="settings-field">
-            <div class="settings-toggle-row">
+
+            <!-- Level 1: Main view -->
+            <div style="font-size:11px;color:#666;margin-bottom:4px;">Main view</div>
+            <div class="settings-toggle-row" id="mainViewRow">
               <button class="settings-toggle ${curMode === 'map' ? 'active' : ''}" data-view="map">Floorplan</button>
               <button class="settings-toggle ${isSplitH ? 'active' : ''}" data-view="split-h">Split ↔</button>
               <button class="settings-toggle ${isSplitV ? 'active' : ''}" data-view="split-v">Split ↕</button>
               <button class="settings-toggle ${curMode === 'cameras' ? 'active' : ''}" data-view="cameras">Cameras</button>
             </div>
-            <div style="font-size:11px;color:#777;margin-top:4px;">Saved per device. Does not affect other users.</div>
+
+            <!-- Level 2: Floor panels (shown when map or split is active) -->
+            ${(curMode === 'map' || curMode === 'split') && floors.length > 1 ? (()=>{
+              const numPanels = parseInt(localStorage.getItem('ow_map_panels')||'1');
+              const panelsDir = localStorage.getItem('ow_panels_dir')||'h';
+              return '<div style="margin-top:10px;">'
+                + '<div style="font-size:11px;color:#666;margin-bottom:4px;">Floor panels</div>'
+                + '<div class="settings-toggle-row" id="floorPanelRow">'
+                + '<button class="settings-toggle' + (numPanels===1?' active':'') + '" data-panels="1">1 Panel</button>'
+                + '<button class="settings-toggle' + (numPanels===2&&panelsDir==='h'?' active':'') + '" data-panels="2" data-panels-dir="h">2 ↔</button>'
+                + '<button class="settings-toggle' + (numPanels===2&&panelsDir==='v'?' active':'') + '" data-panels="2" data-panels-dir="v">2 ↕</button>'
+                + '</div>'
+                + (numPanels >= 2 ? (()=>{
+                    const p0 = localStorage.getItem('ow_panel_0_floor') || (floors[0]?.id||'');
+                    const p1 = localStorage.getItem('ow_panel_1_floor') || (floors[1]?.id||floors[0]?.id||'');
+                    const floorOpts = floors.map(f=>'<option value="'+f.id+'">'+ f.name +'</option>').join('');
+                    return '<div style="margin-top:8px;display:flex;flex-direction:column;gap:6px;">'
+                      + '<div style="display:flex;align-items:center;gap:8px;">'
+                      + '<span style="font-size:11px;color:#888;width:52px;">Panel 1</span>'
+                      + '<select id="panel0FloorSel" style="flex:1;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:4px 8px;color:#fff;font-size:12px;">'
+                      + floors.map(f=>'<option value="'+f.id+'"'+(f.id===p0?' selected':'')+'>'+f.name+'</option>').join('')
+                      + '</select></div>'
+                      + '<div style="display:flex;align-items:center;gap:8px;">'
+                      + '<span style="font-size:11px;color:#888;width:52px;">Panel 2</span>'
+                      + '<select id="panel1FloorSel" style="flex:1;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:4px 8px;color:#fff;font-size:12px;">'
+                      + floors.map(f=>'<option value="'+f.id+'"'+(f.id===p1?' selected':'')+'>'+f.name+'</option>').join('')
+                      + '</select></div>'
+                      + '</div>';
+                  })() : '')
+                + '</div>';
+            })() : ''}
+
+            <div style="font-size:11px;color:#777;margin-top:6px;">Saved per device.</div>
           </div>
         </div>
 
@@ -3784,8 +3849,35 @@ function renderSettingsPanel() {
       } else {
         setViewMode(v);
       }
+      // Re-render settings to show/hide floor panel options
+      openSettings("general");
     };
   });
+
+  // ── Floor panels ─────────────────────────────────────────────
+  panel.querySelectorAll(".settings-toggle[data-panels]").forEach(btn => {
+    btn.onclick = () => {
+      panel.querySelectorAll(".settings-toggle[data-panels]").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      const n   = parseInt(btn.dataset.panels);
+      const dir = btn.dataset.panelsDir || 'h';
+      localStorage.setItem('ow_map_panels', n);
+      if (n >= 2) localStorage.setItem('ow_panels_dir', dir);
+      applyFloorPanels();
+      openSettings("general"); // re-render to show/hide selectors
+    };
+  });
+
+  const p0sel = document.getElementById("panel0FloorSel");
+  const p1sel = document.getElementById("panel1FloorSel");
+  if (p0sel) p0sel.onchange = () => {
+    localStorage.setItem('ow_panel_0_floor', p0sel.value);
+    applyFloorPanels();
+  };
+  if (p1sel) p1sel.onchange = () => {
+    localStorage.setItem('ow_panel_1_floor', p1sel.value);
+    applyFloorPanels();
+  };
 
   // ── Flash mode ───────────────────────────────────────────────
   panel.querySelectorAll(".settings-toggle[data-flash]").forEach(btn => {
