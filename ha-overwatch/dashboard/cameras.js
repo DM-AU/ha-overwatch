@@ -87,8 +87,16 @@ async function camSetEnabled(type, key, state) {
   };
   const entityId = entityMap[type];
   if (entityId) {
-    // Use window.OW.sendHA — shares the haMsgId counter with app.js to avoid "id must increase" errors
-    if (window.OW.sendHA) {
+    const IS_DIRECT = !!document.querySelector('meta[name="ow-direct"]');
+    if (IS_DIRECT) {
+      // Direct Mode: no WebSocket — call HA via backend REST proxy
+      fetch('ow/call-service', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ domain: 'switch', service: state ? 'turn_on' : 'turn_off', entity_id: entityId }),
+      }).catch(e => console.warn('[OW] camSetEnabled REST failed:', e.message));
+    } else if (window.OW?.sendHA) {
+      // Ingress/addon mode: use WebSocket via shared sendHA (preserves haMsgId counter)
       window.OW.sendHA({
         type: 'call_service',
         domain: 'switch', service: state ? 'turn_on' : 'turn_off',

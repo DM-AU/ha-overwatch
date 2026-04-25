@@ -912,6 +912,15 @@ function zoneSlug(zone)  { return nameSlug(zone.name)  || zone.id; }
 function groupSlug(group) { return nameSlug(group.name) || group.id; }
 
 function owCallSwitch(entityId, on) {
+  if (IS_DIRECT_MODE) {
+    // Direct Mode: no WebSocket — call HA via backend REST proxy
+    fetch("ow/call-service", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ domain: "switch", service: on ? "turn_on" : "turn_off", entity_id: entityId }),
+    }).catch(e => console.warn("[OW] owCallSwitch REST failed:", e.message));
+    return;
+  }
   if (!haConnected || !haSocket) {
     console.warn("[OW] owCallSwitch skipped — not connected:", entityId);
     return;
@@ -2736,6 +2745,33 @@ function connectHA() {
           }
         }
 
+        // When a CAMERA zone switch changes in HA, cascade to member cameras
+        if (data.entity_id.startsWith("switch.overwatch_camera_zone_")) {
+          const on = (data.new_state.state || "").toLowerCase() !== "off";
+          const slug = data.entity_id.replace("switch.overwatch_camera_zone_", "");
+          const matchZone = zones.find(z => (nameSlug(z.name) || z.id) === slug);
+          if (matchZone) {
+            (matchZone.cameras || []).forEach(camId => {
+              const safe = camId.replace(/^camera\./, '').replace(/[^a-z0-9]+/g, '_');
+              owCallSwitch(`switch.overwatch_camera_${safe}`, on);
+            });
+          }
+        }
+
+        // When camera_all changes in HA, cascade to all zones and cameras
+        if (data.entity_id === "switch.overwatch_camera_all") {
+          const on = (data.new_state.state || "").toLowerCase() !== "off";
+          zones.forEach(z => {
+            if ((z.cameras || []).length > 0) {
+              owCallSwitch(`switch.overwatch_camera_zone_${nameSlug(z.name) || z.id}`, on);
+              (z.cameras || []).forEach(camId => {
+                const safe = camId.replace(/^camera\./, '').replace(/[^a-z0-9]+/g, '_');
+                owCallSwitch(`switch.overwatch_camera_${safe}`, on);
+              });
+            }
+          });
+        }
+
         // Re-render when any overwatch switch changes
         if (data.entity_id.startsWith("switch.overwatch_")) {
           updateStatusDropdownInPlace();
@@ -2850,6 +2886,9 @@ function startDirectModePoller() {
           // Always re-render on each poll so zone colours and alarm state stay live
           checkZoneStateChanges();
           renderZones();
+          // Re-render camera status bar and grid so toggle states reflect latest haStates
+          if (window.renderCameraStatusBar) window.renderCameraStatusBar();
+          if (window.camUpdate) window.camUpdate();
           const alarmEntity = uiConfig.alarm_entity ||
             Object.keys(haStates).find(id => id.startsWith("alarm_control_panel."));
           if (alarmEntity && haStates[alarmEntity]) {

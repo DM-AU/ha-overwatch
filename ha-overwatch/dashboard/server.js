@@ -401,6 +401,33 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  /* ── /ow/call-service — direct mode frontend calls HA services via backend ── */
+  if (pathname === "/ow/call-service" && req.method === "POST") {
+    if (!process.env.SUPERVISOR_TOKEN) { res.writeHead(503); res.end("Not in addon mode"); return; }
+    let body = "";
+    req.on("data", c => body += c);
+    req.on("end", () => {
+      try {
+        const { domain, service, entity_id } = JSON.parse(body);
+        const payload = JSON.stringify({ entity_id });
+        const haReq = http.request({
+          hostname: "supervisor", port: 80,
+          path: `/core/api/services/${domain}/${service}`,
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${process.env.SUPERVISOR_TOKEN}`,
+            "Content-Type": "application/json",
+            "Content-Length": Buffer.byteLength(payload),
+          },
+        }, haRes => { haRes.resume(); res.writeHead(haRes.statusCode); res.end(); });
+        haReq.on("error", () => { res.writeHead(502); res.end(); });
+        haReq.write(payload);
+        haReq.end();
+      } catch { res.writeHead(400); res.end("Bad request"); }
+    });
+    return;
+  }
+
   /* ── /ow/zones — component fetches zone/group/camera structure ── */
   if (pathname === "/ow/zones" && req.method === "GET") {
     try {
