@@ -17,6 +17,8 @@
 let uiConfig = {
   floorplan: "img/floorplan.png",
   sidebar_position: "right",
+  hide_zone_status:   false,   // per-device: hide zone status dropdown button
+  hide_camera_status: false,   // per-device: hide camera status dropdown button
   sidebar_collapsed: false,
   theme: "system",
   sidebar_icon_size: 28,
@@ -274,6 +276,26 @@ function applyConfig() {
     }
     subscribeHAEntities(); // re-register alarm entity in subscription set
   }
+
+  applyStatusVisibility();
+}
+
+function applyStatusVisibility() {
+  // Zone status bar + dropdown
+  const hideZone = localStorage.getItem("ow_hide_zone_status") === "true";
+  const statusBar = document.getElementById("statusBar");
+  const statusDd  = document.getElementById("statusDropdown");
+  if (statusBar) statusBar.style.display = hideZone ? "none" : "";
+  if (statusDd && hideZone) statusDd.style.display = "none";
+
+  // Camera status — button rendered by cameras.js; hide by known IDs or sibling of dropdown
+  const hideCam  = localStorage.getItem("ow_hide_camera_status") === "true";
+  const camStatusDd  = document.getElementById("camStatusDd");
+  // Try known wrapper ID first, then fall back to the dropdown's parent
+  const camStatusBar = document.getElementById("camStatusBar")
+    || (camStatusDd ? camStatusDd.previousElementSibling : null);
+  if (camStatusBar) camStatusBar.style.display = hideCam ? "none" : "";
+  if (camStatusDd) camStatusDd.style.display = hideCam ? "none" : (camStatusDd.style.display === "none" ? "none" : "");
 }
 
 /* ─── EXPAND / COLLAPSE SIDEBAR ───────────────────────────── */
@@ -3087,6 +3109,20 @@ function renderSettingsPanel() {
           </div>
         </div>
 
+        <div class="settings-section">
+          <div class="settings-section-title">Status Panels ${perDeviceBadge}</div>
+          <div class="settings-field">
+            <label class="settings-checkbox-row">
+              <input type="checkbox" id="hideZoneStatusChk" ${localStorage.getItem('ow_hide_zone_status') === 'true' ? 'checked' : ''}>
+              Hide Zone Status <span style="font-size:11px;color:#777;margin-left:4px;">Per device info panel</span>
+            </label>
+            <label class="settings-checkbox-row" style="margin-top:8px;display:flex;align-items:center;gap:8px;cursor:pointer;">
+              <input type="checkbox" id="hideCamStatusChk" ${localStorage.getItem('ow_hide_camera_status') === 'true' ? 'checked' : ''}>
+              Hide Camera Status <span style="font-size:11px;color:#777;margin-left:4px;">Per device info panel</span>
+            </label>
+          </div>
+        </div>
+
         ${isAdmin ? `
         <div class="settings-section">
           <div class="settings-section-title">HA Integration <span class="settings-admin-badge">Admin</span></div>
@@ -3393,6 +3429,18 @@ function renderSettingsPanel() {
   if (sbLeft) sbLeft.onclick = () => {
     uiConfig.sidebar_position = "left"; applyConfig(); updateExpandBtn(uiConfig.sidebar_collapsed);
     sbLeft.classList.add("active"); sbRight?.classList.remove("active");
+  };
+
+  // ── Status panel visibility ───────────────────────────────────
+  const hideZoneChk = document.getElementById("hideZoneStatusChk");
+  const hideCamChk  = document.getElementById("hideCamStatusChk");
+  if (hideZoneChk) hideZoneChk.onchange = () => {
+    localStorage.setItem("ow_hide_zone_status", hideZoneChk.checked);
+    applyStatusVisibility();
+  };
+  if (hideCamChk) hideCamChk.onchange = () => {
+    localStorage.setItem("ow_hide_camera_status", hideCamChk.checked);
+    applyStatusVisibility();
   };
 
   // ── Save zone behaviour to localStorage ──────────────────────
@@ -4268,6 +4316,7 @@ async function init() {
   initFloorplan();
   bindZonesButton();
   bindStatusBar();
+  applyStatusVisibility(); // apply hide prefs after DOM is ready
   bindSearchUI();
 
   bindSidebarToggle();
