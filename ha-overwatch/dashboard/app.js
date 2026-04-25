@@ -2920,6 +2920,11 @@ function startDirectModePoller() {
           // Always re-render on each poll so zone colours and alarm state stay live
           checkZoneStateChanges();
           renderZones();
+          // Sync masterEnabled from haStates so master toggle reflects HA state
+          const masterSwitch = haStates["switch.overwatch_zone_master"];
+          if (masterSwitch) masterEnabled = masterSwitch.state !== "off";
+          // Re-render zone status dropdown so toggles reflect latest haStates
+          updateStatusDropdownInPlace();
           // Re-render camera status bar and grid so toggle states reflect latest haStates
           if (window.renderCameraStatusBar) window.renderCameraStatusBar();
           if (window.camUpdate) window.camUpdate();
