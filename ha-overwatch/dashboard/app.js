@@ -2826,6 +2826,7 @@ function startDirectModePoller() {
           }
 
           // Always re-render on each poll so zone colours and alarm state stay live
+          checkZoneStateChanges();
           renderZones();
           const alarmEntity = uiConfig.alarm_entity ||
             Object.keys(haStates).find(id => id.startsWith("alarm_control_panel."));
