@@ -1026,7 +1026,6 @@ function applyFloorPanels() {
     const panelDiv = document.createElement('div');
     panelDiv.className = 'floor-panel' + (i === activePanelIdx ? ' fp-active' : '');
     panelDiv.dataset.panelIdx = i;
-    panelDiv.style.cssText = 'flex:1;position:relative;overflow:hidden;min-width:0;min-height:0;user-select:none;-webkit-user-select:none;touch-action:none;';
     panelDiv.setAttribute('draggable', 'false');
 
     // Floor label — hidden if user disabled it
@@ -1081,9 +1080,8 @@ function applyFloorPanels() {
     handle.className = 'floor-panel-handle';
     // Wider hit area — 8px visible, pointer events on full area
     handle.style.cssText = dir === 'v'
-      ? 'height:8px;width:100%;cursor:row-resize;background:rgba(255,255,255,0.08);flex-shrink:0;z-index:10;display:flex;align-items:center;justify-content:center;'
-      : 'width:8px;height:100%;cursor:col-resize;background:rgba(255,255,255,0.08);flex-shrink:0;z-index:10;display:flex;align-items:center;justify-content:center;';
-    // Visual indicator dot
+      ? 'height:6px;width:100%;cursor:row-resize;background:rgba(255,255,255,0.06);flex-shrink:0;z-index:10;display:flex;align-items:center;justify-content:center;'
+      : 'width:6px;height:100%;cursor:col-resize;background:rgba(255,255,255,0.06);flex-shrink:0;z-index:10;display:flex;align-items:center;justify-content:center;';
     const dot = document.createElement('div');
     dot.style.cssText = dir === 'v'
       ? 'width:40px;height:2px;background:rgba(255,255,255,0.25);border-radius:2px;pointer-events:none;'
@@ -1102,7 +1100,7 @@ function applyFloorPanels() {
       const total  = dir === 'v' ? container.offsetHeight : container.offsetWidth;
       const p0Size = dir === 'v' ? panels[0].offsetHeight : panels[0].offsetWidth;
       startPct = (p0Size / total) * 100;
-      handle.style.background = 'rgba(0,150,255,0.4)';
+      handle.style.background = 'rgba(0,150,255,0.5)';
     });
     handle.addEventListener('pointermove', e => {
       if (!dragging) return;
@@ -1117,10 +1115,10 @@ function applyFloorPanels() {
     });
     handle.addEventListener('pointerup', () => {
       dragging = false;
-      handle.style.background = 'rgba(255,255,255,0.08)';
+      handle.style.background = 'rgba(255,255,255,0.06)';
     });
-    handle.addEventListener('mouseenter', () => { if (!dragging) handle.style.background = 'rgba(0,150,255,0.25)'; });
-    handle.addEventListener('mouseleave', () => { if (!dragging) handle.style.background = 'rgba(255,255,255,0.08)'; });
+    handle.addEventListener('mouseenter', () => { if (!dragging) handle.style.background = 'rgba(0,150,255,0.5)'; });
+    handle.addEventListener('mouseleave', () => { if (!dragging) handle.style.background = 'rgba(255,255,255,0.06)'; });
   }
 
   mainEl.appendChild(container);
@@ -3361,6 +3359,8 @@ function connectHA() {
       subscribeHAEntities();
       // Clear camera failure state on reconnect so cameras auto-recover
       if (window.camResetHidden) window.camResetHidden();
+      // Re-render panels now that haConnected=true so zone states are visible
+      if (getNumPanels() > 1) renderAllPanelZones(); else renderZones();
     }
 
     if (msg.type === "auth_invalid") {
@@ -3616,6 +3616,8 @@ function startDirectModePoller() {
             setHAStatus("connected");
             logEvent("ok", `Direct Mode: ${entityCount} entity states loaded from backend.`, "ha");
             subscribeHAEntities(); // builds the entity set (no WS send in direct mode)
+            // Re-render panels now that haConnected=true
+            if (getNumPanels() > 1) renderAllPanelZones(); else renderZones();
           }
 
           // Always re-render on each poll so zone colours and alarm state stay live

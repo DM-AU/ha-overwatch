@@ -2399,6 +2399,9 @@ body.sidebar-collapsed.sidebar-left .view-toggle-widget {
   border: 2px solid transparent;
   transition: border-color 0.15s;
   box-sizing: border-box;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .floor-panel:active { cursor: grabbing; }
