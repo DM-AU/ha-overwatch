@@ -3170,6 +3170,18 @@ function updateStatusFromAlarm(entityId, newState) {
 }
 
 /* ─── SETTINGS PANEL ──────────────────────────────────────── */
+function openSettings(tab) {
+  // Remove existing panel and re-render, then activate the requested tab
+  const existing = document.getElementById("settingsPanel");
+  if (existing) existing.remove();
+  renderSettingsPanel();
+  if (tab) {
+    const panel = document.getElementById("settingsPanel");
+    panel?.querySelectorAll(".settings-tab").forEach(t => t.classList.toggle("active", t.dataset.tab === tab));
+    panel?.querySelectorAll(".settings-tab-panel").forEach(p => p.style.display = p.dataset.panel === tab ? "" : "none");
+  }
+}
+
 function renderSettingsPanel() {
   const existingEl = document.getElementById("settingsPanel");
   if (existingEl) { existingEl.classList.toggle("open"); return; }
@@ -3361,18 +3373,34 @@ function renderSettingsPanel() {
       <div class="settings-tab-panel" data-panel="zones">
 
         <div class="settings-section">
-          <div class="settings-section-title">Floor Plan Image <span class="settings-admin-badge">ADMIN ONLY</span></div>
+          <div class="settings-section-title">Floors <span class="settings-admin-badge">ADMIN ONLY</span></div>
           ${!isAdmin ? adminBox : ''}
-          <div class="settings-field" ${!isAdmin ? 'style="opacity:0.45;pointer-events:none;"' : ''}>
-            <label>Image path</label>
-            ${isAdmin ? `
-            <div class="settings-floorplan-row">
-              <input type="text" id="cfgFloorplan" value="${escapeHtml(uiConfig.floorplan || 'img/floorplan.png')}" placeholder="img/floorplan.png">
-              <label class="settings-upload-btn" title="Upload">↑<input type="file" id="cfgFloorplanUpload" accept="image/*" style="display:none;"></label>
+          <div ${!isAdmin ? 'style="opacity:0.45;pointer-events:none;"' : ''}>
+            <div id="floorsSettingsList" style="display:flex;flex-direction:column;gap:10px;margin-bottom:10px;">
+              ${floors.map((f, fi) => {
+                const floorZones = zones.filter(z => z.floor_id === f.id || (!z.floor_id && fi === 0));
+                const hasTriggered = floorZones.some(z => getZoneState(z) === 'triggered');
+                const hasDisabled  = floorZones.every(z => getZoneState(z) === 'disabled');
+                const dotCol = hasTriggered ? '#ff3b30' : hasDisabled ? '#555' : '#32d74b';
+                const zc = floorZones.length;
+                return '<div class="floor-settings-row" data-floor-id="' + f.id + '" style="background:rgba(255,255,255,0.04);border-radius:8px;padding:10px 12px;">'
+                  + '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">'
+                  + '<span style="width:8px;height:8px;border-radius:50%;background:' + dotCol + ';flex-shrink:0;"></span>'
+                  + '<input type="text" class="floor-name-input" value="' + escapeHtml(f.name) + '" style="flex:1;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:4px 8px;color:#fff;font-size:13px;" placeholder="Floor name">'
+                  + '<button class="floor-delete-btn" data-floor-id="' + f.id + '" style="background:rgba(255,59,48,0.15);border:1px solid rgba(255,59,48,0.3);border-radius:6px;padding:4px 8px;color:#ff3b30;font-size:11px;cursor:pointer;">✕</button>'
+                  + '</div>'
+                  + '<div style="display:flex;align-items:center;gap:6px;">'
+                  + '<input type="text" class="floor-fp-input" value="' + escapeHtml(f.floorplan || '') + '" style="flex:1;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);border-radius:6px;padding:4px 8px;color:#aaa;font-size:11px;" placeholder="img/floorplan.png">'
+                  + '<label class="settings-upload-btn floor-fp-upload" title="Upload image" style="cursor:pointer;">↑<input type="file" class="floor-fp-file" data-floor-id="' + f.id + '" accept="image/*" style="display:none;"></label>'
+                  + '</div>'
+                  + '<div class="floor-fp-status" style="font-size:10px;color:#888;margin-top:3px;">' + zc + ' zone' + (zc !== 1 ? 's' : '') + ' on this floor</div>'
+                  + '<button class="floor-save-btn" data-floor-id="' + f.id + '" style="margin-top:8px;width:100%;background:rgba(0,150,255,0.15);border:1px solid rgba(0,150,255,0.3);border-radius:6px;padding:5px;color:#0096ff;font-size:12px;cursor:pointer;">Save floor</button>'
+                  + '</div>';
+              }).join('')}
             </div>
-            <div id="floorplanUploadStatus" style="font-size:11px;color:#888;margin-top:4px;"></div>
-            ` : `<div class="settings-readonly">${escapeHtml(uiConfig.floorplan || 'img/floorplan.png')}</div>`}
+            ${isAdmin ? '<button id="addFloorBtn" style="width:100%;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.15);border-radius:8px;padding:8px;color:#aaa;font-size:13px;cursor:pointer;">+ Add floor</button>' : ''}
           </div>
+
         </div>
 
         <div class="settings-section">
@@ -3682,36 +3710,75 @@ function renderSettingsPanel() {
     });
   }
 
-  // ── Floorplan upload ─────────────────────────────────────────
-  const uploadInput  = document.getElementById("cfgFloorplanUpload");
-  const uploadStatus = document.getElementById("floorplanUploadStatus");
-  if (uploadInput) {
-    uploadInput.onchange = async () => {
-      const file = uploadInput.files[0]; if (!file) return;
-      uploadStatus.textContent = "Uploading…";
+  // ── Floors settings ────────────────────────────────────────────
+  // Helper: upload a floorplan image and return the path
+  async function uploadFloorplanFile(file, statusEl) {
+    if (statusEl) statusEl.textContent = "Uploading…";
+    const form = new FormData(); form.append("file", file);
+    const res = await fetch(apiPath("ow/upload-floorplan"), { method: "POST", body: form });
+    if (!res.ok) throw new Error("Upload failed (" + res.status + ")");
+    const data = await res.json().catch(() => ({}));
+    const imgPath = data.path || ("img/" + file.name);
+    if (statusEl) { statusEl.textContent = "✓ " + imgPath; statusEl.style.color = "#32d74b"; }
+    return imgPath;
+  }
+
+  // Floor file upload buttons
+  panel.querySelectorAll(".floor-fp-file").forEach(fileInput => {
+    fileInput.onchange = async () => {
+      const file = fileInput.files[0]; if (!file) return;
+      const fid = fileInput.dataset.floorId;
+      const row = panel.querySelector(`.floor-settings-row[data-floor-id="${fid}"]`);
+      const statusEl = row?.querySelector(".floor-fp-status");
       try {
-        const form = new FormData(); form.append("file", file);
-        const res = await fetch(apiPath("ow/upload-floorplan"), { method: "POST", body: form });
-        if (res.ok) {
-          const data = await res.json().catch(() => ({}));
-          const path = data.path || ("img/" + file.name);
-          document.getElementById("cfgFloorplan").value = path;
-          uiConfig.floorplan = path;
-          const fp = document.getElementById("floorplanImage");
-          if (fp) { fp.src = apiPath(path) + "?v=" + Date.now(); fp.onload = initFloorplan; }
-          uploadStatus.textContent = "✓ Uploaded: " + path; uploadStatus.style.color = "#32d74b";
-        } else { uploadStatus.textContent = "✗ Failed (" + res.status + ")"; uploadStatus.style.color = "#ff3b30"; }
-      } catch (err) { uploadStatus.textContent = "✗ " + err.message; uploadStatus.style.color = "#ff3b30"; }
+        const imgPath = await uploadFloorplanFile(file, statusEl);
+        const fpInput = row?.querySelector(".floor-fp-input");
+        if (fpInput) fpInput.value = imgPath;
+      } catch (e) {
+        if (statusEl) { statusEl.textContent = "✗ " + e.message; statusEl.style.color = "#ff3b30"; }
+      }
     };
-  }
-  const fpInput = document.getElementById("cfgFloorplan");
-  if (fpInput) {
-    fpInput.onblur = () => {
-      uiConfig.floorplan = fpInput.value.trim();
-      const fp = document.getElementById("floorplanImage");
-      if (fp && uiConfig.floorplan) { fp.src = apiPath(uiConfig.floorplan) + "?v=" + Date.now(); fp.onload = initFloorplan; }
+  });
+
+  // Floor save buttons
+  panel.querySelectorAll(".floor-save-btn").forEach(btn => {
+    btn.onclick = async () => {
+      const fid = btn.dataset.floorId;
+      const row = panel.querySelector(`.floor-settings-row[data-floor-id="${fid}"]`);
+      const name = row?.querySelector(".floor-name-input")?.value.trim();
+      const floorplan = row?.querySelector(".floor-fp-input")?.value.trim();
+      const statusEl = row?.querySelector(".floor-fp-status");
+      if (!name) return;
+      btn.textContent = "Saving…"; btn.disabled = true;
+      try {
+        await saveFloor({ id: fid, name, floorplan });
+        // If this is the active floor, update the floorplan image
+        if (fid === activeFloorId) applyActiveFloor();
+        btn.textContent = "✓ Saved"; btn.style.color = "#32d74b";
+        setTimeout(() => { btn.textContent = "Save floor"; btn.style.color = ""; btn.disabled = false; }, 2000);
+      } catch (e) {
+        btn.textContent = "✗ Error"; btn.style.color = "#ff3b30"; btn.disabled = false;
+      }
     };
-  }
+  });
+
+  // Floor delete buttons
+  panel.querySelectorAll(".floor-delete-btn").forEach(btn => {
+    btn.onclick = async () => {
+      const fid = btn.dataset.floorId;
+      if (floors.length <= 1) { alert("Cannot delete the last floor."); return; }
+      if (!confirm("Delete this floor? Zones assigned to it will be reassigned to the first floor.")) return;
+      await deleteFloor(fid);
+      if (activeFloorId === fid) setActiveFloor(floors[0]?.id);
+      openSettings("zones"); // re-render settings
+    };
+  });
+
+  // Add floor button
+  document.getElementById("addFloorBtn")?.addEventListener("click", async () => {
+    await saveFloor({ name: "New Floor", floorplan: "" });
+    openSettings("zones"); // re-render to show new floor
+  });
 
   // ── Build ui.yaml ────────────────────────────────────────────
   function buildYamlContent() {
@@ -3725,7 +3792,7 @@ function renderSettingsPanel() {
       `  alarm_label_armed: "${g("cfgLabelArmed") || uiConfig.alarm_label_armed || "Armed"}"\n` +
       `  alarm_label_disarmed: "${g("cfgLabelDisarmed") || uiConfig.alarm_label_disarmed || "Disarmed"}"\n` +
       `  sidebar_position: "${uiConfig.sidebar_position}"\n` +
-      `  floorplan: "${g("cfgFloorplan") || uiConfig.floorplan || "img/floorplan.png"}"\n` +
+      `  floorplan: "${activeFloor()?.floorplan || uiConfig.floorplan || "img/floorplan.png"}"\n` +
       `  zone_fade_duration: ${g("cfgFadeDuration") || uiConfig.zone_fade_duration || 3}\n` +
       `  color_on_person: "${g("cfgColOnPerson") || uiConfig.color_on_person}"\n` +
       `  color_on_motion: "${g("cfgColOnMotion") || uiConfig.color_on_motion}"\n` +
