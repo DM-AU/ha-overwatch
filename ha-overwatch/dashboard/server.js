@@ -1440,6 +1440,18 @@ function startHAListener() {
     if (msg.type === "result" && Array.isArray(msg.result)) {
       msg.result.forEach(st => { if (st.entity_id) serverHaStates[st.entity_id] = st; });
       console.log(`[HA-Overwatch] State cache populated: ${Object.keys(serverHaStates).length} entities`);
+      // Seed triggered zone state from current HA states — catches sensors already on at startup
+      // Without this, zones stay un-triggered until the next state_changed event
+      let seeded = 0;
+      Object.values(serverHaStates).forEach(st => {
+        if (st.entity_id && st.state) {
+          if (sensorToZones[st.entity_id]) {
+            onStateChanged(st.entity_id, st.state);
+            seeded++;
+          }
+        }
+      });
+      if (seeded > 0) console.log(`[HA-Overwatch] Seeded triggered state for ${seeded} zone sensors`);
       return;
     }
     if (msg.type === "event" && msg.event?.event_type === "state_changed") {
