@@ -855,6 +855,7 @@ import logging
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
@@ -912,14 +913,12 @@ async def async_setup_entry(
         # Remove deleted entities from the entity registry
         removed = known_unique_ids - current_unique_ids - {"overwatch_zone_master", "overwatch_camera_all"}
         if removed:
-            er = hass.data.get("entity_registry") or __import__(
-                "homeassistant.helpers.entity_registry", fromlist=["async_get"]
-            ).async_get(hass)
+            registry = er.async_get(hass)
             for uid in removed:
-                entry_obj = er.async_get_entity_id("switch", "ha_overwatch", uid)
-                if entry_obj:
-                    er.async_remove(entry_obj)
-                    _LOGGER.info("Overwatch: removed deleted switch entity unique_id=%s", uid)
+                entity_id = registry.async_get_entity_id("switch", "ha_overwatch", uid)
+                if entity_id:
+                    registry.async_remove(entity_id)
+                    _LOGGER.info("Overwatch: removed deleted switch entity %s (uid=%s)", entity_id, uid)
             known_unique_ids.difference_update(removed)
 
     # Initial add
@@ -1073,6 +1072,7 @@ import logging
 from homeassistant.components.binary_sensor import BinarySensorDeviceClass, BinarySensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -1118,14 +1118,12 @@ async def async_setup_entry(
         protected = {"overwatch_zone_master_triggered"}
         removed = known_unique_ids - current_unique_ids - protected
         if removed:
-            er = hass.data.get("entity_registry") or __import__(
-                "homeassistant.helpers.entity_registry", fromlist=["async_get"]
-            ).async_get(hass)
+            registry = er.async_get(hass)
             for uid in removed:
-                entry_obj = er.async_get_entity_id("binary_sensor", "ha_overwatch", uid)
-                if entry_obj:
-                    er.async_remove(entry_obj)
-                    _LOGGER.info("Overwatch: removed deleted binary sensor entity unique_id=%s", uid)
+                entity_id = registry.async_get_entity_id("binary_sensor", "ha_overwatch", uid)
+                if entity_id:
+                    registry.async_remove(entity_id)
+                    _LOGGER.info("Overwatch: removed deleted binary sensor entity %s (uid=%s)", entity_id, uid)
             known_unique_ids.difference_update(removed)
 
     _sync_sensors()

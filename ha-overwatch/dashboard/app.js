@@ -705,13 +705,24 @@ async function loadFloors() {
     const saved = localStorage.getItem("ow_active_floor");
     const match = floors.find(f => f.id === saved);
     activeFloorId = match ? match.id : (floors[0]?.id || null);
-    // Apply the saved floor's floorplan image immediately
+    // If the active floor has a different floorplan than what's currently loaded, swap it
+    // and WAIT for the image to load so initFloorplan gets the correct dimensions
     const floor = activeFloor();
     if (floor?.floorplan) {
       const fp = document.getElementById("floorplanImage");
       if (fp) {
-        fp.src = apiPath(floor.floorplan) + "?v=" + Date.now();
-        fp.onload = initFloorplan;
+        const targetSrc = apiPath(floor.floorplan);
+        // Only reload if different from current src (strip cache-busting query strings)
+        const currentBase = fp.src.split("?")[0];
+        const targetBase  = (location.origin + "/" + targetSrc).replace(/\/+/g, "/").replace(":/", "://");
+        if (!currentBase.endsWith(floor.floorplan.replace(/^\//, ""))) {
+          await new Promise(resolve => {
+            fp.onload  = () => { initFloorplan(); resolve(); };
+            fp.onerror = resolve; // don't block init on broken image
+            fp.src = targetSrc + "?v=" + Date.now();
+          });
+          return; // initFloorplan already called above
+        }
       }
     }
   } catch { floors = []; }
@@ -4705,9 +4716,8 @@ async function init() {
 
   await loadZones();
   await loadGroups();
-  await loadFloors();   // sets activeFloorId + floorplan image src from localStorage
-  // If image src changed in loadFloors, onload fires initFloorplan.
-  // If already loaded (same floor or no change), call directly.
+  await loadFloors();   // sets activeFloorId, loads correct floor image, calls initFloorplan if changed
+  // If loadFloors didn't change the image (same floor as default), init now
   { const _fp = document.getElementById("floorplanImage"); if (_fp?.complete) initFloorplan(); }
   bindZonesSvgEvents();
   renderZonesEditor();
