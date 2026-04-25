@@ -3114,6 +3114,8 @@ function startDirectModePoller() {
           // Re-render camera status bar and grid so toggle states reflect latest haStates
           if (window.renderCameraStatusBar) window.renderCameraStatusBar();
           if (window.camUpdate) window.camUpdate();
+          // Refresh floor flyout dots if open
+          if (document.getElementById("floorFlyout")) renderFloorFlyout();
           const alarmEntity = uiConfig.alarm_entity ||
             Object.keys(haStates).find(id => id.startsWith("alarm_control_panel."));
           if (alarmEntity && haStates[alarmEntity]) {
@@ -4578,6 +4580,115 @@ function bindCommonSidebarButtons() {
   if (logBtn)      logBtn.onclick      = () => renderLogPanel(true);
 }
 
+// ── Floor switcher flyout ────────────────────────────────────
+function bindFloorSwitcher() {
+  const btn = document.getElementById("floorsBtn");
+  if (!btn) return;
+
+  // Show/hide button based on floor count
+  function updateFloorBtn() {
+    btn.style.display = floors.length > 1 ? "" : "none";
+    // Update active state
+    btn.classList.toggle("active", document.getElementById("floorFlyout") !== null);
+  }
+  updateFloorBtn();
+  // Re-check when floors change
+  window._updateFloorBtn = updateFloorBtn;
+
+  btn.onclick = (e) => {
+    e.stopPropagation();
+    const existing = document.getElementById("floorFlyout");
+    if (existing) { existing.remove(); btn.classList.remove("active"); return; }
+    btn.classList.add("active");
+    renderFloorFlyout();
+  };
+}
+
+function renderFloorFlyout() {
+  const existing = document.getElementById("floorFlyout");
+  if (existing) existing.remove();
+
+  const btn     = document.getElementById("floorsBtn");
+  const sidebar = document.getElementById("sidebarEl");
+  if (!btn || !sidebar) return;
+
+  const flyout = document.createElement("div");
+  flyout.id = "floorFlyout";
+  flyout.style.cssText = `
+    position:fixed;
+    background:rgba(14,14,14,0.97);
+    border:1px solid rgba(255,255,255,0.12);
+    border-radius:12px;
+    padding:8px;
+    z-index:500;
+    min-width:180px;
+    box-shadow:0 8px 32px rgba(0,0,0,0.6);
+    backdrop-filter:blur(10px);
+  `;
+
+  // Position next to the button
+  const btnRect     = btn.getBoundingClientRect();
+  const isLeft      = sidebar.classList.contains("left");
+  flyout.style.top  = Math.round(btnRect.top) + "px";
+  if (isLeft) {
+    flyout.style.left = Math.round(btnRect.right + 8) + "px";
+  } else {
+    flyout.style.right = Math.round(window.innerWidth - btnRect.left + 8) + "px";
+  }
+
+  // Build floor items
+  floors.forEach((f, fi) => {
+    const floorZones  = zones.filter(z => z.floor_id === f.id || (!z.floor_id && fi === 0));
+    const hasTriggered = floorZones.some(z => getZoneState(z) === "triggered");
+    const allDisabled  = floorZones.length > 0 && floorZones.every(z => getZoneState(z) === "disabled");
+    const hasFault     = floorZones.some(z => getZoneState(z) === "fault");
+    const dotColour    = hasTriggered ? "#ff3b30" : hasFault ? "#ff9500" : allDisabled ? "#555" : "#32d74b";
+
+    const row = document.createElement("button");
+    const isActive = f.id === activeFloorId;
+    row.style.cssText = `
+      display:flex;align-items:center;gap:10px;width:100%;
+      background:${isActive ? "rgba(0,150,255,0.15)" : "transparent"};
+      border:1px solid ${isActive ? "rgba(0,150,255,0.35)" : "transparent"};
+      border-radius:8px;padding:8px 10px;cursor:pointer;
+      color:${isActive ? "#fff" : "rgba(255,255,255,0.7)"};
+      font-size:13px;font-weight:${isActive ? "600" : "400"};
+      text-align:left;transition:background 0.15s;
+    `;
+    row.onmouseover = () => { if (!isActive) row.style.background = "rgba(255,255,255,0.06)"; };
+    row.onmouseout  = () => { if (!isActive) row.style.background = "transparent"; };
+
+    row.innerHTML = `
+      <span style="width:8px;height:8px;border-radius:50%;background:${dotColour};flex-shrink:0;display:inline-block;${hasTriggered ? "animation:pulse-dot 0.8s infinite;" : ""}"></span>
+      <span style="flex:1;">${escapeHtml(f.name)}</span>
+      <span style="font-size:10px;color:#555;">${floorZones.length} zone${floorZones.length !== 1 ? "s" : ""}</span>
+    `;
+
+    row.onclick = () => {
+      setActiveFloor(f.id);
+      // Re-render zone editor floor selector if open
+      if (editorMode) renderZonesEditor();
+      flyout.remove();
+      document.getElementById("floorsBtn")?.classList.remove("active");
+    };
+
+    flyout.appendChild(row);
+  });
+
+  document.body.appendChild(flyout);
+
+  // Dismiss on outside click
+  setTimeout(() => {
+    document.addEventListener("pointerdown", function dismiss(e) {
+      if (!flyout.contains(e.target) && e.target.id !== "floorsBtn") {
+        flyout.remove();
+        document.getElementById("floorsBtn")?.classList.remove("active");
+        document.removeEventListener("pointerdown", dismiss);
+      }
+    });
+  }, 0);
+}
+
 function bindSearchUI() {
   const searchPanelHtml = `
     <div class="search-panel" id="searchPanel" aria-hidden="true">
@@ -4710,6 +4821,7 @@ async function init() {
 
   bindSidebarToggle();
   bindCommonSidebarButtons();
+  bindFloorSwitcher();
   initViewToggle();  // apply startup view mode, wire split handle drag
   // Hide zones editor button for non-admin (direct browser access)
   if (IS_DIRECT_MODE) {
@@ -4720,6 +4832,7 @@ async function init() {
   await loadZones();
   await loadGroups();
   await loadFloors();   // sets activeFloorId, loads correct floor image, calls initFloorplan
+  window._updateFloorBtn?.(); // show/hide floor switcher based on floor count
   bindZonesSvgEvents();
   renderZonesEditor();
   renderZones();

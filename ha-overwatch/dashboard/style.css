@@ -2363,3 +2363,20 @@ body.sidebar-collapsed.sidebar-left .view-toggle-widget {
 .settings-btn-secondary:hover {
   background: rgba(0,150,255,0.22) !important;
 }
+/* ── Floor switcher flyout ──────────────────────────────────── */
+#floorFlyout {
+  position: fixed;
+  background: rgba(14,14,14,0.97);
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 12px;
+  padding: 8px;
+  z-index: 500;
+  min-width: 180px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+#floorFlyout button:hover {
+  background: rgba(255,255,255,0.06) !important;
+}
