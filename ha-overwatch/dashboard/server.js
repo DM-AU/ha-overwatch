@@ -1361,9 +1361,11 @@ function startHAListener() {
   function callHASwitch(entityId, on) {
     if (!process.env.SUPERVISOR_TOKEN) return;
     // Update local cache immediately so next /ow/states poll reflects it
-    if (serverHaStates[entityId]) {
-      serverHaStates[entityId] = { ...serverHaStates[entityId], state: on ? 'on' : 'off' };
-    }
+    // Create a stub if entity not yet in cache (e.g. newly created floor entity)
+    serverHaStates[entityId] = {
+      ...(serverHaStates[entityId] || { entity_id: entityId, attributes: {} }),
+      state: on ? 'on' : 'off',
+    };
     const body = JSON.stringify({ entity_id: entityId });
     const req = http.request({
       hostname: 'supervisor', port: 80,
@@ -1469,10 +1471,9 @@ function startHAListener() {
       const fid = entityId.replace('switch.overwatch_zone_floor_', '');
       const allZones = loadZones();
       const floorZones = allZones.filter(z => z.floor_id === fid);
-      if (floorZones.length > 0) {
-        console.log(`[HA-Overwatch] Cascade: zone floor ${fid} → ${on ? 'on' : 'off'} (${floorZones.length} zones)`);
-        floorZones.forEach(z => callHASwitch(`switch.overwatch_zone_${nameSlug(z.name) || z.id}`, on));
-      }
+      console.log(`[HA-Overwatch] Zone floor cascade: fid=${fid}, allZones=${allZones.length}, matched=${floorZones.length}`);
+      if (allZones.length > 0) console.log(`[HA-Overwatch] Zone floor_ids: ${[...new Set(allZones.map(z => z.floor_id))].join(', ')}`);
+      floorZones.forEach(z => callHASwitch(`switch.overwatch_zone_${nameSlug(z.name) || z.id}`, on));
       return;
     }
 
@@ -1481,16 +1482,14 @@ function startHAListener() {
       const fid = entityId.replace('switch.overwatch_camera_floor_', '');
       const allZones = loadZones();
       const floorZones = allZones.filter(z => z.floor_id === fid && (z.cameras || []).length > 0);
-      if (floorZones.length > 0) {
-        console.log(`[HA-Overwatch] Cascade: camera floor ${fid} → ${on ? 'on' : 'off'} (${floorZones.length} zones)`);
-        floorZones.forEach(z => {
-          callHASwitch(`switch.overwatch_camera_zone_${nameSlug(z.name) || z.id}`, on);
-          (z.cameras || []).forEach(camId => {
-            const safe = camId.replace(/^camera\./, '').replace(/[^a-z0-9]+/g, '_');
-            callHASwitch(`switch.overwatch_camera_${safe}`, on);
-          });
+      console.log(`[HA-Overwatch] Camera floor cascade: fid=${fid}, allZones=${allZones.length}, matched=${floorZones.length}`);
+      floorZones.forEach(z => {
+        callHASwitch(`switch.overwatch_camera_zone_${nameSlug(z.name) || z.id}`, on);
+        (z.cameras || []).forEach(camId => {
+          const safe = camId.replace(/^camera\./, '').replace(/[^a-z0-9]+/g, '_');
+          callHASwitch(`switch.overwatch_camera_${safe}`, on);
         });
-      }
+      });
       return;
     }
   }
