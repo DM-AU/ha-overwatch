@@ -1051,8 +1051,20 @@ function frameLength(buf) {
   if (buf.length < 2) return -1;
   let len = buf[1] & 0x7f;
   let offset = 2;
-  if (len === 126) { if (buf.length < 4) return -1; len = buf.readUInt16BE(2); offset = 4; }
-  else if (len === 127) return -1;
+  if (len === 126) {
+    if (buf.length < 4) return -1;
+    len = buf.readUInt16BE(2);
+    offset = 4;
+  } else if (len === 127) {
+    // 8-byte extended payload length (used for messages > 65535 bytes e.g. get_states response)
+    if (buf.length < 10) return -1;
+    // JS can't handle full 64-bit ints safely; upper 4 bytes should be 0 for any realistic payload
+    const hi = buf.readUInt32BE(2);
+    const lo = buf.readUInt32BE(6);
+    if (hi > 0) return -1; // >4GB payload — not realistic, bail
+    len = lo;
+    offset = 10;
+  }
   const masked = (buf[1] & 0x80) !== 0;
   if (masked) offset += 4;
   return offset + len;
@@ -1422,7 +1434,13 @@ function extractWsPayload(buf) {
     len = buf.readUInt16BE(2);
     offset = 4;
   } else if (len === 127) {
-    return null; // skip large frames
+    // 8-byte extended length — used for large frames like get_states response
+    if (buf.length < 10) return null;
+    const hi = buf.readUInt32BE(2);
+    const lo = buf.readUInt32BE(6);
+    if (hi > 0) return null; // >4GB, not realistic
+    len = lo;
+    offset = 10;
   }
   if (masked) offset += 4;
   if (buf.length < offset + len) return null;
