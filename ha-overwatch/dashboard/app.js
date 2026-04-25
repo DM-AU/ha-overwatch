@@ -1830,11 +1830,12 @@ function _renderZonesInternal(targetSvg) {
       fillGroup.setAttribute("style", `filter: drop-shadow(0 0 3px ${grpHex})`);
 
       let hasMembers = false;
+      const inMultiPanelGroup = getNumPanels() > 1 && document.querySelector('.floor-panel');
       (activeGrp.zone_ids || []).forEach(zid => {
         const zone = zones.find(z => z.id === zid);
         if (!zone || !zone.points?.length || zone.hidden) return;
-        // Only highlight members on the active floor
-        if (floors.length > 1) {
+        // Only filter by floor in single-panel mode
+        if (!inMultiPanelGroup && floors.length > 1) {
           const zFloor = zone.floor_id;
           const onActiveFloor = zFloor === _curFloorId || (!zFloor && _isFirstFloor);
           if (!onActiveFloor) return;
@@ -1948,7 +1949,7 @@ function _renderZonesInternal(targetSvg) {
         || (zones.find(z => groupFlashZoneIds.has(z.id) && getZoneState(z) === 'triggered')?.sensors || []).find(isEntityTriggered);
       const type = detectEntityType(triggeredEntity || "");
       const hex  = resolveColour(entityTypeColour(type));
-      const fillAlpha   = flashPhase ? 0.35 : 0.75;
+      const fillAlpha   = flashPhase ? 0.18 : 0.65;
       poly.style.fill        = hexToRgba(hex, fillAlpha);
       poly.style.stroke      = hexToRgba(hex, fillAlpha * 0.7);
       poly.style.strokeWidth = String(1 / zoom.scale);
