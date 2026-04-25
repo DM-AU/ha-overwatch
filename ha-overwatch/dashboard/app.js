@@ -702,9 +702,8 @@ async function loadFloors() {
     if (!res.ok) { floors = []; return; }
     floors = await res.json();
     // Set active floor to saved preference or first floor
-    const saved = localStorage.getItem("ow_active_floor");
-    const match = floors.find(f => f.id === saved);
-    activeFloorId = match ? match.id : (floors[0]?.id || null);
+    // Always start on the first floor on page load so the map and editor are in sync
+    activeFloorId = floors[0]?.id || null;
     // Load the active floor's floorplan image and await it so initFloorplan
     // gets correct dimensions before renderZones runs
     const floor = activeFloor();
