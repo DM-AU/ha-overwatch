@@ -895,10 +895,13 @@ async def async_setup_entry(
             entities.append(OverwatchCameraSwitch(coordinator, c))
         return entities
 
-    def _add_new_entities() -> None:
-        """Called on every coordinator update — adds any entities not yet registered."""
+    def _sync_entities() -> None:
+        """Called on every coordinator update — adds new and removes deleted entities."""
         data = coordinator.data or {}
         all_entities = _build_entities(data)
+        current_unique_ids = {e._attr_unique_id for e in all_entities}
+
+        # Add new entities
         new_entities = [e for e in all_entities if e._attr_unique_id not in known_unique_ids]
         if new_entities:
             _LOGGER.info("Overwatch: adding %d new switch entities dynamically", len(new_entities))
@@ -906,11 +909,24 @@ async def async_setup_entry(
                 known_unique_ids.add(e._attr_unique_id)
             async_add_entities(new_entities, update_before_add=False)
 
-    # Initial add
-    _add_new_entities()
+        # Remove deleted entities from the entity registry
+        removed = known_unique_ids - current_unique_ids - {"overwatch_zone_master", "overwatch_camera_all"}
+        if removed:
+            er = hass.data.get("entity_registry") or __import__(
+                "homeassistant.helpers.entity_registry", fromlist=["async_get"]
+            ).async_get(hass)
+            for uid in removed:
+                entry_obj = er.async_get_entity_id("switch", "ha_overwatch", uid)
+                if entry_obj:
+                    er.async_remove(entry_obj)
+                    _LOGGER.info("Overwatch: removed deleted switch entity unique_id=%s", uid)
+            known_unique_ids.difference_update(removed)
 
-    # Re-run on every coordinator refresh so new zones/floors/cameras appear without HA restart
-    entry.async_on_unload(coordinator.async_add_listener(_add_new_entities))
+    # Initial add
+    _sync_entities()
+
+    # Re-run on every coordinator refresh so new/deleted zones appear without HA restart
+    entry.async_on_unload(coordinator.async_add_listener(_sync_entities))
 
 
 def _dev(coordinator: ZoneCoordinator) -> DeviceInfo:
@@ -1084,10 +1100,13 @@ async def async_setup_entry(
             entities.append(OverwatchZoneTriggered(trig_coordinator, z))
         return entities
 
-    def _add_new_sensors() -> None:
-        """Called on every zone coordinator update — adds new binary sensors dynamically."""
+    def _sync_sensors() -> None:
+        """Called on every zone coordinator update — adds new and removes deleted binary sensors."""
         zones_data = zone_coordinator.data or {}
         all_sensors = _build_sensors(zones_data)
+        current_unique_ids = {s._attr_unique_id for s in all_sensors}
+
+        # Add new sensors
         new_sensors = [s for s in all_sensors if s._attr_unique_id not in known_unique_ids]
         if new_sensors:
             _LOGGER.info("Overwatch: adding %d new binary sensor entities dynamically", len(new_sensors))
@@ -1095,8 +1114,22 @@ async def async_setup_entry(
                 known_unique_ids.add(s._attr_unique_id)
             async_add_entities(new_sensors, update_before_add=False)
 
-    _add_new_sensors()
-    entry.async_on_unload(zone_coordinator.async_add_listener(_add_new_sensors))
+        # Remove deleted sensor entities
+        protected = {"overwatch_zone_master_triggered"}
+        removed = known_unique_ids - current_unique_ids - protected
+        if removed:
+            er = hass.data.get("entity_registry") or __import__(
+                "homeassistant.helpers.entity_registry", fromlist=["async_get"]
+            ).async_get(hass)
+            for uid in removed:
+                entry_obj = er.async_get_entity_id("binary_sensor", "ha_overwatch", uid)
+                if entry_obj:
+                    er.async_remove(entry_obj)
+                    _LOGGER.info("Overwatch: removed deleted binary sensor entity unique_id=%s", uid)
+            known_unique_ids.difference_update(removed)
+
+    _sync_sensors()
+    entry.async_on_unload(zone_coordinator.async_add_listener(_sync_sensors))
 
 
 def _dev(url: str) -> DeviceInfo:

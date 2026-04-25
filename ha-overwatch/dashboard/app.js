@@ -1916,6 +1916,7 @@ function renderZonesEditor() {
       groups.forEach(g => { g.zone_ids = (g.zone_ids||[]).filter(id => id !== selectedZoneId); saveGroup(g); });
       selectedZoneId = null; isCreatingZone = false; isEditingPoints = false; currentNewZone = null;
       renderZones(); renderZonesEditor();
+      scheduleHAReload(); // zone deleted — remove HA entity
     }
   });
 
@@ -4687,7 +4688,7 @@ async function init() {
 
   bindZoomControls();
   bindPan();
-  initFloorplan();
+  // initFloorplan() called after loadFloors() so the saved floor image is used
   bindZonesButton();
   bindStatusBar();
   applyStatusVisibility(); // apply hide prefs after DOM is ready
@@ -4704,7 +4705,10 @@ async function init() {
 
   await loadZones();
   await loadGroups();
-  await loadFloors();
+  await loadFloors();   // sets activeFloorId + floorplan image src from localStorage
+  // If image src changed in loadFloors, onload fires initFloorplan.
+  // If already loaded (same floor or no change), call directly.
+  { const _fp = document.getElementById("floorplanImage"); if (_fp?.complete) initFloorplan(); }
   bindZonesSvgEvents();
   renderZonesEditor();
   renderZones();
