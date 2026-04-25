@@ -1244,6 +1244,9 @@ function startHAListener() {
         console.log(`[HA-Overwatch] state_changed: ${entity_id} → ${new_state.state} (zone sensor)`);
       }
       onStateChanged(entity_id, new_state.state || "");
+      // Cascade switch state changes server-side so /ow/states stays consistent
+      // without relying on any browser being connected
+      cascadeSwitchState(entity_id, new_state.state || "");
     }
 
     // Log a heartbeat every 50 events so we can confirm events are flowing
@@ -1255,6 +1258,114 @@ function startHAListener() {
       if (haListenerEventCount % 50 === 0) {
         console.log(`[HA-Overwatch] HA listener: ${haListenerEventCount} events received`);
       }
+    }
+  }
+
+  // Call a HA switch service via supervisor REST API (fire-and-forget)
+  function callHASwitch(entityId, on) {
+    if (!process.env.SUPERVISOR_TOKEN) return;
+    // Update local cache immediately so next /ow/states poll reflects it
+    if (serverHaStates[entityId]) {
+      serverHaStates[entityId] = { ...serverHaStates[entityId], state: on ? 'on' : 'off' };
+    }
+    const body = JSON.stringify({ entity_id: entityId });
+    const req = http.request({
+      hostname: 'supervisor', port: 80,
+      path: `/core/api/services/switch/${on ? 'turn_on' : 'turn_off'}`,
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.SUPERVISOR_TOKEN}`,
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body),
+      },
+    }, res => res.resume());
+    req.on('error', e => console.error(`[HA-Overwatch] callHASwitch error (${entityId}):`, e.message));
+    req.write(body);
+    req.end();
+  }
+
+  // Cascade switch state changes server-side — mirrors what app.js does in the browser
+  // This ensures /ow/states is always consistent regardless of any browser being open
+  function cascadeSwitchState(entityId, state) {
+    const on = (state || '').toLowerCase() !== 'off';
+
+    // Zone master → all groups + zones
+    if (entityId === 'switch.overwatch_zone_master') {
+      console.log(`[HA-Overwatch] Cascade: zone master → ${on ? 'on' : 'off'}`);
+      const allZones  = loadZones();
+      const allGroups = loadGroups();
+      allGroups.forEach(g => callHASwitch(`switch.overwatch_zone_group_${nameSlug(g.name) || g.id}`, on));
+      allZones.forEach(z  => callHASwitch(`switch.overwatch_zone_${nameSlug(z.name) || z.id}`, on));
+      return;
+    }
+
+    // Zone group → member zones
+    if (entityId.startsWith('switch.overwatch_zone_group_')) {
+      const slug = entityId.replace('switch.overwatch_zone_group_', '');
+      const allGroups = loadGroups();
+      const allZones  = loadZones();
+      const group = allGroups.find(g => (nameSlug(g.name) || g.id) === slug);
+      if (group) {
+        console.log(`[HA-Overwatch] Cascade: zone group ${slug} → ${on ? 'on' : 'off'}`);
+        (group.zone_ids || []).forEach(zid => {
+          const z = allZones.find(z => z.id === zid);
+          if (z) callHASwitch(`switch.overwatch_zone_${nameSlug(z.name) || z.id}`, on);
+        });
+      }
+      return;
+    }
+
+    // Camera all → all camera zones + cameras
+    if (entityId === 'switch.overwatch_camera_all') {
+      console.log(`[HA-Overwatch] Cascade: camera all → ${on ? 'on' : 'off'}`);
+      const allZones = loadZones();
+      allZones.forEach(z => {
+        if ((z.cameras || []).length > 0) {
+          callHASwitch(`switch.overwatch_camera_zone_${nameSlug(z.name) || z.id}`, on);
+          (z.cameras || []).forEach(camId => {
+            const safe = camId.replace(/^camera\./, '').replace(/[^a-z0-9]+/g, '_');
+            callHASwitch(`switch.overwatch_camera_${safe}`, on);
+          });
+        }
+      });
+      return;
+    }
+
+    // Camera group → member camera zones + cameras
+    if (entityId.startsWith('switch.overwatch_camera_group_')) {
+      const slug = entityId.replace('switch.overwatch_camera_group_', '');
+      const allGroups = loadGroups();
+      const allZones  = loadZones();
+      const group = allGroups.find(g => (nameSlug(g.name) || g.id) === slug);
+      if (group) {
+        console.log(`[HA-Overwatch] Cascade: camera group ${slug} → ${on ? 'on' : 'off'}`);
+        (group.zone_ids || []).forEach(zid => {
+          const z = allZones.find(z => z.id === zid);
+          if (z && (z.cameras || []).length > 0) {
+            callHASwitch(`switch.overwatch_camera_zone_${nameSlug(z.name) || z.id}`, on);
+            (z.cameras || []).forEach(camId => {
+              const safe = camId.replace(/^camera\./, '').replace(/[^a-z0-9]+/g, '_');
+              callHASwitch(`switch.overwatch_camera_${safe}`, on);
+            });
+          }
+        });
+      }
+      return;
+    }
+
+    // Camera zone → member cameras
+    if (entityId.startsWith('switch.overwatch_camera_zone_')) {
+      const slug = entityId.replace('switch.overwatch_camera_zone_', '');
+      const allZones = loadZones();
+      const zone = allZones.find(z => (nameSlug(z.name) || z.id) === slug);
+      if (zone && (zone.cameras || []).length > 0) {
+        console.log(`[HA-Overwatch] Cascade: camera zone ${slug} → ${on ? 'on' : 'off'}`);
+        (zone.cameras || []).forEach(camId => {
+          const safe = camId.replace(/^camera\./, '').replace(/[^a-z0-9]+/g, '_');
+          callHASwitch(`switch.overwatch_camera_${safe}`, on);
+        });
+      }
+      return;
     }
   }
 
