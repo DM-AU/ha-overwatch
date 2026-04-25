@@ -704,6 +704,10 @@ async function loadFloors() {
     // Set active floor to saved preference or first floor
     // Always start on the first floor on page load so the map and editor are in sync
     activeFloorId = floors[0]?.id || null;
+    // Clear saved zoom so each page load fits the floor image to the panel fresh
+    localStorage.removeItem("zoomScale");
+    localStorage.removeItem("zoomX");
+    localStorage.removeItem("zoomY");
     // Load the active floor's floorplan image and await it so initFloorplan
     // gets correct dimensions before renderZones runs
     const floor = activeFloor();
@@ -748,6 +752,10 @@ function setActiveFloor(id) {
   if (!floor) return;
   activeFloorId = id;
   localStorage.setItem("ow_active_floor", id);
+  // Clear saved zoom so the new floor's image fits to the panel automatically
+  localStorage.removeItem("zoomScale");
+  localStorage.removeItem("zoomX");
+  localStorage.removeItem("zoomY");
   applyActiveFloor();
 }
 
