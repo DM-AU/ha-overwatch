@@ -2863,7 +2863,8 @@ function connectHA() {
         if (data.entity_id.startsWith("switch.overwatch_zone_floor_")) {
           const on = (data.new_state.state || "").toLowerCase() !== "off";
           const fid = data.entity_id.replace("switch.overwatch_zone_floor_", "");
-          zones.filter(z => z.floor_id === fid).forEach(z => {
+          const isFirstFloor1 = floors.length === 0 || floors[0].id === fid;
+          zones.filter(z => z.floor_id === fid || (!z.floor_id && isFirstFloor1)).forEach(z => {
             owCallSwitch(`switch.overwatch_zone_${zoneSlug(z)}`, on);
           });
         }
@@ -2872,7 +2873,8 @@ function connectHA() {
         if (data.entity_id.startsWith("switch.overwatch_camera_floor_")) {
           const on = (data.new_state.state || "").toLowerCase() !== "off";
           const fid = data.entity_id.replace("switch.overwatch_camera_floor_", "");
-          zones.filter(z => z.floor_id === fid && (z.cameras || []).length > 0).forEach(z => {
+          const isFirstFloor2 = floors.length === 0 || floors[0].id === fid;
+          zones.filter(z => (z.floor_id === fid || (!z.floor_id && isFirstFloor2)) && (z.cameras || []).length > 0).forEach(z => {
             owCallSwitch(`switch.overwatch_camera_zone_${nameSlug(z.name) || z.id}`, on);
             (z.cameras || []).forEach(camId => {
               const safe = camId.replace(/^camera\./, '').replace(/[^a-z0-9]+/g, '_');

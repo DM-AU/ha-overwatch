@@ -1385,6 +1385,8 @@ function startHAListener() {
   // Cascade switch state changes server-side — mirrors what app.js does in the browser
   // This ensures /ow/states is always consistent regardless of any browser being open
   function cascadeSwitchState(entityId, state) {
+    // Only process overwatch switch entities — skip sensors, cameras, etc.
+    if (!entityId.startsWith('switch.overwatch_')) return;
     const on = (state || '').toLowerCase() !== 'off';
 
     // Zone master → all groups + zones
@@ -1469,10 +1471,12 @@ function startHAListener() {
     // Zone floor → all zones on that floor
     if (entityId.startsWith('switch.overwatch_zone_floor_')) {
       const fid = entityId.replace('switch.overwatch_zone_floor_', '');
-      const allZones = loadZones();
-      const floorZones = allZones.filter(z => z.floor_id === fid);
+      const allZones  = loadZones();
+      const allFloors = loadFloors();
+      const isFirstFloor = allFloors.length === 0 || allFloors[0].id === fid;
+      // Zones with no floor_id belong to the first floor
+      const floorZones = allZones.filter(z => z.floor_id === fid || (!z.floor_id && isFirstFloor));
       console.log(`[HA-Overwatch] Zone floor cascade: fid=${fid}, allZones=${allZones.length}, matched=${floorZones.length}`);
-      if (allZones.length > 0) console.log(`[HA-Overwatch] Zone floor_ids: ${[...new Set(allZones.map(z => z.floor_id))].join(', ')}`);
       floorZones.forEach(z => callHASwitch(`switch.overwatch_zone_${nameSlug(z.name) || z.id}`, on));
       return;
     }
@@ -1480,8 +1484,12 @@ function startHAListener() {
     // Camera floor → all camera zones + cameras on that floor
     if (entityId.startsWith('switch.overwatch_camera_floor_')) {
       const fid = entityId.replace('switch.overwatch_camera_floor_', '');
-      const allZones = loadZones();
-      const floorZones = allZones.filter(z => z.floor_id === fid && (z.cameras || []).length > 0);
+      const allZones  = loadZones();
+      const allFloors = loadFloors();
+      const isFirstFloor = allFloors.length === 0 || allFloors[0].id === fid;
+      // Zones with no floor_id belong to the first floor
+      const floorZones = allZones.filter(z =>
+        (z.floor_id === fid || (!z.floor_id && isFirstFloor)) && (z.cameras || []).length > 0);
       console.log(`[HA-Overwatch] Camera floor cascade: fid=${fid}, allZones=${allZones.length}, matched=${floorZones.length}`);
       floorZones.forEach(z => {
         callHASwitch(`switch.overwatch_camera_zone_${nameSlug(z.name) || z.id}`, on);
