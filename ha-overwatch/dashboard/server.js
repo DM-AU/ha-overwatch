@@ -1182,6 +1182,10 @@ function startHAListener() {
       if (!entity_id || !new_state) return;
       // Keep full state cache up to date
       serverHaStates[entity_id] = new_state;
+      const inZone = !!sensorToZones[entity_id]?.length;
+      if (inZone) {
+        console.log(`[HA-Overwatch] state_changed: ${entity_id} → ${new_state.state} (zone sensor)`);
+      }
       onStateChanged(entity_id, new_state.state || "");
     }
   }

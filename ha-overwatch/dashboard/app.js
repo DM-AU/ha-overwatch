@@ -2797,12 +2797,12 @@ function scheduleReconnect() {
 }
 
 // Direct Mode state poller — replaces WebSocket in Direct Mode.
-// Polls /ow/states every 3s, populates haStates identically to the WS path.
+// Polls /ow/states every 1s, populates haStates identically to the WS path.
 let directModePollTimer = null;
 function startDirectModePoller() {
   if (!IS_DIRECT_MODE) return;
   async function poll() {
-    let nextPoll = 3000;
+    let nextPoll = 1000;
     try {
       const res = await fetch("ow/states", { cache: "no-store" });
       if (res.ok) {
@@ -2811,7 +2811,7 @@ function startDirectModePoller() {
 
         if (entityCount === 0) {
           // Cache not ready yet — retry quickly
-          nextPoll = 1000;
+          nextPoll = 500;
         } else {
           Object.values(states).forEach(st => {
             if (st.entity_id) haStates[st.entity_id] = st;
