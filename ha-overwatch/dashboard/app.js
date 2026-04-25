@@ -1055,9 +1055,9 @@ function applyFloorPanels() {
     // Use floor ID as cache key so image only reloads when floor changes, not every render
     const imgCacheKey = floor?.id || 'default';
 
-    // SVG
-    const svg = document.createElement('svg');
-    svg.className = 'fp-svg zones-svg';
+    // SVG — must use createElementNS for proper SVG rendering
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('class', 'fp-svg zones-svg');
     svg.id = 'fp-svg-' + i;
     svg.style.cssText = 'position:absolute;top:0;left:0;overflow:visible;pointer-events:none;';
 
