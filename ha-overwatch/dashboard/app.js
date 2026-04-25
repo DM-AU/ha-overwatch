@@ -877,15 +877,20 @@ function renderPanelZones(idx) {
   panelSvg.setAttribute('height',  img.naturalHeight);
   panelSvg.setAttribute('viewBox', `0 0 ${img.naturalWidth} ${img.naturalHeight}`);
 
-  // Pass SVG directly — no ID swap needed, no DOM mutation risk
+  // Temporarily set activeFloorId and swap the SVG the renderer uses.
+  // try/finally guarantees restoration even if renderZones throws.
   const savedFloorId = activeFloorId;
+  const realSvg      = document.getElementById('zonesSvg');
   try {
     activeFloorId = floor.id;
-    _renderZonesInternal(panelSvg);
+    if (realSvg)   realSvg.id   = '__ow_svg_hidden__';
+    panelSvg.id = 'zonesSvg';
+    _renderZonesInternal();
   } finally {
+    panelSvg.id = 'fp-svg-' + idx;
+    if (realSvg) realSvg.id = 'zonesSvg';
     activeFloorId = savedFloorId;
   }
-
 }
 
 function renderAllPanelZones() {
@@ -913,7 +918,7 @@ function bindPanelInteraction(idx) {
   });
 
   panelEl.addEventListener('pointermove', e => {
-    if (!panning || e.buttons !== 1) return;  // e.buttons===1 means left button physically held
+    if (!panning) return;
     PANEL_ZOOMS[idx].x = e.clientX - panStart.x;
     PANEL_ZOOMS[idx].y = e.clientY - panStart.y;
     applyPanelTransform(idx);
@@ -1068,7 +1073,6 @@ function applyFloorPanels() {
       startPos = dir === 'v' ? e.clientY : e.clientX;
       handle.style.background = 'rgba(0,150,255,0.5)';
       e.preventDefault();
-      e.stopPropagation(); // prevent main split handle from also receiving this
     });
     handle.addEventListener('pointermove', e => {
       if (!dragging) return;
@@ -1758,8 +1762,8 @@ function renderZones() {
 
 // Internal zone drawing — draws into whatever element currently has id="zonesSvg"
 // Called by renderZones() (single panel) and renderPanelZones() (multi-panel via ID swap)
-function _renderZonesInternal(targetSvg) {
-  const svg = targetSvg || document.getElementById("zonesSvg");
+function _renderZonesInternal() {
+  const svg = document.getElementById("zonesSvg");
   if (!svg) return;
   while (svg.firstChild) svg.removeChild(svg.firstChild);
 
@@ -3920,11 +3924,10 @@ function renderSettingsPanel() {
                 const autoOn     = localStorage.getItem('ow_auto_floor') === 'true';
                 const subStyle   = autoOn ? '' : 'opacity:0.4;pointer-events:none;';
                 return mpNote
-                  + '<div style="display:flex;flex-direction:column;gap:8px;">'
+                  + '<div style="' + disStyle + 'display:flex;flex-direction:column;gap:8px;">'
                   + '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;">'
                   + '<input type="checkbox" id="hideFloorLabelChk" ' + (localStorage.getItem('ow_hide_floor_label')==='true' ? 'checked' : '') + '>'
                   + '<span>Hide floor name label on panels</span></label>'
-                  + '<div style="' + disStyle + 'display:flex;flex-direction:column;gap:8px;">'
                   + '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;">'
                   + '<input type="checkbox" id="camFloorOnlyChk" ' + (localStorage.getItem('ow_cam_floor_only')==='true' ? 'checked' : '') + (multiPanel ? ' disabled' : '') + '>'
                   + '<span>Show cameras for current floor only</span></label>'
@@ -3943,7 +3946,7 @@ function renderSettingsPanel() {
                   + '<div style="display:flex;align-items:center;gap:8px;">'
                   + '<label style="flex:1;font-size:12px;">Return-to-default cooldown (s)</label>'
                   + '<input type="number" id="floorReturnChk" min="5" max="600" value="' + (localStorage.getItem('ow_floor_return_secs')||'60') + '" style="width:60px;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:4px 8px;color:#fff;font-size:12px;"></div>'
-                  + '</div></div></div>';
+                  + '</div></div>';
               })()
           }
         </div>
