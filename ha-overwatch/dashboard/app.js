@@ -3177,8 +3177,12 @@ function openSettings(tab) {
   renderSettingsPanel();
   if (tab) {
     const panel = document.getElementById("settingsPanel");
-    panel?.querySelectorAll(".settings-tab").forEach(t => t.classList.toggle("active", t.dataset.tab === tab));
-    panel?.querySelectorAll(".settings-tab-panel").forEach(p => p.style.display = p.dataset.panel === tab ? "" : "none");
+    if (!panel) return;
+    // Use classList to match how tab switching works internally
+    panel.querySelectorAll(".settings-tab").forEach(t => t.classList.toggle("active", t.dataset.tab === tab));
+    panel.querySelectorAll(".settings-tab-panel").forEach(p => {
+      p.classList.toggle("active", p.dataset.panel === tab);
+    });
   }
 }
 
@@ -3432,7 +3436,11 @@ function renderSettingsPanel() {
         </div>
 
         <div class="settings-section">
-          <div class="settings-section-title">Zone Colours ${perDeviceBadge}</div>
+          <div class="settings-section-title" id="zoneColourToggle" style="cursor:pointer;user-select:none;display:flex;align-items:center;justify-content:space-between;">
+            <span>Zone Colours ${perDeviceBadge}</span>
+            <span id="zoneColourChevron" style="font-size:10px;color:#666;transition:transform 0.2s;">▼</span>
+          </div>
+          <div id="zoneColourBody" style="display:none;">
           <div style="font-size:11px;color:#666;margin-bottom:6px;">Admin sets server defaults. Browser saves locally and overrides them per device.</div>
           <div class="settings-section-title" style="font-size:10px;margin-top:4px;">Armed</div>
           <div class="settings-color-grid">
@@ -3457,7 +3465,7 @@ function renderSettingsPanel() {
             <div class="settings-color-item"><label>CO/Gas</label><input type="color" id="cfgColOffCo" value="${eff('ow_color_off_co','color_off_co','#cc73f8')}"></div>
           </div>
           ${isAdmin ? `<div style="font-size:10px;color:#444;margin-top:4px;">Admin: <a href="#" id="settingsSaveColoursYamlLink" style="color:#666;">Save as server default</a></div>` : ''}
-
+          </div><!-- /zoneColourBody -->
         </div>
       </div>
 
@@ -3869,6 +3877,23 @@ function renderSettingsPanel() {
   }
 
   document.getElementById("settingsSaveAlarmBtn")?.addEventListener("click",   () => saveYaml("alarmSaveStatus"));
+
+  // ── Zone Colours collapsible ─────────────────────────────────
+  const zoneColourToggle = document.getElementById("zoneColourToggle");
+  const zoneColourBody   = document.getElementById("zoneColourBody");
+  const zoneColourChevron = document.getElementById("zoneColourChevron");
+  if (zoneColourToggle && zoneColourBody) {
+    const isOpen = localStorage.getItem("ow_zone_colour_open") === "true";
+    zoneColourBody.style.display = isOpen ? "" : "none";
+    if (zoneColourChevron) zoneColourChevron.style.transform = isOpen ? "rotate(180deg)" : "";
+    zoneColourToggle.onclick = () => {
+      const open = zoneColourBody.style.display === "none";
+      zoneColourBody.style.display = open ? "" : "none";
+      if (zoneColourChevron) zoneColourChevron.style.transform = open ? "rotate(180deg)" : "";
+      localStorage.setItem("ow_zone_colour_open", open);
+    };
+  }
+
   document.getElementById("settingsSaveColoursYamlLink")?.addEventListener("click", e => {
     e.preventDefault();
     saveYaml("coloursSaveStatus");
