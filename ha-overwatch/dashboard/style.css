@@ -468,6 +468,38 @@ display: flex;
   font-size: 13px;
 }
 
+/* Dark-themed select for zone editor (floor selector etc.) */
+.zones-editor select {
+  background: rgba(30, 30, 30, 0.97);
+  color: #fff;
+  border: 1px solid rgba(255,255,255,0.14);
+  border-radius: 8px;
+  padding: 5px 8px;
+  font-size: 12px;
+  cursor: pointer;
+  outline: none;
+  -webkit-appearance: none;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='rgba(255,255,255,0.4)'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  padding-right: 24px;
+}
+
+.zones-editor select option {
+  background: #1e1e1e;
+  color: #fff;
+}
+
+.zones-editor select:focus {
+  border-color: rgba(0,150,255,0.5);
+  box-shadow: 0 0 0 2px rgba(0,150,255,0.15);
+}
+
+#editorFloorSelect {
+  width: 100%;
+}
+
 .zones-editor-row {
   display: flex;
   align-items: center;
