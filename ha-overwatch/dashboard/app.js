@@ -854,11 +854,16 @@ function fitPanelToContainer(idx) {
 }
 
 function setActivePanel(idx) {
+  // Click same panel again = deselect
+  if (activePanelIdx === idx && document.querySelector('.floor-panel.fp-active')) {
+    activePanelIdx = -1;
+    document.querySelectorAll('.floor-panel').forEach(el => el.classList.remove('fp-active'));
+    return;
+  }
   activePanelIdx = idx;
   document.querySelectorAll('.floor-panel').forEach((el, i) => {
     el.classList.toggle('fp-active', i === idx);
   });
-  // Sync sidebar zoom/reset label if needed
 }
 
 // Render zones onto a specific panel's SVG
@@ -886,7 +891,14 @@ function renderPanelZones(idx) {
   const savedFloorId = activeFloorId;
   try {
     activeFloorId = floor.id;
+    const beforeCount = panelSvg.childNodes.length;
     _renderZonesInternal(panelSvg);
+    const afterCount = panelSvg.childNodes.length;
+    if (afterCount === 0 && zones.length > 0) {
+      console.warn(`[OW] Panel ${idx}: 0 elements rendered (${zones.length} zones, floor=${floor.id}, activeFloorId=${activeFloorId}, haConnected=${haConnected})`);
+    } else {
+      console.debug(`[OW] Panel ${idx}: rendered ${afterCount} SVG elements`);
+    }
   } finally {
     activeFloorId = savedFloorId;
   }
@@ -911,9 +923,10 @@ function bindPanelInteraction(idx) {
   panelEl.addEventListener('pointerdown', e => {
     if (e.button !== 0 && e.pointerType === 'mouse') return;
     if (e.target.closest('.zone-handle, .floor-panel-handle')) return;
+    e.preventDefault(); // stop browser image drag
     panning  = true;
-    // Store offset the same way as single-panel bindPan
     panStart = { x: e.clientX - PANEL_ZOOMS[idx].x, y: e.clientY - PANEL_ZOOMS[idx].y };
+    panelEl.setPointerCapture(e.pointerId);
   });
 
   panelEl.addEventListener('pointermove', e => {
@@ -1013,7 +1026,8 @@ function applyFloorPanels() {
     const panelDiv = document.createElement('div');
     panelDiv.className = 'floor-panel' + (i === activePanelIdx ? ' fp-active' : '');
     panelDiv.dataset.panelIdx = i;
-    panelDiv.style.cssText = 'flex:1;position:relative;overflow:hidden;min-width:0;min-height:0;';
+    panelDiv.style.cssText = 'flex:1;position:relative;overflow:hidden;min-width:0;min-height:0;user-select:none;-webkit-user-select:none;touch-action:none;';
+    panelDiv.setAttribute('draggable', 'false');
 
     // Floor label — hidden if user disabled it
     const label = document.createElement('div');
@@ -1065,39 +1079,48 @@ function applyFloorPanels() {
   if (n === 2) {
     const handle = document.createElement('div');
     handle.className = 'floor-panel-handle';
+    // Wider hit area — 8px visible, pointer events on full area
     handle.style.cssText = dir === 'v'
-      ? 'height:6px;width:100%;cursor:row-resize;background:rgba(255,255,255,0.06);flex-shrink:0;z-index:10;'
-      : 'width:6px;height:100%;cursor:col-resize;background:rgba(255,255,255,0.06);flex-shrink:0;z-index:10;';
-    // Insert between the two panels
+      ? 'height:8px;width:100%;cursor:row-resize;background:rgba(255,255,255,0.08);flex-shrink:0;z-index:10;display:flex;align-items:center;justify-content:center;'
+      : 'width:8px;height:100%;cursor:col-resize;background:rgba(255,255,255,0.08);flex-shrink:0;z-index:10;display:flex;align-items:center;justify-content:center;';
+    // Visual indicator dot
+    const dot = document.createElement('div');
+    dot.style.cssText = dir === 'v'
+      ? 'width:40px;height:2px;background:rgba(255,255,255,0.25);border-radius:2px;pointer-events:none;'
+      : 'height:40px;width:2px;background:rgba(255,255,255,0.25);border-radius:2px;pointer-events:none;';
+    handle.appendChild(dot);
     container.insertBefore(handle, container.children[1]);
 
-    let dragging = false, startPos = 0;
+    let dragging = false, startPct = 50, startPos = 0;
     handle.addEventListener('pointerdown', e => {
+      e.preventDefault();
+      e.stopPropagation();
       dragging = true;
       handle.setPointerCapture(e.pointerId);
       startPos = dir === 'v' ? e.clientY : e.clientX;
-      handle.style.background = 'rgba(0,150,255,0.5)';
-      e.preventDefault();
+      const panels = container.querySelectorAll('.floor-panel');
+      const total  = dir === 'v' ? container.offsetHeight : container.offsetWidth;
+      const p0Size = dir === 'v' ? panels[0].offsetHeight : panels[0].offsetWidth;
+      startPct = (p0Size / total) * 100;
+      handle.style.background = 'rgba(0,150,255,0.4)';
     });
     handle.addEventListener('pointermove', e => {
       if (!dragging) return;
       const panels = container.querySelectorAll('.floor-panel');
       if (panels.length < 2) return;
-      const total  = dir === 'v' ? container.offsetHeight : container.offsetWidth;
-      const delta  = (dir === 'v' ? e.clientY : e.clientX) - startPos;
-      const p0Size = (dir === 'v' ? panels[0].offsetHeight : panels[0].offsetWidth);
-      const newPct = Math.min(80, Math.max(20, ((p0Size + delta) / total) * 100));
-      panels[0].style.flex = `0 0 ${newPct}%`;
+      const total = dir === 'v' ? container.offsetHeight : container.offsetWidth;
+      const delta = (dir === 'v' ? e.clientY : e.clientX) - startPos;
+      const newPct = Math.min(80, Math.max(20, startPct + (delta / total) * 100));
+      panels[0].style.flex = `0 0 ${newPct.toFixed(1)}%`;
       panels[1].style.flex = '1';
-      // Re-fit both panels after resize
       [0, 1].forEach(i => fitPanelToContainer(i));
     });
     handle.addEventListener('pointerup', () => {
       dragging = false;
-      handle.style.background = 'rgba(255,255,255,0.06)';
+      handle.style.background = 'rgba(255,255,255,0.08)';
     });
-    handle.addEventListener('mouseenter', () => { if (!dragging) handle.style.background = 'rgba(0,150,255,0.3)'; });
-    handle.addEventListener('mouseleave', () => { if (!dragging) handle.style.background = 'rgba(255,255,255,0.06)'; });
+    handle.addEventListener('mouseenter', () => { if (!dragging) handle.style.background = 'rgba(0,150,255,0.25)'; });
+    handle.addEventListener('mouseleave', () => { if (!dragging) handle.style.background = 'rgba(255,255,255,0.08)'; });
   }
 
   mainEl.appendChild(container);
