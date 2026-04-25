@@ -1722,15 +1722,15 @@ function renderZonesEditor() {
           <div class="zones-editor-row"><label>Colour</label>
             <input type="color" id="zoneColorInput" value="${selectedZone.colorHex || '#0096ff'}">
           </div>
-          ${floors.length > 1 ? `
-          <div class="zones-editor-row"><label>Floor</label>
-            <select id="zoneFloorSelect" style="flex:1;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:5px 8px;color:#fff;font-size:12px;">
-              ${floors.map((f, fi) => {
-                const isSelected = selectedZone.floor_id === f.id || (!selectedZone.floor_id && fi === 0);
-                return '<option value="' + f.id + '" ' + (isSelected ? 'selected' : '') + '>' + escapeHtml(f.name) + '</option>';
-              }).join('')}
-            </select>
-          </div>` : ''}
+          ${floors.length > 1 ? (
+            '<div class="zones-editor-row"><label>Floor</label>'
+            + '<select id="zoneFloorSelect" style="flex:1;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:5px 8px;color:#fff;font-size:12px;">'
+            + floors.map((f, fi) => {
+                const sel = selectedZone.floor_id === f.id || (!selectedZone.floor_id && fi === 0);
+                return '<option value="' + f.id + '"' + (sel ? ' selected' : '') + '>' + escapeHtml(f.name) + '</option>';
+              }).join('')
+            + '</select></div>'
+          ) : ''}
           <div class="zones-editor-row" style="align-items:center;gap:8px;">
             <label style="flex:0 0 auto;">Armed</label>
             <label class="zone-toggle-switch">
