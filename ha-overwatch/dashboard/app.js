@@ -1312,7 +1312,18 @@ function renderZones() {
     });
   }
 
+  // Filter to active floor — zones with no floor_id belong to the first floor
+  const currentFloorId = activeFloorId;
+  const isFirstFloor   = !currentFloorId || floors.length === 0 || floors[0]?.id === currentFloorId;
+
   zones.forEach(zone => {
+    // Skip zones not on the active floor
+    const zoneFloor = zone.floor_id;
+    if (currentFloorId && floors.length > 1) {
+      if (zoneFloor && zoneFloor !== currentFloorId) return;
+      if (!zoneFloor && !isFirstFloor) return;
+    }
+
     const pts = zone.points || [];
     if (!pts.length) return;
 
@@ -1589,13 +1600,23 @@ function renderZonesEditor() {
 
   // ── Build left panel zone list with group headers ──────────
   function buildZoneList() {
+    // Only show zones on the active floor
+    const curFloorId = activeFloorId;
+    const firstFloor = !curFloorId || floors.length === 0 || floors[0]?.id === curFloorId;
+    const floorZones = floors.length > 1
+      ? zones.filter(z => z.floor_id === curFloorId || (!z.floor_id && firstFloor))
+      : zones;
+
     const sortedGroups = [...groups].sort((a, b) => (a.name||"").localeCompare(b.name||""));
     const groupedZoneIds = new Set(groups.flatMap(g => g.zone_ids || []));
-    const ungroupedZones = zones.filter(z => !groupedZoneIds.has(z.id))
+    const ungroupedZones = floorZones.filter(z => !groupedZoneIds.has(z.id))
       .sort((a, b) => (a.name||a.id).localeCompare(b.name||b.id));
     let html = "";
 
     sortedGroups.forEach(g => {
+      // Skip groups with no members on current floor
+      const hasFloorMembers = (g.zone_ids || []).some(id => floorZones.find(z => z.id === id));
+      if (floors.length > 1 && !hasFloorMembers) return;
       const gSel = g.id === selectedGroupId;
       const gState = getGroupState(g);
       const gHex    = g.colorHex || "#ff3b30";
@@ -1612,7 +1633,7 @@ function renderZonesEditor() {
         </div>
         <div class="zed-group-members" data-group-id="${g.id}" style="${collapsed ? 'display:none;' : ''}">`;
       const memberZones = (g.zone_ids || [])
-        .map(id => zones.find(zz => zz.id === id))
+        .map(id => floorZones.find(zz => zz.id === id))
         .filter(Boolean)
         .sort((a, b) => (a.name||a.id).localeCompare(b.name||b.id));
       memberZones.forEach(z => { html += buildZoneItem(z, true); });
@@ -1701,6 +1722,15 @@ function renderZonesEditor() {
           <div class="zones-editor-row"><label>Colour</label>
             <input type="color" id="zoneColorInput" value="${selectedZone.colorHex || '#0096ff'}">
           </div>
+          ${floors.length > 1 ? `
+          <div class="zones-editor-row"><label>Floor</label>
+            <select id="zoneFloorSelect" style="flex:1;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:5px 8px;color:#fff;font-size:12px;">
+              ${floors.map((f, fi) => {
+                const isSelected = selectedZone.floor_id === f.id || (!selectedZone.floor_id && fi === 0);
+                return '<option value="' + f.id + '" ' + (isSelected ? 'selected' : '') + '>' + escapeHtml(f.name) + '</option>';
+              }).join('')}
+            </select>
+          </div>` : ''}
           <div class="zones-editor-row" style="align-items:center;gap:8px;">
             <label style="flex:0 0 auto;">Armed</label>
             <label class="zone-toggle-switch">
@@ -1754,7 +1784,7 @@ function renderZonesEditor() {
   container.innerHTML = `
     <div class="zones-editor" style="left:${editorPos.x}px;top:${editorPos.y}px;width:${editorW}px;height:${editorH}px;">
       <div class="zones-editor-titlebar">
-        <h3>Zones</h3>
+        <h3>Zones ${floors.length > 1 ? `<span style="font-size:10px;font-weight:400;color:#666;margin-left:6px;">— ${escapeHtml(activeFloor()?.name || '')}</span>` : ''}</h3>
         <button class="zones-editor-close" id="zonesCloseBtn" title="Close editor">✕</button>
       </div>
       <div class="zed-body">
@@ -1923,6 +1953,15 @@ function renderZonesEditor() {
       selectedZone.colorHex = e.target.value;
       selectedZone.color = hexToRgba(e.target.value, 0.25);
       saveZone(selectedZone); renderZones();
+    });
+
+    document.getElementById("zoneFloorSelect")?.addEventListener("change", e => {
+      selectedZone.floor_id = e.target.value;
+      saveZone(selectedZone);
+      // Refresh HA floor entities now that zone assignment changed
+      const fl = floors.find(f => f.id === e.target.value);
+      if (fl) logEvent("info", `Zone "${selectedZone.name}" assigned to floor "${fl.name}"`, "zone",
+        { zoneName: selectedZone.name, zoneColour: selectedZone.colorHex || "#0096ff" });
     });
 
     document.getElementById("zoneEnabledToggle")?.addEventListener("change", e => {
