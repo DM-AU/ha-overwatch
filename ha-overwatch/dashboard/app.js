@@ -705,24 +705,18 @@ async function loadFloors() {
     const saved = localStorage.getItem("ow_active_floor");
     const match = floors.find(f => f.id === saved);
     activeFloorId = match ? match.id : (floors[0]?.id || null);
-    // If the active floor has a different floorplan than what's currently loaded, swap it
-    // and WAIT for the image to load so initFloorplan gets the correct dimensions
+    // Load the active floor's floorplan image and await it so initFloorplan
+    // gets correct dimensions before renderZones runs
     const floor = activeFloor();
     if (floor?.floorplan) {
       const fp = document.getElementById("floorplanImage");
       if (fp) {
-        const targetSrc = apiPath(floor.floorplan);
-        // Only reload if different from current src (strip cache-busting query strings)
-        const currentBase = fp.src.split("?")[0];
-        const targetBase  = (location.origin + "/" + targetSrc).replace(/\/+/g, "/").replace(":/", "://");
-        if (!currentBase.endsWith(floor.floorplan.replace(/^\//, ""))) {
-          await new Promise(resolve => {
-            fp.onload  = () => { initFloorplan(); resolve(); };
-            fp.onerror = resolve; // don't block init on broken image
-            fp.src = targetSrc + "?v=" + Date.now();
-          });
-          return; // initFloorplan already called above
-        }
+        await new Promise(resolve => {
+          fp.onload  = resolve;
+          fp.onerror = resolve;
+          fp.src = apiPath(floor.floorplan) + "?v=" + Date.now();
+        });
+        initFloorplan();
       }
     }
   } catch { floors = []; }
@@ -1658,7 +1652,8 @@ function renderZonesEditor() {
     sortedGroups.forEach(g => {
       // Skip groups with no members on current floor
       const hasFloorMembers = (g.zone_ids || []).some(id => floorZones.find(z => z.id === id));
-      if (floors.length > 1 && !hasFloorMembers) return;
+      // Always show selected group or groups with no members yet (newly created)
+      if (floors.length > 1 && !hasFloorMembers && g.id !== selectedGroupId && (g.zone_ids || []).length > 0) return;
       const gSel = g.id === selectedGroupId;
       const gState = getGroupState(g);
       const gHex    = g.colorHex || "#ff3b30";
@@ -1742,6 +1737,7 @@ function renderZonesEditor() {
                   <input type="checkbox" class="group-member-chk" data-zone-id="${z.id}" ${inGroup ? "checked" : ""} style="accent-color:#0096ff;">
                   <div class="zone-list-dot" style="background:${z.colorHex || '#0096ff'};width:6px;height:6px;flex-shrink:0;"></div>
                   <span style="font-size:12px;color:${inGroup ? '#fff' : '#888'};">${escapeHtml(z.name || z.id)}</span>
+                  ${floors.length > 1 ? `<span style="font-size:10px;color:#555;margin-left:auto;">${escapeHtml(floors.find(f => f.id === z.floor_id)?.name || floors[0]?.name || '')}</span>` : ''}
                 </label>`;
               }).join("")}
           </div>
@@ -4716,9 +4712,7 @@ async function init() {
 
   await loadZones();
   await loadGroups();
-  await loadFloors();   // sets activeFloorId, loads correct floor image, calls initFloorplan if changed
-  // If loadFloors didn't change the image (same floor as default), init now
-  { const _fp = document.getElementById("floorplanImage"); if (_fp?.complete) initFloorplan(); }
+  await loadFloors();   // sets activeFloorId, loads correct floor image, calls initFloorplan
   bindZonesSvgEvents();
   renderZonesEditor();
   renderZones();
