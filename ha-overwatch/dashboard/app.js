@@ -258,8 +258,8 @@ function applyConfig() {
 
   restartPolling();
 
-  // Re-connect HA if credentials changed — skip if already connected, add-on mode, or mode not yet determined
-  if (!haConnected && isAddonMode === false && uiConfig.ha_url && uiConfig.ha_token) {
+  // Re-connect HA if credentials changed — skip in Direct Mode (backend handles HA), add-on mode, or already connected
+  if (!IS_DIRECT_MODE && !haConnected && isAddonMode === false && uiConfig.ha_url && uiConfig.ha_token) {
     connectHA();
   }
 
@@ -2787,6 +2787,7 @@ function connectHA() {
 }
 
 function scheduleReconnect() {
+  if (IS_DIRECT_MODE) return; // Direct Mode uses poller, not WebSocket reconnect
   if (haReconnectTimer) clearTimeout(haReconnectTimer);
   haReconnectTimer = setTimeout(() => {
     connectHA();
@@ -3556,7 +3557,7 @@ function renderSettingsPanel() {
         } catch { /* non-fatal */ }
       }
       if (haSocket) { haSocket.onclose = null; haSocket.close(); haSocket = null; haConnected = false; }
-      connectHA();
+      if (!IS_DIRECT_MODE) connectHA();
       if (connectStatus) { connectStatus.textContent = "Connecting…"; connectStatus.style.color = "#888"; }
     };
   }
