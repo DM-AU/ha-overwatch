@@ -1828,16 +1828,11 @@ function _renderZonesInternal(targetSvg) {
       fillGroup.setAttribute("style", `filter: drop-shadow(0 0 3px ${grpHex})`);
 
       let hasMembers = false;
-      const inMultiPanelGroup = getNumPanels() > 1 && document.querySelector('.floor-panel');
       (activeGrp.zone_ids || []).forEach(zid => {
         const zone = zones.find(z => z.id === zid);
         if (!zone || !zone.points?.length || zone.hidden) return;
-        // Only filter by floor in single-panel mode
-        if (!inMultiPanelGroup && floors.length > 1) {
-          const zFloor = zone.floor_id;
-          const onActiveFloor = zFloor === _curFloorId || (!zFloor && _isFirstFloor);
-          if (!onActiveFloor) return;
-        }
+        // Filter by floor: zones with floor_id only show on their assigned floor
+        if (floors.length > 1 && zone.floor_id && zone.floor_id !== _curFloorId) return;
         const poly = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
         poly.setAttribute("points", zone.points.map(p => `${p.x},${p.y}`).join(" "));
         fillGroup.appendChild(poly);
@@ -1873,12 +1868,13 @@ function _renderZonesInternal(targetSvg) {
   const inMultiPanel   = getNumPanels() > 1 && document.querySelector('.floor-panel');
 
   zones.forEach(zone => {
-    // Floor filtering — single panel only
-    // In multi-panel mode, show all zones on all panels (coordinate space matches the drawn floor)
     const zoneFloor = zone.floor_id;
-    if (!inMultiPanel && currentFloorId && floors.length > 1) {
+    if (currentFloorId && floors.length > 1) {
+      // Zones with floor_id assigned: only show on their floor's panel
+      // Zones without floor_id: show on all panels (unassigned)
       if (zoneFloor && zoneFloor !== currentFloorId) return;
-      if (!zoneFloor && !isFirstFloor) return;
+      // Unassigned zones: show only on first floor panel in single mode
+      if (!zoneFloor && !isFirstFloor && !inMultiPanel) return;
     }
 
     const pts = zone.points || [];
