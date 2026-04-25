@@ -494,23 +494,30 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  /* ── /ow/reload — tell HA to refresh zone coordinator immediately ── */
+  /* ── /ow/reload — trigger HA to reload ha_overwatch config entries ── */
   if (pathname === "/ow/reload" && req.method === "POST") {
     if (!process.env.SUPERVISOR_TOKEN) { json(res, { ok: false, reason: "not in addon mode" }); return; }
-    // Call HA webhook or service to reload the integration config entry
-    // Simplest: call homeassistant.reload_config_entry via REST
-    const reloadBody = JSON.stringify({ entry_id: "overwatch" });
+    // Use homeassistant.reload_config_entry service — HA finds the entry by domain
+    const reloadBody = JSON.stringify({
+      domain: "homeassistant",
+      service: "reload_config_entry",
+      service_data: { domain: "ha_overwatch" }
+    });
     const haReq = http.request({
       hostname: "supervisor", port: 80,
-      path: "/core/api/config/config_entries/entry/reload",
+      path: "/core/api/services/homeassistant/reload_config_entry",
       method: "POST",
       headers: {
         "Authorization": `Bearer ${process.env.SUPERVISOR_TOKEN}`,
         "Content-Type": "application/json",
         "Content-Length": Buffer.byteLength(reloadBody),
       },
-    }, haRes => { haRes.resume(); json(res, { ok: haRes.statusCode < 300 }); });
-    haReq.on("error", e => json(res, { ok: false, reason: e.message }));
+    }, haRes => {
+      haRes.resume();
+      console.log(`[HA-Overwatch] /ow/reload → HA responded ${haRes.statusCode}`);
+      json(res, { ok: haRes.statusCode < 300 });
+    });
+    haReq.on("error", e => { console.error("[HA-Overwatch] /ow/reload error:", e.message); json(res, { ok: false, reason: e.message }); });
     haReq.write(reloadBody);
     haReq.end();
     return;
@@ -741,7 +748,7 @@ class ZoneCoordinator(DataUpdateCoordinator):
 
     def __init__(self, hass: HomeAssistant, url: str) -> None:
         super().__init__(hass, _LOGGER, name="HA Overwatch Zones",
-            update_interval=timedelta(minutes=5))
+            update_interval=timedelta(seconds=30))
         self.url = url
 
     async def _async_update_data(self) -> dict:
