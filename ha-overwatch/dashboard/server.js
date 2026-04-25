@@ -507,12 +507,17 @@ const server = http.createServer(async (req, res) => {
       const nameSlug = name => (name || '').toLowerCase()
         .replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
 
+      const floors = loadFloors();
       json(res, {
         zones: zones.map(z => ({
           id:       nameSlug(z.name) || z.id,
           name:     z.name || z.id,
           raw_id:   z.id,
           floor_id: z.floor_id || null,
+        })),
+        floors: floors.map(f => ({
+          id:   f.id,
+          name: f.name,
         })),
         groups: groups.map(g => ({
           id:       nameSlug(g.name) || g.id,
@@ -827,11 +832,15 @@ async def async_setup_entry(
         entities.append(OverwatchGroupSwitch(coordinator, g))
     for z in data.get("zones", []):
         entities.append(OverwatchZoneSwitch(coordinator, z))
+    for f in data.get("floors", []):
+        entities.append(OverwatchZoneFloorSwitch(coordinator, f))
     entities.append(OverwatchCameraAllSwitch(coordinator))
     for g in data.get("camera_groups", []):
         entities.append(OverwatchCameraGroupSwitch(coordinator, g))
     for z in data.get("camera_zones", []):
         entities.append(OverwatchCameraZoneSwitch(coordinator, z))
+    for f in data.get("floors", []):
+        entities.append(OverwatchCameraFloorSwitch(coordinator, f))
     for c in data.get("cameras", []):
         entities.append(OverwatchCameraSwitch(coordinator, c))
 
@@ -912,6 +921,26 @@ class OverwatchZoneSwitch(OWSwitch):
             unique_id=f"overwatch_zone_{zid}",
             name=f"Zone: {z.get('name', zid)}",
             icon="mdi:map-marker-radius")
+
+
+class OverwatchZoneFloorSwitch(OWSwitch):
+    def __init__(self, c, f):
+        fid = f["id"]
+        super().__init__(c,
+            entity_id=f"switch.overwatch_zone_floor_{fid}",
+            unique_id=f"overwatch_zone_floor_{fid}",
+            name=f"Zone Floor: {f.get('name', fid)}",
+            icon="mdi:floor-plan")
+
+
+class OverwatchCameraFloorSwitch(OWSwitch):
+    def __init__(self, c, f):
+        fid = f["id"]
+        super().__init__(c,
+            entity_id=f"switch.overwatch_camera_floor_{fid}",
+            unique_id=f"overwatch_camera_floor_{fid}",
+            name=f"Camera Floor: {f.get('name', fid)}",
+            icon="mdi:cctv")
 
 
 class OverwatchCameraAllSwitch(OWSwitch):
@@ -1430,6 +1459,36 @@ function startHAListener() {
         (zone.cameras || []).forEach(camId => {
           const safe = camId.replace(/^camera\./, '').replace(/[^a-z0-9]+/g, '_');
           callHASwitch(`switch.overwatch_camera_${safe}`, on);
+        });
+      }
+      return;
+    }
+
+    // Zone floor → all zones on that floor
+    if (entityId.startsWith('switch.overwatch_zone_floor_')) {
+      const fid = entityId.replace('switch.overwatch_zone_floor_', '');
+      const allZones = loadZones();
+      const floorZones = allZones.filter(z => z.floor_id === fid);
+      if (floorZones.length > 0) {
+        console.log(`[HA-Overwatch] Cascade: zone floor ${fid} → ${on ? 'on' : 'off'} (${floorZones.length} zones)`);
+        floorZones.forEach(z => callHASwitch(`switch.overwatch_zone_${nameSlug(z.name) || z.id}`, on));
+      }
+      return;
+    }
+
+    // Camera floor → all camera zones + cameras on that floor
+    if (entityId.startsWith('switch.overwatch_camera_floor_')) {
+      const fid = entityId.replace('switch.overwatch_camera_floor_', '');
+      const allZones = loadZones();
+      const floorZones = allZones.filter(z => z.floor_id === fid && (z.cameras || []).length > 0);
+      if (floorZones.length > 0) {
+        console.log(`[HA-Overwatch] Cascade: camera floor ${fid} → ${on ? 'on' : 'off'} (${floorZones.length} zones)`);
+        floorZones.forEach(z => {
+          callHASwitch(`switch.overwatch_camera_zone_${nameSlug(z.name) || z.id}`, on);
+          (z.cameras || []).forEach(camId => {
+            const safe = camId.replace(/^camera\./, '').replace(/[^a-z0-9]+/g, '_');
+            callHASwitch(`switch.overwatch_camera_${safe}`, on);
+          });
         });
       }
       return;

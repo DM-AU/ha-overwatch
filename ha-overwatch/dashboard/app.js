@@ -2859,6 +2859,28 @@ function connectHA() {
           }
         }
 
+        // When a ZONE floor switch changes, cascade to all zones on that floor
+        if (data.entity_id.startsWith("switch.overwatch_zone_floor_")) {
+          const on = (data.new_state.state || "").toLowerCase() !== "off";
+          const fid = data.entity_id.replace("switch.overwatch_zone_floor_", "");
+          zones.filter(z => z.floor_id === fid).forEach(z => {
+            owCallSwitch(`switch.overwatch_zone_${zoneSlug(z)}`, on);
+          });
+        }
+
+        // When a CAMERA floor switch changes, cascade to zones + cameras on that floor
+        if (data.entity_id.startsWith("switch.overwatch_camera_floor_")) {
+          const on = (data.new_state.state || "").toLowerCase() !== "off";
+          const fid = data.entity_id.replace("switch.overwatch_camera_floor_", "");
+          zones.filter(z => z.floor_id === fid && (z.cameras || []).length > 0).forEach(z => {
+            owCallSwitch(`switch.overwatch_camera_zone_${nameSlug(z.name) || z.id}`, on);
+            (z.cameras || []).forEach(camId => {
+              const safe = camId.replace(/^camera\./, '').replace(/[^a-z0-9]+/g, '_');
+              owCallSwitch(`switch.overwatch_camera_${safe}`, on);
+            });
+          });
+        }
+
         // When camera_all changes in HA, cascade to all zones and cameras
         if (data.entity_id === "switch.overwatch_camera_all") {
           const on = (data.new_state.state || "").toLowerCase() !== "off";
