@@ -918,7 +918,7 @@ function bindPanelInteraction(idx) {
   });
 
   panelEl.addEventListener('pointermove', e => {
-    if (!panning) return;
+    if (!panning || e.buttons !== 1) return;
     PANEL_ZOOMS[idx].x = e.clientX - panStart.x;
     PANEL_ZOOMS[idx].y = e.clientY - panStart.y;
     applyPanelTransform(idx);
@@ -3924,12 +3924,12 @@ function renderSettingsPanel() {
                 const autoOn     = localStorage.getItem('ow_auto_floor') === 'true';
                 const subStyle   = autoOn ? '' : 'opacity:0.4;pointer-events:none;';
                 return mpNote
-                  + '<div style="' + disStyle + 'display:flex;flex-direction:column;gap:8px;">'
+                return mpNote
+                  + '<div style="display:flex;flex-direction:column;gap:8px;">'
                   + '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;">'
                   + '<input type="checkbox" id="hideFloorLabelChk" ' + (localStorage.getItem('ow_hide_floor_label')==='true' ? 'checked' : '') + '>'
                   + '<span>Hide floor name label on panels</span></label>'
-                  + '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;">'
-                  + '<input type="checkbox" id="camFloorOnlyChk" ' + (localStorage.getItem('ow_cam_floor_only')==='true' ? 'checked' : '') + (multiPanel ? ' disabled' : '') + '>'
+                  + '<div style="' + disStyle + 'display:flex;flex-direction:column;gap:8px;">'
                   + '<span>Show cameras for current floor only</span></label>'
                   + '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;">'
                   + '<input type="checkbox" id="autoFloorChk" ' + (autoOn ? 'checked' : '') + (multiPanel ? ' disabled' : '') + '>'
@@ -3946,7 +3946,7 @@ function renderSettingsPanel() {
                   + '<div style="display:flex;align-items:center;gap:8px;">'
                   + '<label style="flex:1;font-size:12px;">Return-to-default cooldown (s)</label>'
                   + '<input type="number" id="floorReturnChk" min="5" max="600" value="' + (localStorage.getItem('ow_floor_return_secs')||'60') + '" style="width:60px;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:4px 8px;color:#fff;font-size:12px;"></div>'
-                  + '</div></div>';
+                  + '</div></div></div>';
               })()
           }
         </div>
