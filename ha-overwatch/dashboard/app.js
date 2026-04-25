@@ -891,13 +891,17 @@ function renderPanelZones(idx) {
   const savedFloorId = activeFloorId;
   try {
     activeFloorId = floor.id;
-    const beforeCount = panelSvg.childNodes.length;
+    const triggeredZones = zones.filter(z => {
+      const s = getZoneState(z);
+      return s === 'triggered' || s === 'fault';
+    });
     _renderZonesInternal(panelSvg);
     const afterCount = panelSvg.childNodes.length;
-    if (afterCount === 0 && zones.length > 0) {
-      console.warn(`[OW] Panel ${idx}: 0 elements rendered (${zones.length} zones, floor=${floor.id}, activeFloorId=${activeFloorId}, haConnected=${haConnected})`);
+    if (triggeredZones.length > 0 && afterCount < 2) {
+      console.warn(`[OW] Panel ${idx}: ${afterCount} SVG elements but ${triggeredZones.length} triggered zones! haConnected=${haConnected}, floor=${floor.id}, activeFloorId=${activeFloorId}`);
+      triggeredZones.forEach(z => console.warn(`  Zone: ${z.name}, floor_id=${z.floor_id}, pts=${(z.points||[]).length}, state=${getZoneState(z)}`));
     } else {
-      console.debug(`[OW] Panel ${idx}: rendered ${afterCount} SVG elements`);
+      console.debug(`[OW] Panel ${idx}: ${afterCount} SVG elements (${triggeredZones.length} triggered)`);
     }
   } finally {
     activeFloorId = savedFloorId;
