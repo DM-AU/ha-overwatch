@@ -899,6 +899,8 @@ function renderPanelZones(idx) {
     const afterCount = panelSvg.childNodes.length;
     if (triggeredZones.length > 0 && afterCount < 2) {
       console.warn(`[OW] Panel ${idx}: ${afterCount} SVG elements but ${triggeredZones.length} triggered zones! haConnected=${haConnected}, floor=${floor.id}, activeFloorId=${activeFloorId}`);
+      const wrapper = getPanelWrapper(idx);
+      console.warn(`  Wrapper transform: "${wrapper?.style.transform}", SVG viewBox: "${panelSvg.getAttribute('viewBox')}", children: ${panelSvg.childNodes.length}`);
       triggeredZones.forEach(z => console.warn(`  Zone: ${z.name}, floor_id=${z.floor_id}, pts=${(z.points||[]).length}, state=${getZoneState(z)}`));
     } else {
       console.debug(`[OW] Panel ${idx}: ${afterCount} SVG elements (${triggeredZones.length} triggered)`);
@@ -918,24 +920,21 @@ function bindPanelInteraction(idx) {
   const panelEl = getPanelEl(idx);
   if (!panelEl) return;
 
-  // Select panel on click
-  panelEl.addEventListener('pointerdown', () => setActivePanel(idx), { capture: true, passive: true });
+  // Select panel on click — not passive so preventDefault works in pan handler
+  panelEl.addEventListener('pointerdown', e => { setActivePanel(idx); }, { capture: true });
 
-  // Pan — click and hold to drag, same approach as single-panel bindPan
+  // Pan
   let panning = false, panStart = null;
 
   panelEl.addEventListener('pointerdown', e => {
     if (e.button !== 0 && e.pointerType === 'mouse') return;
     if (e.target.closest('.zone-handle, .floor-panel-handle')) return;
-    e.preventDefault(); // stop browser image drag
     panning  = true;
     panStart = { x: e.clientX - PANEL_ZOOMS[idx].x, y: e.clientY - PANEL_ZOOMS[idx].y };
     panelEl.setPointerCapture(e.pointerId);
   });
 
   panelEl.addEventListener('pointermove', e => {
-    // For mouse: e.buttons===1 means left button physically held
-    // For touch/pen: always allow if panning flag is set
     if (!panning) return;
     if (e.pointerType === 'mouse' && e.buttons !== 1) { panning = false; return; }
     PANEL_ZOOMS[idx].x = e.clientX - panStart.x;
@@ -945,7 +944,6 @@ function bindPanelInteraction(idx) {
 
   panelEl.addEventListener('pointerup',    () => { panning = false; });
   panelEl.addEventListener('pointercancel',() => { panning = false; });
-
   // Scroll zoom — always applies to hovered panel regardless of selection
   panelEl.addEventListener('wheel', e => {
     e.preventDefault();
@@ -1048,6 +1046,8 @@ function applyFloorPanels() {
     img.className = 'fp-img';
     img.style.cssText = 'display:block;user-select:none;pointer-events:none;max-width:none;';
     const imgSrc = floor?.floorplan ? apiPath(floor.floorplan) : 'img/floorplan.png';
+    // Use floor ID as cache key so image only reloads when floor changes, not every render
+    const imgCacheKey = floor?.id || 'default';
 
     // SVG
     const svg = document.createElement('svg');
@@ -1075,7 +1075,7 @@ function applyFloorPanels() {
         renderPanelZones(panelIdx);
       });
     };
-    img.src = imgSrc + '?v=' + Date.now();
+    img.src = imgSrc + '?v=' + imgCacheKey;
   }
 
   // Add draggable resize handle between panels
