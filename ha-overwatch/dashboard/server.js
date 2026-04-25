@@ -1188,6 +1188,17 @@ function startHAListener() {
       }
       onStateChanged(entity_id, new_state.state || "");
     }
+
+    // Log a heartbeat every 50 events so we can confirm events are flowing
+    if (msg.type === "event") {
+      haListenerEventCount = (haListenerEventCount || 0) + 1;
+      if (haListenerEventCount === 1) {
+        console.log(`[HA-Overwatch] HA listener: first state_changed event received`);
+      }
+      if (haListenerEventCount % 50 === 0) {
+        console.log(`[HA-Overwatch] HA listener: ${haListenerEventCount} events received`);
+      }
+    }
   }
 
   function onStateChanged(entityId, state) {
