@@ -64,12 +64,25 @@ async function camSetEnabled(type, key, state) {
   }
   // Server mode — call HA switch service via app.js sendHA (shared id counter, no collision)
   if (!window.OW) return;
+
+  // Resolve name slugs from OW.zones/groups — entity IDs use zone.name not zone.id
+  const owZones  = window.OW.zones  || [];
+  const owGroups = window.OW.groups || [];
+  function zoneNameSlug(zid) {
+    const z = owZones.find(z => z.id === zid);
+    return z ? nameSlug(z.name) : nameSlug(zid);
+  }
+  function groupNameSlug(gid) {
+    const g = owGroups.find(g => g.id === gid);
+    return g ? nameSlug(g.name) : nameSlug(gid);
+  }
+
   const entityMap = {
     'all':          'switch.overwatch_camera_all',
     'camera_all':   'switch.overwatch_camera_all',
-    'camera_group': `switch.overwatch_camera_group_${key}`,
-    'camera_zone':  `switch.overwatch_camera_zone_${nameSlug(key) || key}`,
-    'zone':         `switch.overwatch_camera_zone_${nameSlug(key) || key}`,
+    'camera_group': `switch.overwatch_camera_group_${groupNameSlug(key)}`,
+    'camera_zone':  `switch.overwatch_camera_zone_${zoneNameSlug(key)}`,
+    'zone':         `switch.overwatch_camera_zone_${zoneNameSlug(key)}`,
     'camera':       `switch.overwatch_camera_${key.replace(/^camera\./, '').replace(/[^a-z0-9]+/g, '_')}`,
   };
   const entityId = entityMap[type];
