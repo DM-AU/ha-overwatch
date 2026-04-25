@@ -858,46 +858,33 @@ function setActivePanel(idx) {
 
 // Render zones onto a specific panel's SVG
 function renderPanelZones(idx) {
-  const svg   = getPanelSvg(idx);
-  const floor = getPanelFloor(idx);
-  if (!svg || !floor) return;
-
-  // Temporarily swap globals so renderZones() draws to this panel
-  const origSvgId = 'zonesSvg';
-  svg.id = origSvgId + '_tmp_' + idx;
-
-  // Build a filtered zone list for this floor
-  const fi         = floors.indexOf(floor);
-  const isFirst    = fi === 0;
-  const panelZones = zones.filter(z => z.floor_id === floor.id || (!z.floor_id && isFirst));
-
-  // Clear and redraw
-  while (svg.firstChild) svg.removeChild(svg.firstChild);
+  const panelSvg = getPanelSvg(idx);
+  const floor    = getPanelFloor(idx);
+  if (!panelSvg || !floor) return;
 
   const img = getPanelImg(idx);
   if (!img?.naturalWidth) return;
 
-  svg.setAttribute('width',   img.naturalWidth);
-  svg.setAttribute('height',  img.naturalHeight);
-  svg.setAttribute('viewBox', `0 0 ${img.naturalWidth} ${img.naturalHeight}`);
+  // Clear
+  while (panelSvg.firstChild) panelSvg.removeChild(panelSvg.firstChild);
+  panelSvg.setAttribute('width',   img.naturalWidth);
+  panelSvg.setAttribute('height',  img.naturalHeight);
+  panelSvg.setAttribute('viewBox', `0 0 ${img.naturalWidth} ${img.naturalHeight}`);
 
-  // Render each zone manually using the same drawing logic as renderZones
-  // We temporarily override activeFloorId so getZoneState works per-panel
+  // Temporarily set activeFloorId and swap the SVG the renderer uses.
+  // try/finally guarantees restoration even if renderZones throws.
   const savedFloorId = activeFloorId;
-  activeFloorId = floor.id;
-
-  // Patch zonesSvg reference temporarily
-  const realSvg = document.getElementById('zonesSvg');
-  // Swap svg id so renderZones draws here
-  if (realSvg) realSvg.id = '__zonesSvg_hidden__';
-  svg.id = 'zonesSvg';
-
-  renderZones(); // draws into this svg
-
-  // Restore
-  svg.id = 'fp-svg-' + idx;
-  if (realSvg) realSvg.id = 'zonesSvg';
-  activeFloorId = savedFloorId;
+  const realSvg      = document.getElementById('zonesSvg');
+  try {
+    activeFloorId = floor.id;
+    if (realSvg)   realSvg.id   = '__ow_svg_hidden__';
+    panelSvg.id = 'zonesSvg';
+    _renderZonesInternal();
+  } finally {
+    panelSvg.id = 'fp-svg-' + idx;
+    if (realSvg) realSvg.id = 'zonesSvg';
+    activeFloorId = savedFloorId;
+  }
 }
 
 function renderAllPanelZones() {
@@ -1061,6 +1048,45 @@ function applyFloorPanels() {
       renderPanelZones(panelIdx);
     };
     img.src = imgSrc + '?v=' + Date.now();
+  }
+
+  // Add draggable resize handle between panels
+  if (n === 2) {
+    const handle = document.createElement('div');
+    handle.className = 'floor-panel-handle';
+    handle.style.cssText = dir === 'v'
+      ? 'height:6px;width:100%;cursor:row-resize;background:rgba(255,255,255,0.06);flex-shrink:0;z-index:10;'
+      : 'width:6px;height:100%;cursor:col-resize;background:rgba(255,255,255,0.06);flex-shrink:0;z-index:10;';
+    // Insert between the two panels
+    container.insertBefore(handle, container.children[1]);
+
+    let dragging = false, startPos = 0;
+    handle.addEventListener('pointerdown', e => {
+      dragging = true;
+      handle.setPointerCapture(e.pointerId);
+      startPos = dir === 'v' ? e.clientY : e.clientX;
+      handle.style.background = 'rgba(0,150,255,0.5)';
+      e.preventDefault();
+    });
+    handle.addEventListener('pointermove', e => {
+      if (!dragging) return;
+      const panels = container.querySelectorAll('.floor-panel');
+      if (panels.length < 2) return;
+      const total  = dir === 'v' ? container.offsetHeight : container.offsetWidth;
+      const delta  = (dir === 'v' ? e.clientY : e.clientX) - startPos;
+      const p0Size = (dir === 'v' ? panels[0].offsetHeight : panels[0].offsetWidth);
+      const newPct = Math.min(80, Math.max(20, ((p0Size + delta) / total) * 100));
+      panels[0].style.flex = `0 0 ${newPct}%`;
+      panels[1].style.flex = '1';
+      // Re-fit both panels after resize
+      [0, 1].forEach(i => fitPanelToContainer(i));
+    });
+    handle.addEventListener('pointerup', () => {
+      dragging = false;
+      handle.style.background = 'rgba(255,255,255,0.06)';
+    });
+    handle.addEventListener('mouseenter', () => { if (!dragging) handle.style.background = 'rgba(0,150,255,0.3)'; });
+    handle.addEventListener('mouseleave', () => { if (!dragging) handle.style.background = 'rgba(255,255,255,0.06)'; });
   }
 
   mainEl.appendChild(container);
@@ -1725,7 +1751,12 @@ function renderZones() {
     renderAllPanelZones();
     return;
   }
+  _renderZonesInternal();
+}
 
+// Internal zone drawing — draws into whatever element currently has id="zonesSvg"
+// Called by renderZones() (single panel) and renderPanelZones() (multi-panel via ID swap)
+function _renderZonesInternal() {
   const svg = document.getElementById("zonesSvg");
   if (!svg) return;
   while (svg.firstChild) svg.removeChild(svg.firstChild);
@@ -3862,7 +3893,6 @@ function renderSettingsPanel() {
         </div>
 
         <div class="settings-section">
-        <div class="settings-section">
           <div class="settings-section-title">Floor Settings ${perDeviceBadge}</div>
           ${floors.length <= 1
             ? '<div style="font-size:11px;color:#666;">Add multiple floors in the Zones tab to enable floor settings.</div>'
@@ -3875,10 +3905,10 @@ function renderSettingsPanel() {
                 return mpNote
                   + '<div style="' + disStyle + 'display:flex;flex-direction:column;gap:8px;">'
                   + '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;">'
-                  + '<input type="checkbox" id="camFloorOnlyChk" ' + (localStorage.getItem('ow_cam_floor_only')==='true' ? 'checked' : '') + '>'
+                  + '<input type="checkbox" id="camFloorOnlyChk" ' + (localStorage.getItem('ow_cam_floor_only')==='true' ? 'checked' : '') + (multiPanel ? ' disabled' : '') + '>'
                   + '<span>Show cameras for current floor only</span></label>'
                   + '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;">'
-                  + '<input type="checkbox" id="autoFloorChk" ' + (autoOn ? 'checked' : '') + '>'
+                  + '<input type="checkbox" id="autoFloorChk" ' + (autoOn ? 'checked' : '') + (multiPanel ? ' disabled' : '') + '>'
                   + '<span>Auto-switch floor on motion</span></label>'
                   + '<div style="padding-left:24px;display:flex;flex-direction:column;gap:6px;' + subStyle + '">'
                   + '<div style="display:flex;align-items:center;gap:8px;">'
