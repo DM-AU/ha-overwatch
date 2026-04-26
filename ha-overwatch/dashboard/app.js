@@ -1106,9 +1106,18 @@ function bindPanelInteraction(idx) {
 
   // Pin placement — intercept click on the panel SVG when in placing mode
   panelEl.addEventListener('click', e => {
+    // Live mode: zone polygon click opens popup
+    if (!editorMode && e.target.classList?.contains('zone-polygon')) {
+      const zoneId = e.target.dataset?.zoneId;
+      const zone   = zones.find(z => z.id === zoneId);
+      if (zone && !zone.hidden) {
+        openZonePopup(zoneId, e.clientX, e.clientY);
+        e.stopPropagation();
+        return;
+      }
+    }
     if (!placingPinType) return;
     e.stopPropagation();
-    // Convert screen coords to floorplan coords for this panel
     const panelSvg = getPanelSvg(idx);
     if (!panelSvg) return;
     const rect = panelSvg.getBoundingClientRect();
@@ -3933,10 +3942,21 @@ function bindZonesSvgEvents() {
   if (!svg) return;
 
   svg.addEventListener("pointerdown", e => {
-    if (!editorMode) return;
     const target = e.target;
     const sx = e.clientX, sy = e.clientY;
     const fp = screenToFloorplan(sx, sy);
+
+    // In live mode — only handle zone polygon clicks (open popup)
+    if (!editorMode) {
+      if (target.classList.contains("zone-polygon")) {
+        const zoneId = target.dataset.zoneId;
+        const zone   = zones.find(z => z.id === zoneId);
+        if (zone?.hidden) { e.stopPropagation(); return; }
+        openZonePopup(zoneId, e.clientX, e.clientY);
+        e.stopPropagation();
+      }
+      return;
+    }
 
     // 0) Place a new light/siren pin
     if (placingPinType) {
