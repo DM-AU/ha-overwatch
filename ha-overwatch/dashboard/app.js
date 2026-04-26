@@ -97,8 +97,9 @@ let zones = [];
 let groups = [];          // Zone groups
 let floors = [];          // Floor definitions [{id, name, floorplan}]
 let activeFloorId = null; // Currently displayed floor id
-let lights = [];          // Map light pins [{id, name, entity_id, floor_id, x, y, direction}]
-let sirens = [];          // Map siren pins [{id, name, entity_id, floor_id, x, y}]
+let lights     = [];      // Map light pins [{id, name, entity_id, floor_id, x, y, direction}]
+let sirens     = [];      // Map siren pins [{id, name, entity_id, floor_id, x, y}]
+let cameraPins = [];      // Map camera pins [{id, name, entity_id, floor_id, x, y}]
 
 // Multi-panel state
 let activePanelIdx = 0;   // Which floor panel is "selected" (zoom/reset target)
@@ -766,7 +767,23 @@ async function deleteSiren(id) {
   await fetch(apiPath("ow/delete-siren"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id }) });
 }
 
-// Toggle light/siren entity via HA service call
+/* ─── CAMERA PINS ─────────────────────────────────────────── */
+async function loadCameraPins() {
+  try {
+    const res = await fetch(apiPath("ow/camera-pins") + "?v=" + Date.now());
+    cameraPins = res.ok ? await res.json() : [];
+  } catch { cameraPins = []; }
+}
+async function saveCameraPin(pin) {
+  await fetch(apiPath("ow/save-camera-pin"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(pin) });
+  try { const h = await fetch(apiPath("ow/health"),{cache:"no-store"}); const d = await h.json(); if(d.dataVersion) _lastDataVersion = d.dataVersion; } catch{}
+}
+async function deleteCameraPin(id) {
+  cameraPins = cameraPins.filter(p => p.id !== id);
+  await fetch(apiPath("ow/delete-camera-pin"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id }) });
+}
+
+
 function togglePinEntity(entityId, pinId) {
   if (!entityId) return;
   // Check if this pin is set to toggle all zone lights
@@ -2312,8 +2329,9 @@ function makeDraggableEditor(containerEl) {
 /* ─── PIN RENDERING (LIGHTS & SIRENS) ────────────────────── */
 // panelIdx: undefined = single panel, number = multi-panel index
 function renderPins(panelIdx) {
-  const hideLights = localStorage.getItem('ow_hide_lights') === 'true';
-  const hideSirens = localStorage.getItem('ow_hide_sirens') === 'true';
+  const hideLights  = localStorage.getItem('ow_hide_lights')   === 'true';
+  const hideSirens  = localStorage.getItem('ow_hide_sirens')   === 'true';
+  const hideCameras = localStorage.getItem('ow_hide_cam_pins') === 'true';
 
   // Determine SVG and floor context
   let svg, floorId, isFirst;
@@ -2358,10 +2376,18 @@ function renderPins(panelIdx) {
     sirens.forEach(pin => {
       if (!pinOnFloor(pin)) return;
       const sirenState = haStates[pin.entity_id]?.state;
-      // Siren entities often report 'unknown' — track toggle state locally
       const isOn   = sirenState === 'on' || (sirenState === 'unknown' && pin._localOn);
       const isEdit = editorMode && activePinType === 'siren' && activePinId === pin.id;
       svg.appendChild(makeSirenPin(pin, isOn || isEdit, isEdit, scale));
+    });
+  }
+
+  // Render camera pins
+  if (!hideCameras) {
+    cameraPins.forEach(pin => {
+      if (!pinOnFloor(pin)) return;
+      const isEdit = editorMode && activePinType === 'camera' && activePinId === pin.id;
+      svg.appendChild(makeCameraPin(pin, isEdit, scale));
     });
   }
 }
@@ -2587,11 +2613,64 @@ function makeSirenPin(pin, isOn, isEdit, scale) {
   return g;
 }
 
-let activePinType = null; // 'light' | 'siren' | null
+function makeCameraPin(pin, isEdit, scale) {
+  const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  g.setAttribute('data-pin', 'camera');
+  g.setAttribute('data-pin-id', pin.id);
+  g.style.cursor = 'pointer';
+  g.style.pointerEvents = 'all';
+
+  const R  = 14 / scale;
+  const cx = pin.x, cy = pin.y;
+
+  // Background circle
+  const bg = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+  bg.setAttribute('cx', cx); bg.setAttribute('cy', cy); bg.setAttribute('r', R * 0.9);
+  bg.setAttribute('fill', 'rgba(0,0,0,0.55)');
+  bg.setAttribute('stroke', isEdit ? '#0096ff' : 'rgba(100,180,255,0.5)');
+  bg.setAttribute('stroke-width', String((isEdit ? 2.5 : 1.2) / scale));
+  g.appendChild(bg);
+
+  // Camera icon — simple geometric: rectangle body + circle lens
+  const iconS = R / 10;
+  const iconG = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  iconG.setAttribute('transform', `translate(${cx},${cy}) scale(${iconS})`);
+  const mk = (tag, attrs) => {
+    const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    Object.entries(attrs).forEach(([k,v]) => el.setAttribute(k,v));
+    return el;
+  };
+  // Camera body
+  iconG.appendChild(mk('rect', {x:'-7',y:'-4',width:'14',height:'10',rx:'2',fill:'none',stroke:'#64b4ff','stroke-width':'1.5'}));
+  // Lens
+  iconG.appendChild(mk('circle', {cx:'0',cy:'1',r:'3.2',fill:'none',stroke:'#64b4ff','stroke-width':'1.5'}));
+  // Viewfinder bump on top-left
+  iconG.appendChild(mk('rect', {x:'-5',y:'-7',width:'4',height:'3',rx:'1',fill:'#64b4ff'}));
+  g.appendChild(iconG);
+
+  // Interaction
+  if (editorMode) {
+    makePinDraggable(g, pin, 'camera');
+  } else {
+    let _moved = false;
+    g.addEventListener('pointerdown', e => { _moved = false; e.stopPropagation(); });
+    g.addEventListener('pointermove', e => { if (Math.hypot(e.movementX, e.movementY) > 2) _moved = true; });
+    g.addEventListener('pointerup', e => {
+      e.stopPropagation();
+      if (!_moved && pin.entity_id && window.openCameraModal) {
+        window.openCameraModal(pin.entity_id);
+      }
+    });
+  }
+
+  return g;
+}
+
+let activePinType = null; // 'light' | 'siren' | 'camera' | null
 let activePinId   = null;
-let placingPinType  = null; // 'light' | 'siren' — click-to-place mode
-let placingEntityId = null; // entity_id being placed
-let placingZoneId   = null; // zone the entity belongs to
+let placingPinType  = null; // 'light' | 'siren' | 'camera' — click-to-place mode
+let placingEntityId = null;
+let placingZoneId   = null;
 let _activeZoneTab  = 'sensors'; // persists across renderZonesEditor re-renders
 
 function selectPin(type, id) {
@@ -2622,16 +2701,17 @@ function placePinAtFloorplanCoord(x, y, floorId) {
   const pinFloor = zone?.floor_id || floorId || activeFloorId || null;
 
   const pin = {
-    id:        (type === 'light' ? 'light_' : 'siren_') + Date.now(),
-    name:      entityId.split('.').pop() || (type === 'light' ? 'New Light' : 'New Siren'),
+    id:        (type === 'light' ? 'light_' : type === 'siren' ? 'siren_' : 'campin_') + Date.now(),
+    name:      entityId.split('.').pop() || (type === 'light' ? 'New Light' : type === 'siren' ? 'New Siren' : 'New Camera'),
     entity_id: entityId,
     floor_id:  pinFloor,
     x:         Math.round(x),
     y:         Math.round(y),
     direction: null,
   };
-  if (type === 'light') { lights.push(pin); saveLight(pin); selectPin('light', pin.id); }
-  else                  { sirens.push(pin); saveSiren(pin); selectPin('siren', pin.id); }
+  if (type === 'light')  { lights.push(pin);      saveLight(pin);      selectPin('light',  pin.id); }
+  else if (type === 'siren') { sirens.push(pin);  saveSiren(pin);      selectPin('siren',  pin.id); }
+  else                   { cameraPins.push(pin);  saveCameraPin(pin);  selectPin('camera', pin.id); }
   renderZones(); renderZonesEditor();
 }
 
@@ -2680,7 +2760,8 @@ function makePinDraggable(g, pin, type) {
     g.removeAttribute('transform');
     if (hasMoved) {
       if (type === 'light') saveLight(pin);
-      else saveSiren(pin);
+      else if (type === 'siren') saveSiren(pin);
+      else saveCameraPin(pin);
       renderZones();
     } else {
       e.stopPropagation(); // prevent SVG empty-canvas handler from clearing activePinId
@@ -2813,16 +2894,19 @@ function renderZonesEditor() {
     </div>`;
   }
 
-  // ── Build pin right panel (light or siren) ─────────────────
+  // ── Build pin right panel (light, siren or camera) ──────────
   function buildPinRightPanel() {
     const pin = activePinType === 'light'
       ? lights.find(p => p.id === activePinId)
-      : sirens.find(p => p.id === activePinId);
+      : activePinType === 'siren'
+      ? sirens.find(p => p.id === activePinId)
+      : cameraPins.find(p => p.id === activePinId);
     if (!pin) return '';
 
-    const isLight = activePinType === 'light';
-    const label   = isLight ? 'Light' : 'Siren';
-    const icon    = isLight ? '💡' : '🔊';
+    const isLight  = activePinType === 'light';
+    const isCamera = activePinType === 'camera';
+    const label    = isLight ? 'Light' : isCamera ? 'Camera' : 'Siren';
+    const icon     = isLight ? '💡'   : isCamera ? '📷'     : '🔊';
 
     return `
       <div class="zed-right-content">
@@ -2834,7 +2918,7 @@ function renderZonesEditor() {
         <div class="zones-editor-row">
           <label>Entity</label>
           <input id="pinEntityInput" class="zones-editor-input" value="${escapeHtml(pin.entity_id || '')}"
-            placeholder="${isLight ? 'light.* or switch.*' : 'switch.* or siren.*'}" autocomplete="off">
+            placeholder="${isLight ? 'light.* or switch.*' : isCamera ? 'camera.*' : 'switch.* or siren.*'}" autocomplete="off">
         </div>
         ${isLight ? `
         <div style="margin-top:12px;border-top:1px solid rgba(255,255,255,0.06);padding-top:10px;">
@@ -2867,6 +2951,9 @@ function renderZonesEditor() {
             <button id="pinTapThis" class="settings-toggle ${!pin.tapAll ? 'active' : ''}" style="flex:1;font-size:11px;">This light</button>
             <button id="pinTapAll"  class="settings-toggle ${pin.tapAll  ? 'active' : ''}" style="flex:1;font-size:11px;">All zone lights</button>
           </div>
+        </div>` : isCamera ? `
+        <div style="margin-top:10px;border-top:1px solid rgba(255,255,255,0.06);padding-top:8px;">
+          <div style="font-size:11px;color:#666;">Tap opens full-screen camera view.</div>
         </div>` : `
         <div style="margin-top:10px;border-top:1px solid rgba(255,255,255,0.06);padding-top:8px;">
           <label style="font-size:12px;color:#aaa;">Aura radius <span id="pinRadiusVal" style="color:#ff6666;font-weight:600;">${pin.radius || 4}</span></label>
@@ -3178,18 +3265,24 @@ function renderZonesEditor() {
   if (activePinId) {
     const pin = activePinType === 'light'
       ? lights.find(p => p.id === activePinId)
-      : sirens.find(p => p.id === activePinId);
+      : activePinType === 'siren'
+      ? sirens.find(p => p.id === activePinId)
+      : cameraPins.find(p => p.id === activePinId);
+
+    const savePin = () => {
+      if (activePinType === 'light')  saveLight(pin);
+      else if (activePinType === 'siren') saveSiren(pin);
+      else saveCameraPin(pin);
+    };
+
     if (pin) {
       document.getElementById('pinNameInput')?.addEventListener('input', e => {
-        pin.name = e.target.value;
-        if (activePinType === 'light') saveLight(pin); else saveSiren(pin);
+        pin.name = e.target.value; savePin();
       });
       document.getElementById('pinEntityInput')?.addEventListener('keydown', e => e.stopPropagation());
       document.getElementById('pinEntityInput')?.addEventListener('input',   e => e.stopPropagation());
       document.getElementById('pinEntityInput')?.addEventListener('blur', e => {
-        pin.entity_id = e.target.value.trim();
-        if (activePinType === 'light') saveLight(pin); else saveSiren(pin);
-        renderZones();
+        pin.entity_id = e.target.value.trim(); savePin(); renderZones();
       });
 
       // Radius slider — live preview, save on pointerup
@@ -3217,7 +3310,7 @@ function renderZonesEditor() {
           if (spreadRow) spreadRow.style.display = v < 0 ? 'none' : 'flex';
           renderZones(); // live preview
         });
-        dirEl.addEventListener('change', () => saveLight(pin));
+        dirEl.addEventListener('change', () => savePin());
       }
 
       // Spread slider
@@ -3229,18 +3322,18 @@ function renderZonesEditor() {
           if (spreadVal) spreadVal.textContent = pin.spread + '°';
           renderZones();
         });
-        spreadEl.addEventListener('change', () => saveLight(pin));
+        spreadEl.addEventListener('change', () => savePin());
       }
 
       // Tap action buttons (lights only)
       document.getElementById('pinTapThis')?.addEventListener('click', () => {
         pin.tapAll = false;
-        if (activePinType === 'light') saveLight(pin);
+        savePin();
         renderZonesEditor();
       });
       document.getElementById('pinTapAll')?.addEventListener('click', () => {
         pin.tapAll = true;
-        if (activePinType === 'light') saveLight(pin);
+        savePin();
         renderZonesEditor();
       });
 
@@ -3253,7 +3346,7 @@ function renderZonesEditor() {
           if (sirenRadiusVal) sirenRadiusVal.textContent = pin.radius;
           renderZones();
         });
-        sirenRadiusEl.addEventListener('change', () => saveSiren(pin));
+        sirenRadiusEl.addEventListener('change', () => savePin());
       }
 
       document.getElementById('pinDoneBtn')?.addEventListener('click', () => {
@@ -3263,7 +3356,8 @@ function renderZonesEditor() {
       document.getElementById('pinDeleteBtn')?.addEventListener('click', () => {
         if (!confirm(`Delete this ${activePinType}?`)) return;
         if (activePinType === 'light') deleteLight(activePinId);
-        else deleteSiren(activePinId);
+        else if (activePinType === 'siren') deleteSiren(activePinId);
+        else deleteCameraPin(activePinId);
         activePinId = null; activePinType = null;
         renderZones(); renderZonesEditor();
       });
@@ -3412,12 +3506,13 @@ function deviceRow(entityId, devType) {
 
   // For lights and sirens: show pin button — filled if already placed, outline if not
   let pinBtn = '';
-  if (devType === 'lights' || devType === 'sirens') {
-    const pinArr = devType === 'lights' ? lights : sirens;
+  if (devType === 'lights' || devType === 'sirens' || devType === 'cameras') {
+    const pinArr = devType === 'lights' ? lights : devType === 'sirens' ? sirens : cameraPins;
+    const pinType = devType === 'lights' ? 'light' : devType === 'sirens' ? 'siren' : 'camera';
     const alreadyPlaced = pinArr.some(p => p.entity_id === entityId);
-    pinBtn = `<button class="ha-entity-pin" data-entity-id="${escapeHtml(entityId)}" data-pin-type="${devType === 'lights' ? 'light' : 'siren'}"
+    pinBtn = `<button class="ha-entity-pin" data-entity-id="${escapeHtml(entityId)}" data-pin-type="${pinType}"
       title="${alreadyPlaced ? 'Reposition on map' : 'Place on map'}"
-      style="background:none;border:1px solid ${alreadyPlaced ? '#ffcc44' : 'rgba(255,255,255,0.2)'};border-radius:4px;padding:2px 5px;cursor:pointer;font-size:10px;color:${alreadyPlaced ? '#ffcc44' : '#666'};flex-shrink:0;">📍</button>`;
+      style="background:none;border:1px solid ${alreadyPlaced ? '#64b4ff' : 'rgba(255,255,255,0.2)'};border-radius:4px;padding:2px 5px;cursor:pointer;font-size:10px;color:${alreadyPlaced ? '#64b4ff' : '#666'};flex-shrink:0;">📍</button>`;
   }
 
   return `
@@ -4060,6 +4155,7 @@ async function checkServerHealth() {
       if (!editorMode) await loadFloors();
       await loadLights();
       await loadSirens();
+      await loadCameraPins();
       if (haConnected) subscribeHAEntities();
       renderZones();
       if (editorMode) renderZonesEditor();
@@ -4994,6 +5090,10 @@ function renderSettingsPanel() {
               <input type="checkbox" id="hideSirensChk" ${localStorage.getItem('ow_hide_sirens') === 'true' ? 'checked' : ''}>
               Hide siren icons on map
             </label>
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:4px;">
+              <input type="checkbox" id="hideCamPinsChk" ${localStorage.getItem('ow_hide_cam_pins') === 'true' ? 'checked' : ''}>
+              Hide camera icons on map
+            </label>
           </div>
         </div>
 
@@ -5258,14 +5358,19 @@ function renderSettingsPanel() {
   };
 
   // ── Map icon visibility ───────────────────────────────────────
-  const hideLightsChk = document.getElementById('hideLightsChk');
-  const hideSirensChk = document.getElementById('hideSirensChk');
+  const hideLightsChk  = document.getElementById('hideLightsChk');
+  const hideSirensChk  = document.getElementById('hideSirensChk');
+  const hideCamPinsChk = document.getElementById('hideCamPinsChk');
   if (hideLightsChk) hideLightsChk.onchange = () => {
     localStorage.setItem('ow_hide_lights', hideLightsChk.checked ? 'true' : 'false');
     renderZones();
   };
   if (hideSirensChk) hideSirensChk.onchange = () => {
     localStorage.setItem('ow_hide_sirens', hideSirensChk.checked ? 'true' : 'false');
+    renderZones();
+  };
+  if (hideCamPinsChk) hideCamPinsChk.onchange = () => {
+    localStorage.setItem('ow_hide_cam_pins', hideCamPinsChk.checked ? 'true' : 'false');
     renderZones();
   };
 
@@ -6375,6 +6480,7 @@ async function init() {
   await loadFloors();   // sets activeFloorId, loads correct floor image, calls initFloorplan
   await loadLights();
   await loadSirens();
+  await loadCameraPins();
   if (haConnected) subscribeHAEntities(); // include pin entities in subscription
   window._updateFloorBtn?.(); // show/hide floor switcher based on floor count
   bindZonesSvgEvents();

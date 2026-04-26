@@ -392,6 +392,17 @@ const server = http.createServer(async (req, res) => {
     catch (e) { err(res, e.message); } return;
   }
 
+  /* ── /ow/camera-pins ─────────────────────────────────────── */
+  if (pathname === "/ow/camera-pins" && req.method === "GET") { json(res, loadPins("camera_pins")); return; }
+  if (pathname === "/ow/save-camera-pin" && req.method === "POST") {
+    try { const b = await readBody(req); savePin("camera_pins", b); json(res, { ok: true }); }
+    catch (e) { err(res, e.message); } return;
+  }
+  if (pathname === "/ow/delete-camera-pin" && req.method === "POST") {
+    try { const b = await readBody(req); deletePin("camera_pins", b.id); json(res, { ok: true }); }
+    catch (e) { err(res, e.message); } return;
+  }
+
   /* ── /api/upload-floorplan ───────────────────────────────── */
   if (pathname === "/ow/upload-floorplan" && req.method === "POST") {
     const imgDir = safeDataPath("img");

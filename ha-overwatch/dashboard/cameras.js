@@ -991,6 +991,7 @@ function initCameraPage() {
 
   // Expose for settings panel source toggle
   window.renderCameraStatusBar = renderCameraStatusBar;
+  window.openCameraModal       = openCameraModal;
 
   // Initial renders
   renderCameraStatusBar();
