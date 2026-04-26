@@ -508,13 +508,14 @@ function bindPan() {
     zoom.x = cx - (cx - zoom.x) * (newScale / zoom.scale);
     zoom.y = cy - (cy - zoom.y) * (newScale / zoom.scale);
     zoom.scale = newScale;
-    // Clamp so map can't fly completely off-screen
-    const img = document.getElementById('floorplanImage');
-    if (img) {
+    // Clamp so map can't fly off-screen
+    const img = document.getElementById('floorplanImage') || document.querySelector('.fp-img');
+    if (img && img.naturalWidth) {
       const iw = img.naturalWidth * zoom.scale;
       const ih = img.naturalHeight * zoom.scale;
-      zoom.x = Math.min(rect.width * 0.9, Math.max(-iw + rect.width * 0.1, zoom.x));
-      zoom.y = Math.min(rect.height * 0.9, Math.max(-ih + rect.height * 0.1, zoom.y));
+      const margin = 100;
+      zoom.x = Math.min(rect.width  - margin, Math.max(-(iw - margin), zoom.x));
+      zoom.y = Math.min(rect.height - margin, Math.max(-(ih - margin), zoom.y));
     }
     applyTransform();
     saveZoom();
@@ -771,7 +772,6 @@ function togglePinEntity(entityId, pinId) {
   // Check if this pin is set to toggle all zone lights
   const pin = lights.find(p => p.id === pinId);
   if (pin?.tapAll) {
-    // Find the zone that contains this entity and toggle all its lights
     const zone = zones.find(z => (z.lights || []).includes(entityId));
     if (zone && zone.lights?.length) {
       const allOn = zone.lights.every(e => haStates[e]?.state === 'on');
@@ -779,7 +779,24 @@ function togglePinEntity(entityId, pinId) {
       return;
     }
   }
-  _callService(entityId, haStates[entityId]?.state === 'on' ? 'turn_off' : 'turn_on');
+
+  // For sirens with unknown state, track toggle locally
+  const sirenPin = sirens.find(p => p.id === pinId);
+  let service;
+  if (sirenPin) {
+    const state = haStates[entityId]?.state;
+    if (state === 'on' || (state === 'unknown' && sirenPin._localOn)) {
+      service = 'turn_off';
+      sirenPin._localOn = false;
+    } else {
+      service = 'turn_on';
+      sirenPin._localOn = true;
+    }
+  } else {
+    service = haStates[entityId]?.state === 'on' ? 'turn_off' : 'turn_on';
+  }
+  _callService(entityId, service);
+  renderZones(); // update visual state immediately
 }
 
 function _callService(entityId, service) {
@@ -893,7 +910,7 @@ function applyActiveFloor() {
   }
   renderZones();
   renderStatusDropdown();
-  if (window.renderCameraStatusBar) window.renderCameraStatusBar();
+  if (window.renderCameraStatusBar) { window.renderCameraStatusBar(); applyStatusVisibility(); }
 }
 
 // ─── MULTI-PANEL FLOOR RENDERER ────────────────────────────────────────────
@@ -2296,9 +2313,11 @@ function renderPins(panelIdx) {
   if (!hideSirens) {
     sirens.forEach(pin => {
       if (!pinOnFloor(pin)) return;
-      const isOn   = haStates[pin.entity_id]?.state === 'on';
+      const sirenState = haStates[pin.entity_id]?.state;
+      // Siren entities often report 'unknown' — track toggle state locally
+      const isOn   = sirenState === 'on' || (sirenState === 'unknown' && pin._localOn);
       const isEdit = editorMode && activePinType === 'siren' && activePinId === pin.id;
-      svg.appendChild(makeSirenPin(pin, isOn, isEdit, scale));
+      svg.appendChild(makeSirenPin(pin, isOn || isEdit, isEdit, scale));
     });
   }
 }
@@ -2933,7 +2952,7 @@ function renderZonesEditor() {
       </div>
       <div class="zed-body">
         <!-- LEFT PANEL -->
-          <div class="zed-left" style="${(!selectedZone && !selectedGroup) ? 'border-right:none;width:100%;' : '' }">
+          <div class="zed-left" style="${(!selectedZone && !selectedGroup && !activePinId) ? 'border-right:none;width:100%;' : '' }">
           ${floors.length > 1 ? (
             '<div style="padding:6px 8px 4px;border-bottom:1px solid rgba(255,255,255,0.06);">'
             + '<select id="editorFloorSelect" style="width:100%;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:5px 8px;color:#fff;font-size:12px;">'
@@ -4409,7 +4428,7 @@ function startDirectModePoller() {
           // Re-render zone status dropdown so toggles reflect latest haStates
           updateStatusDropdownInPlace();
           // Re-render camera status bar and grid so toggle states reflect latest haStates
-          if (window.renderCameraStatusBar) window.renderCameraStatusBar();
+          if (window.renderCameraStatusBar) { window.renderCameraStatusBar(); applyStatusVisibility(); }
           if (window.camUpdate) window.camUpdate();
           // Refresh floor flyout dots if open
           if (document.getElementById("floorFlyout")) renderFloorFlyout();
@@ -5099,7 +5118,7 @@ function renderSettingsPanel() {
         await window._camRefreshServerState();
       }
       // Re-render both the status bar (dropdown locked state + dots) and grid
-      if (window.renderCameraStatusBar) window.renderCameraStatusBar();
+      if (window.renderCameraStatusBar) { window.renderCameraStatusBar(); applyStatusVisibility(); }
       if (window.camUpdate) window.camUpdate();
     };
   });
@@ -5206,7 +5225,7 @@ function renderSettingsPanel() {
 
   if (camFloorOnlyChk) camFloorOnlyChk.onchange = () => {
     localStorage.setItem("ow_cam_floor_only", camFloorOnlyChk.checked);
-    if (window.renderCameraStatusBar) window.renderCameraStatusBar();
+    if (window.renderCameraStatusBar) { window.renderCameraStatusBar(); applyStatusVisibility(); }
     if (window.camUpdate) window.camUpdate();
   };
   if (autoFloorChk) autoFloorChk.onchange = () => {
