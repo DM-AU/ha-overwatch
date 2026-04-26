@@ -486,6 +486,12 @@ function bindZoomControls() {
       mapLocked = !mapLocked;
       localStorage.setItem('ow_map_locked', mapLocked ? 'true' : 'false');
       applyLockState();
+      // Update handle cursors
+      const splitH = document.getElementById('splitHandle');
+      if (splitH) splitH.style.cursor = mapLocked ? 'default' : '';
+      document.querySelectorAll('.floor-panel-handle').forEach(h => {
+        h.style.cursor = mapLocked ? 'default' : '';
+      });
     };
   }
 }
@@ -1298,6 +1304,7 @@ function applyFloorPanels() {
 
     let dragging = false, startPct = 50, startPos = 0;
     handle.addEventListener('pointerdown', e => {
+      if (mapLocked) return; // locked — don't allow panel resize
       e.preventDefault();
       e.stopPropagation();
       dragging = true;
@@ -6649,6 +6656,7 @@ function initViewToggle() {
     let rafPending = false;
 
     handle.addEventListener('pointerdown', e => {
+      if (mapLocked) return; // locked
       dragging  = true;
       handle.classList.add('dragging');
       const isV = document.body.getAttribute('data-split-dir') === 'v';
