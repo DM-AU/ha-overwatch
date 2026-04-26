@@ -2267,7 +2267,7 @@ function makeLightPin(pin, isOn, isEdit, scale) {
   // Glow radius — each slider step = 1.5% of image width (finer control)
   const svgEl   = g.closest('svg') || document.getElementById('zonesSvg');
   const imgW    = svgEl ? Number(svgEl.getAttribute('width') || 2000) : 2000;
-  const glowRadius = (pin.radius || 5) * (imgW * 0.015); // 1→1.5%, 10→15% of image width
+  const glowRadius = (pin.radius || 3) * (imgW * 0.008); // 1→0.8%, 10→8% of image width
 
   // Show glow in editor even when light is off, so user can tune placement
   const showGlow = isOn || (editorMode && isEdit);
@@ -2283,11 +2283,11 @@ function makeLightPin(pin, isOn, isEdit, scale) {
       grad.id = `lg-${pin.id}`;
       grad.setAttribute('cx', '50%'); grad.setAttribute('cy', '50%'); grad.setAttribute('r', '50%');
       const s1 = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
-      s1.setAttribute('offset', '0%');   s1.setAttribute('stop-color', '#fff8aa'); s1.setAttribute('stop-opacity', String(0.85 + 0.15 * breathe));
+      s1.setAttribute('offset', '0%');   s1.setAttribute('stop-color', '#ffdd00'); s1.setAttribute('stop-opacity', String(0.80 + 0.18 * breathe));
       const s2 = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
-      s2.setAttribute('offset', '50%');  s2.setAttribute('stop-color', '#ffcc00'); s2.setAttribute('stop-opacity', String(0.45 + 0.25 * breathe));
+      s2.setAttribute('offset', '40%');  s2.setAttribute('stop-color', '#ffaa00'); s2.setAttribute('stop-opacity', String(0.50 + 0.25 * breathe));
       const s3 = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
-      s3.setAttribute('offset', '100%'); s3.setAttribute('stop-color', '#ff8800'); s3.setAttribute('stop-opacity', String(0.1 + 0.1 * breathe));
+      s3.setAttribute('offset', '100%'); s3.setAttribute('stop-color', '#ff7700'); s3.setAttribute('stop-opacity', String(0.18 + 0.12 * breathe));
       grad.appendChild(s1); grad.appendChild(s2); grad.appendChild(s3); defs.appendChild(grad); g.appendChild(defs);
 
       const glow = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
@@ -2295,7 +2295,6 @@ function makeLightPin(pin, isOn, isEdit, scale) {
       glow.setAttribute('r', glowRadius);
       glow.setAttribute('fill', `url(#lg-${pin.id})`);
       glow.setAttribute('pointer-events', 'none');
-      glow.style.mixBlendMode = 'screen'; // additive blending — won't wash out red zone colours
       g.appendChild(glow);
 
     } else {
@@ -2326,7 +2325,6 @@ function makeLightPin(pin, isOn, isEdit, scale) {
       cone.setAttribute('d', `M${cx},${cy} L${x1},${y1} Q${xM},${yM} ${x2},${y2} Z`);
       cone.setAttribute('fill', `url(#lg-cone-${pin.id})`);
       cone.setAttribute('pointer-events', 'none');
-      cone.style.mixBlendMode = 'screen';
       g.appendChild(cone);
 
       // Small tight source glow at icon
@@ -2348,14 +2346,21 @@ function makeLightPin(pin, isOn, isEdit, scale) {
     }
   }
 
-  // Off-state: faint red indicator ring so icon is clearly visible on any background
+  // Off-state: subtle red radial glow so icon reads clearly on any background
   if (!isOn) {
+    const offDefs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+    const offGrad = document.createElementNS('http://www.w3.org/2000/svg', 'radialGradient');
+    offGrad.id = `off-${pin.id}`;
+    offGrad.setAttribute('cx', '50%'); offGrad.setAttribute('cy', '50%'); offGrad.setAttribute('r', '50%');
+    const og1 = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
+    og1.setAttribute('offset', '0%'); og1.setAttribute('stop-color', '#ff4444'); og1.setAttribute('stop-opacity', '0.35');
+    const og2 = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
+    og2.setAttribute('offset', '100%'); og2.setAttribute('stop-color', '#ff2200'); og2.setAttribute('stop-opacity', '0');
+    offGrad.appendChild(og1); offGrad.appendChild(og2); offDefs.appendChild(offGrad); g.appendChild(offDefs);
     const offGlow = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
     offGlow.setAttribute('cx', cx); offGlow.setAttribute('cy', cy);
-    offGlow.setAttribute('r', ICON_R * 1.3);
-    offGlow.setAttribute('fill', 'none');
-    offGlow.setAttribute('stroke', isEdit ? '#0096ff' : 'rgba(255,80,80,0.35)');
-    offGlow.setAttribute('stroke-width', String(1.5 / scale));
+    offGlow.setAttribute('r', ICON_R * 1.8);
+    offGlow.setAttribute('fill', `url(#off-${pin.id})`);
     offGlow.setAttribute('pointer-events', 'none');
     g.appendChild(offGlow);
   }
@@ -2513,8 +2518,7 @@ function placePinAtFloorplanCoord(x, y, floorId) {
 }
 
 function makePinDraggable(g, pin, type) {
-  // Drag state
-  let dragging = false, startClient = null, startPos = null, hasMoved = false;
+  let dragging = false, startClient = null, startPos = null, hasMoved = false, rafPending = false;
 
   g.addEventListener('pointerdown', e => {
     if (e.button !== 0 && e.pointerType === 'mouse') return;
@@ -2531,34 +2535,52 @@ function makePinDraggable(g, pin, type) {
     if (!dragging) return;
     const dx = e.clientX - startClient.x;
     const dy = e.clientY - startClient.y;
-    if (!hasMoved && Math.hypot(dx, dy) < 4) return; // dead zone — don't start drag on micro-movement
+    if (!hasMoved && Math.hypot(dx, dy) < 4) return;
     hasMoved = true;
-    // Use correct zoom for this panel
+    // Compute new position
     const panelSvg = g.closest('.fp-svg');
     let s = zoom.scale || 1;
     if (panelSvg) {
       const match = panelSvg.id?.match(/fp-svg-(\d+)/);
       if (match) s = PANEL_ZOOMS[Number(match[1])]?.scale || 1;
     }
-    // For single panel, zoom.scale is correct already
     pin.x = Math.round(startPos.x + dx / s);
     pin.y = Math.round(startPos.y + dy / s);
-    renderZones();
+    // Move the g element directly instead of re-rendering — avoids losing pointer capture
+    const transform = `translate(${pin.x - startPos.x + (type === 'light' ? 0 : 0)},${pin.y - startPos.y})`;
+    // Update position visually by moving all children via a transform on g
+    // We can't use g.setAttribute('transform'...) since pin coords are absolute in children
+    // Instead, just track — re-render on pointerup
+    if (!rafPending) {
+      rafPending = true;
+      requestAnimationFrame(() => {
+        rafPending = false;
+        // Update just the position of this pin's g by rebuilding it in-place
+        const parent = g.parentNode;
+        if (!parent) return;
+        const newG = type === 'light'
+          ? makeLightPin(pin, haStates[pin.entity_id]?.state === 'on', true, zoom.scale || 1)
+          : makeSirenPin(pin, haStates[pin.entity_id]?.state === 'on', true, zoom.scale || 1);
+        parent.replaceChild(newG, g);
+        // NOTE: pointer capture is lost here — drag ends visually but position is saved
+      });
+    }
   });
 
   g.addEventListener('pointerup', e => {
     if (!dragging) return;
     dragging = false;
     if (hasMoved) {
-      // Save final position
       if (type === 'light') saveLight(pin);
       else saveSiren(pin);
+      renderZones(); // full re-render with final position
     } else {
-      // Was a tap — select the pin in editor
       selectPin(type, pin.id);
       renderZonesEditor();
     }
   });
+
+  g.addEventListener('pointercancel', () => { dragging = false; });
 }
 
 // Dedicated animation loop for smooth pin glow/ring animation
@@ -2698,23 +2720,30 @@ function renderZonesEditor() {
             placeholder="${isLight ? 'light.* or switch.*' : 'switch.* or siren.*'}" autocomplete="off">
         </div>
         ${isLight ? `
-        <div class="zones-editor-row" style="flex-direction:column;align-items:flex-start;gap:2px;margin-top:8px;">
-          <label style="margin-bottom:2px;">Range <span id="pinRadiusVal" style="color:#ffcc44;font-weight:600;">${pin.radius || 5}</span></label>
-          <input id="pinRadiusInput" type="range" min="1" max="10" step="1" value="${pin.radius || 5}"
-            style="width:100%;accent-color:#ffcc44;margin-bottom:2px;">
-          <div style="font-size:10px;color:#555;">Distance glow extends from icon</div>
+        <div style="margin-top:12px;border-top:1px solid rgba(255,255,255,0.06);padding-top:10px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+            <label style="font-size:12px;color:#aaa;">Range</label>
+            <span id="pinRadiusVal" style="color:#ffcc44;font-weight:600;font-size:13px;">${pin.radius || 3}</span>
+          </div>
+          <input id="pinRadiusInput" type="range" min="1" max="10" step="1" value="${pin.radius || 3}"
+            style="width:100%;accent-color:#ffcc44;">
         </div>
-        <div class="zones-editor-row" style="flex-direction:column;align-items:flex-start;gap:2px;margin-top:10px;">
-          <label style="margin-bottom:2px;">Direction <span id="pinDirVal" style="color:#ffcc44;font-weight:600;">${pin.direction !== null && pin.direction !== undefined && pin.direction !== '' ? pin.direction + '°' : 'none'}</span></label>
+        <div style="margin-top:12px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+            <label style="font-size:12px;color:#aaa;">Direction</label>
+            <span id="pinDirVal" style="color:#ffcc44;font-weight:600;font-size:13px;">${pin.direction !== null && pin.direction !== undefined && pin.direction !== '' ? pin.direction + '°' : '— omnidirectional'}</span>
+          </div>
           <input id="pinDirectionInput" type="range" min="-1" max="359" step="1" value="${pin.direction !== null && pin.direction !== undefined && pin.direction !== '' ? pin.direction : -1}"
-            style="width:100%;accent-color:#ffcc44;margin-bottom:2px;">
-          <div style="font-size:10px;color:#555;">Drag to -1 (left) for omnidirectional glow</div>
+            style="width:100%;accent-color:#ffcc44;">
+          <div style="font-size:10px;color:#444;margin-top:3px;">Slide fully left for omnidirectional glow</div>
         </div>
-        <div id="pinSpreadRow" class="zones-editor-row" style="flex-direction:column;align-items:flex-start;gap:2px;margin-top:10px;${(pin.direction !== null && pin.direction !== undefined && pin.direction !== '') ? '' : 'display:none;'}">
-          <label style="margin-bottom:2px;">Spread <span id="pinSpreadVal" style="color:#ffcc44;font-weight:600;">${pin.spread || 35}°</span></label>
+        <div id="pinSpreadRow" style="margin-top:12px;${(pin.direction !== null && pin.direction !== undefined && pin.direction !== '') ? '' : 'display:none;'}">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+            <label style="font-size:12px;color:#aaa;">Spread</label>
+            <span id="pinSpreadVal" style="color:#ffcc44;font-weight:600;font-size:13px;">${pin.spread || 35}°</span>
+          </div>
           <input id="pinSpreadInput" type="range" min="5" max="90" step="5" value="${pin.spread || 35}"
-            style="width:100%;accent-color:#ffcc44;margin-bottom:2px;">
-          <div style="font-size:10px;color:#555;">Cone half-angle — narrow for spotlight, wide for flood</div>
+            style="width:100%;accent-color:#ffcc44;">
         </div>
         ` : ''}
         <div class="zones-editor-row" style="margin-top:4px;">
@@ -3844,6 +3873,7 @@ let serverApiAvailable = null;   // null=unknown, true=server.js up, false=local
 let serverCheckTimer   = null;
 let isAddonMode        = false;  // true when running as HA add-on
 let _serverBuildId     = null;   // detect server restarts for auto-reload on 8099
+let _lastDataVersion   = null;   // detect data changes from other browsers
 
 async function checkServerHealth() {
   try {
@@ -3863,6 +3893,20 @@ async function checkServerHealth() {
         return;
       }
     }
+
+    // Live data sync — reload zones/lights/floors when another browser makes changes
+    if (data.dataVersion && _lastDataVersion !== null && data.dataVersion !== _lastDataVersion) {
+      logEvent("ok", "Config changed externally — refreshing zones and lights.", "system");
+      await loadZones();
+      await loadGroups();
+      await loadFloors();
+      await loadLights();
+      await loadSirens();
+      if (haConnected) subscribeHAEntities();
+      renderZones();
+      if (editorMode) renderZonesEditor();
+    }
+    if (data.dataVersion) _lastDataVersion = data.dataVersion;
 
     // Detect add-on mode from health response
     if (data.isAddon && !isAddonMode) {

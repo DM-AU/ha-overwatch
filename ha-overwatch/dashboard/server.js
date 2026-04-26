@@ -28,6 +28,8 @@ const PORT     = parseInt(process.argv[2] || process.env.PORT || "8099", 10);
 const APP_DIR  = __dirname;                          // static files (app.js, style.css, …)
 const DATA_DIR = process.argv[3] || __dirname;       // persistent data (config, zones, img)
 const SERVER_BUILD_ID = Date.now();                  // unique per server start — triggers client reload
+let dataVersion = Date.now();                        // bumped on every data write — triggers client data refresh
+function bumpDataVersion() { dataVersion = Date.now(); }
 
 /* ─── MIME TYPES ──────────────────────────────────────────── */
 const MIME = {
@@ -187,10 +189,12 @@ function savePin(type, pin) {
   if (idx >= 0) pins[idx] = pin; else pins.push(pin);
   fs.mkdirSync(path.dirname(pinsFile(type)), { recursive: true });
   fs.writeFileSync(pinsFile(type), JSON.stringify(pins, null, 2), "utf8");
+  bumpDataVersion();
 }
 function deletePin(type, id) {
   const pins = loadPins(type).filter(p => p.id !== id);
   fs.writeFileSync(pinsFile(type), JSON.stringify(pins, null, 2), "utf8");
+  bumpDataVersion();
 }
 
 
@@ -209,6 +213,7 @@ function loadFloors() {
 function saveFloors(floors) {
   fs.mkdirSync(path.dirname(FLOORS_FILE()), { recursive: true });
   fs.writeFileSync(FLOORS_FILE(), JSON.stringify(floors, null, 2), "utf8");
+  bumpDataVersion();
 }
 
 /* ─── GROUPS ──────────────────────────────────────────────── */
@@ -300,6 +305,7 @@ const server = http.createServer(async (req, res) => {
       app: "ha-overwatch",
       version: "0.10",
       buildId: SERVER_BUILD_ID,
+      dataVersion,
       isAddon,
       appDir:  APP_DIR,
       dataDir: DATA_DIR,
@@ -316,6 +322,7 @@ const server = http.createServer(async (req, res) => {
       fs.mkdirSync(path.dirname(filePath), { recursive: true });
       fs.writeFileSync(filePath, body.content, "utf8");
       console.log(`[HA-Overwatch] save-config ✓ saved ${filePath}`);
+      bumpDataVersion();
       json(res, { ok: true });
     } catch (e) {
       console.error(`[HA-Overwatch] save-config ✗ ${e.message}`);
@@ -341,6 +348,7 @@ const server = http.createServer(async (req, res) => {
         index.push(fname);
         fs.writeFileSync(idxPath, JSON.stringify(index, null, 2), "utf8");
       }
+      bumpDataVersion();
       json(res, { ok: true });
     } catch (e) { err(res, e.message); }
     return;
@@ -358,6 +366,7 @@ const server = http.createServer(async (req, res) => {
       try { index = JSON.parse(fs.readFileSync(idxPath, "utf8")); } catch {}
       index = index.filter(f => f !== fname);
       fs.writeFileSync(idxPath, JSON.stringify(index, null, 2), "utf8");
+      bumpDataVersion();
       json(res, { ok: true });
     } catch (e) { err(res, e.message); }
     return;
