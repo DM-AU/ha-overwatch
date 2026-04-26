@@ -3019,6 +3019,7 @@ function renderZonesEditor() {
       // Also select the group (show right panel)
       selectedGroupId = gid;
       selectedZoneId  = null;
+      activePinId = null; activePinType = null;
       renderZones();
       // Re-render only the left panel actions + right panel without blowing away the list
       // Full re-render needed to show right panel
@@ -3602,6 +3603,7 @@ function bindZonesSvgEvents() {
       }
       selectedZoneId  = zoneId;
       selectedGroupId = null;
+      activePinId = null; activePinType = null; // deselect pin when zone clicked
       // In edit points mode: clicking inside zone starts a drag of the whole zone
       if (isEditingPoints && zone) {
         draggingZone = { zoneId, startPoints: zone.points.map(p => ({ ...p })) };
@@ -5640,6 +5642,7 @@ function focusZone(zoneId) {
   setTimeout(() => renderZones(), 15100);
 
   selectedZoneId = zoneId;
+  activePinId = null; activePinType = null;
   if (editorMode) { renderZonesEditor(); renderZones(); }
   setSearchOpen(false);
 }
