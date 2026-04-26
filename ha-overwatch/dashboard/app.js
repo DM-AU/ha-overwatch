@@ -2964,10 +2964,10 @@ function renderZonePopupContent() {
       ${sensors_.map(e => {
         const triggered = isEntityTriggered(e);
         const state = haStates[e]?.state || '—';
-        return `<div style="display:flex;align-items:center;padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.04);">
-          <span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${triggered ? '#ff3b30' : '#34c759'};margin-right:7px;flex-shrink:0;"></span>
+        return `<div data-sensor-id="${escapeHtml(e)}" style="display:flex;align-items:center;padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.04);">
+          <span class="sensor-dot" style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${triggered ? '#ff3b30' : '#34c759'};margin-right:7px;flex-shrink:0;"></span>
           <span style="flex:1;color:#ccc;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(e.split('.').pop())}</span>
-          <span style="color:${triggered ? '#ff6b6b' : '#34c759'};font-size:11px;font-weight:600;margin-left:6px;">${escapeHtml(state.toUpperCase())}</span>
+          <span class="sensor-state" style="color:${triggered ? '#ff6b6b' : '#34c759'};font-size:11px;font-weight:600;margin-left:6px;">${escapeHtml(state.toUpperCase())}</span>
         </div>`;
       }).join('')}
     </div>` : '';
@@ -3138,9 +3138,67 @@ function renderZonePopupContent() {
   }
 }
 
-// Re-render popup when HA state changes (keep toggles in sync)
+// Surgical refresh — update button states/sensor dots WITHOUT rebuilding img tags
 function refreshZonePopupIfOpen() {
-  if (_zonePopupEl && _zonePopupZoneId) renderZonePopupContent();
+  const popup = _zonePopupEl;
+  if (!popup || !_zonePopupZoneId) return;
+  const zone = zones.find(z => z.id === _zonePopupZoneId);
+  if (!zone) { closeZonePopup(); return; }
+
+  // Arm/Disarm buttons
+  const zState  = getZoneState(zone);
+  const isArmed = zState !== 'disabled';
+  const btnArm    = popup.querySelector('#zpArm');
+  const btnDisarm = popup.querySelector('#zpDisarm');
+  if (btnArm) {
+    btnArm.style.background   = isArmed ? 'rgba(0,150,255,0.3)'  : 'rgba(255,255,255,0.06)';
+    btnArm.style.borderColor  = isArmed ? 'rgba(0,150,255,0.6)'  : 'rgba(255,255,255,0.12)';
+    btnArm.style.color        = isArmed ? '#4db8ff' : '#666';
+  }
+  if (btnDisarm) {
+    btnDisarm.style.background  = !isArmed ? 'rgba(255,59,48,0.3)'  : 'rgba(255,255,255,0.06)';
+    btnDisarm.style.borderColor = !isArmed ? 'rgba(255,59,48,0.6)'  : 'rgba(255,255,255,0.12)';
+    btnDisarm.style.color       = !isArmed ? '#ff6b6b' : '#666';
+  }
+
+  // Sensor dots + state text
+  popup.querySelectorAll('[data-sensor-id]').forEach(row => {
+    const e = row.dataset.sensorId;
+    const triggered = isEntityTriggered(e);
+    const state = haStates[e]?.state || '—';
+    const dot  = row.querySelector('.sensor-dot');
+    const text = row.querySelector('.sensor-state');
+    if (dot)  { dot.style.background = triggered ? '#ff3b30' : '#34c759'; }
+    if (text) { text.textContent = state.toUpperCase(); text.style.color = triggered ? '#ff6b6b' : '#34c759'; }
+  });
+
+  // Light buttons
+  popup.querySelectorAll('.zp-light-toggle').forEach(btn => {
+    const on = haStates[btn.dataset.entity]?.state === 'on';
+    btn.style.background   = on ? 'rgba(255,204,0,0.2)'     : 'rgba(255,255,255,0.06)';
+    btn.style.borderColor  = on ? 'rgba(255,204,0,0.5)'     : 'rgba(255,255,255,0.12)';
+    btn.style.color        = on ? '#ffcc00' : '#888';
+    btn.textContent        = on ? 'ON' : 'OFF';
+  });
+
+  // Siren buttons
+  popup.querySelectorAll('.zp-siren-toggle').forEach(btn => {
+    const on = haStates[btn.dataset.entity]?.state === 'on';
+    btn.style.background   = on ? 'rgba(255,59,48,0.2)'     : 'rgba(255,255,255,0.06)';
+    btn.style.borderColor  = on ? 'rgba(255,59,48,0.5)'     : 'rgba(255,255,255,0.12)';
+    btn.style.color        = on ? '#ff6b6b' : '#888';
+    btn.textContent        = on ? 'ON' : 'OFF';
+  });
+
+  // All-on/off buttons
+  const lights_ = zone.lights || [];
+  const sirens_ = zone.sirens || [];
+  const allLightsOn = lights_.length && lights_.every(e => haStates[e]?.state === 'on');
+  const allSirensOn = sirens_.length && sirens_.every(e => haStates[e]?.state === 'on');
+  const allLightsBtn = popup.querySelector('.zp-all-lights');
+  const allSirensBtn = popup.querySelector('.zp-all-sirens');
+  if (allLightsBtn) { allLightsBtn.textContent = allLightsOn ? 'All OFF' : 'All ON'; allLightsBtn.dataset.on = allLightsOn ? '0' : '1'; }
+  if (allSirensBtn) { allSirensBtn.textContent = allSirensOn ? 'All OFF' : 'All ON'; allSirensBtn.dataset.on = allSirensOn ? '0' : '1'; }
 }
 
 function startPinAnimLoop() {
