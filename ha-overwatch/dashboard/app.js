@@ -500,7 +500,10 @@ function bindPan() {
     if (e.target.closest(".zones-editor, .search-panel, .settings-panel, .log-panel, .sidebar, .zoom-controls")) return;
     e.preventDefault();
     const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
-    const cx = e.clientX, cy = e.clientY;
+    // Use coords relative to the outer container, not viewport
+    const rect = outer.getBoundingClientRect();
+    const cx = e.clientX - rect.left;
+    const cy = e.clientY - rect.top;
     zoom.x = cx - (cx - zoom.x) * factor;
     zoom.y = cy - (cy - zoom.y) * factor;
     zoom.scale = Math.min(10, Math.max(0.1, zoom.scale * factor));
@@ -947,8 +950,15 @@ function renderPanelZones(idx) {
     return;
   }
 
-  // Clear
-  while (panelSvg.firstChild) panelSvg.removeChild(panelSvg.firstChild);
+  // Clear — preserve dragging pin element
+  if (_pinDragging) {
+    Array.from(panelSvg.childNodes).forEach(child => {
+      if (child.getAttribute?.('data-pin-id') === _draggingPinId) return;
+      panelSvg.removeChild(child);
+    });
+  } else {
+    while (panelSvg.firstChild) panelSvg.removeChild(panelSvg.firstChild);
+  }
   panelSvg.setAttribute('width',   img.naturalWidth);
   panelSvg.setAttribute('height',  img.naturalHeight);
   panelSvg.setAttribute('viewBox', `0 0 ${img.naturalWidth} ${img.naturalHeight}`);
@@ -1877,7 +1887,16 @@ function renderZones() {
 function _renderZonesInternal(targetSvg) {
   const svg = targetSvg || document.getElementById("zonesSvg");
   if (!svg) return;
-  while (svg.firstChild) svg.removeChild(svg.firstChild);
+  // Clear SVG — but preserve any pin element currently being dragged
+  if (_pinDragging) {
+    // Remove everything EXCEPT the currently dragged pin element
+    Array.from(svg.childNodes).forEach(child => {
+      if (child.dataset?.pinId !== undefined && child === svg.querySelector(`[data-pin-id="${_draggingPinId}"]`)) return;
+      svg.removeChild(child);
+    });
+  } else {
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+  }
 
   const now = Date.now();
   const showHighlight      = highlightedZoneId  && now < highlightedUntil;
@@ -2371,25 +2390,24 @@ function makeLightPin(pin, isOn, isEdit, scale) {
   bg.setAttribute('stroke-width', String((isEdit ? 2.5 : 1) / scale));
   g.appendChild(bg);
 
-  // MDI icon — on: mdi:lightbulb (filled yellow), off: mdi:lightbulb-off-outline (grey outline with slash)
-  const iconScale = ICON_R / 12;
+  // Clean geometric bulb icon — simple shapes readable at any size
+  const iconScale = ICON_R / 10;
   const iconG = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-  iconG.setAttribute('transform', `translate(${cx - 12 * iconScale},${cy - 12 * iconScale}) scale(${iconScale})`);
-  const bulb = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  iconG.setAttribute('transform', `translate(${cx},${cy}) scale(${iconScale})`);
+  const mk = (tag, attrs) => {
+    const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    Object.entries(attrs).forEach(([k,v]) => el.setAttribute(k, v));
+    return el;
+  };
   if (isOn) {
-    // mdi:lightbulb — filled amber
-    bulb.setAttribute('d', 'M12,2A7,7 0 0,0 5,9C5,11.38 6.19,13.47 8,14.74V17A1,1 0 0,0 9,18H15A1,1 0 0,0 16,17V14.74C17.81,13.47 19,11.38 19,9A7,7 0 0,0 12,2M9,21A1,1 0 0,0 10,22H14A1,1 0 0,0 15,21V20H9V21Z');
-    bulb.setAttribute('fill', '#ffdd00');
-    bulb.setAttribute('stroke', 'none');
+    iconG.appendChild(mk('circle', {cx:'0',cy:'-1',r:'6',fill:'#ffee00'}));
+    iconG.appendChild(mk('rect',   {x:'-3',y:'4',width:'6',height:'2.5',rx:'1',fill:'#ffcc00'}));
+    iconG.appendChild(mk('circle', {cx:'-2',cy:'-3',r:'1.5',fill:'rgba(255,255,255,0.45)'}));
   } else {
-    // mdi:lightbulb-off-outline — grey outline with diagonal slash
-    bulb.setAttribute('d', 'M12,2C9.76,2 7.78,3.05 6.5,4.68L4.93,3.11L3.5,4.5L19.5,20.5L20.89,19.11L17.6,15.82C18.5,14.61 19,13.11 19,11.5C19,7.36 15.86,4 12,2M12,4A5.5,5.5 0 0,1 17.5,9.5C17.5,10.68 17.18,11.79 16.6,12.73L13.27,9.4C13.09,8.62 12.62,7.96 12,7.57V7.57C11.06,7 10,7.04 9.16,7.5L7.66,6C9,4.75 10.41,4 12,4M3.5,9.5C3.5,11.46 4.31,13.23 5.63,14.5H5.63C6.1,14.96 6,15.63 6,16V17A1,1 0 0,0 7,18H9V20H15V18H17A1,1 0 0,0 18,17V15.93C18,15.5 17.9,15 17.5,14.58');
-    bulb.setAttribute('fill', 'none');
-    bulb.setAttribute('stroke', '#aaa');
-    bulb.setAttribute('stroke-width', '1.5');
-    bulb.setAttribute('stroke-linecap', 'round');
+    iconG.appendChild(mk('circle', {cx:'0',cy:'-1',r:'6',fill:'none',stroke:'#ccc','stroke-width':'1.8'}));
+    iconG.appendChild(mk('rect',   {x:'-3',y:'4',width:'6',height:'2.5',rx:'1',fill:'none',stroke:'#ccc','stroke-width':'1.8'}));
+    iconG.appendChild(mk('line',   {x1:'-4.5',y1:'5',x2:'4.5',y2:'-6',stroke:'#ff6666','stroke-width':'1.8','stroke-linecap':'round'}));
   }
-  iconG.appendChild(bulb);
   g.appendChild(iconG);
 
   // Live mode: tap to toggle. Editor mode: handled by makePinDraggable (tap=select, drag=move)
@@ -2536,6 +2554,7 @@ function makePinDraggable(g, pin, type) {
     e.preventDefault();
     dragging      = true;
     _pinDragging  = true;
+    _draggingPinId = pin.id;
     hasMoved      = false;
     startClient   = { x: e.clientX, y: e.clientY };
     startPos      = { x: pin.x, y: pin.y };
@@ -2563,30 +2582,37 @@ function makePinDraggable(g, pin, type) {
     pin.y = newY;
   });
 
-  g.addEventListener('pointerup', () => {
+  g.addEventListener('pointerup', e => {
     if (!dragging) return;
-    dragging     = false;
-    _pinDragging = false;
+    dragging       = false;
+    _pinDragging   = false;
+    _draggingPinId = null;
     g.removeAttribute('transform');
     if (hasMoved) {
       if (type === 'light') saveLight(pin);
       else saveSiren(pin);
       renderZones();
     } else {
+      e.stopPropagation(); // prevent SVG empty-canvas handler from clearing activePinId
       selectPin(type, pin.id);
+      renderZones();
       renderZonesEditor();
     }
   });
 
-  g.addEventListener('pointercancel', () => { dragging = false; _pinDragging = false; g.removeAttribute('transform'); });
+  g.addEventListener('pointercancel', () => { dragging = false; _pinDragging = false; _draggingPinId = null; g.removeAttribute('transform'); });
 }
 
 let _pinAnimRunning = false;
 let _pinDragging    = false; // set during drag to suppress renderPins from removing the dragged element
+let _draggingPinId  = null;  // id of pin currently being dragged
 function startPinAnimLoop() {
   if (_pinAnimRunning) return;
   _pinAnimRunning = true;
   function loop() {
+    // Don't run animation loop in editor mode (causes flicker on selected pins)
+    // or during drag (would interfere with pointer capture)
+    if (editorMode || _pinDragging) { _pinAnimRunning = false; return; }
     const hasActiveSirens = sirens.some(p => haStates[p.entity_id]?.state === 'on');
     const hasActiveLights = lights.some(p => haStates[p.entity_id]?.state === 'on');
     if (hasActiveSirens || hasActiveLights) {
