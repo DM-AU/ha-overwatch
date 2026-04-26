@@ -465,6 +465,8 @@ function bindPan() {
   outer.addEventListener("pointerdown", e => {
     // In multi-panel mode, floor panels handle their own pan
     if (getNumPanels() > 1 && e.target.closest('.floor-panel')) return;
+    // Don't pan when interacting with map pins
+    if (e.target.closest('[data-pin]')) return;
     if (editorMode) {
       const t = e.target;
       // Don't start pan if clicking zone handles, polygons, or the zones-editor panel
@@ -2262,11 +2264,10 @@ function makeLightPin(pin, isOn, isEdit, scale) {
   const ICON_R   = 14 / scale;           // icon badge radius — scales with zoom so it stays same screen size
   const cx = pin.x, cy = pin.y;
   const hasDir   = pin.direction !== undefined && pin.direction !== null && pin.direction !== '';
-  // Glow radius — slider 1-10, each step = 5% of floorplan width
-  // We use a fixed pixel size relative to the SVG viewBox, not zoom-dependent
+  // Glow radius — each slider step = 1.5% of image width (finer control)
   const svgEl   = g.closest('svg') || document.getElementById('zonesSvg');
   const imgW    = svgEl ? Number(svgEl.getAttribute('width') || 2000) : 2000;
-  const glowRadius = (pin.radius || 5) * (imgW * 0.025); // 1→2.5%, 10→25% of image width
+  const glowRadius = (pin.radius || 5) * (imgW * 0.015); // 1→1.5%, 10→15% of image width
 
   // Show glow in editor even when light is off, so user can tune placement
   const showGlow = isOn || (editorMode && isEdit);
@@ -2282,10 +2283,12 @@ function makeLightPin(pin, isOn, isEdit, scale) {
       grad.id = `lg-${pin.id}`;
       grad.setAttribute('cx', '50%'); grad.setAttribute('cy', '50%'); grad.setAttribute('r', '50%');
       const s1 = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
-      s1.setAttribute('offset', '0%'); s1.setAttribute('stop-color', '#ffee88'); s1.setAttribute('stop-opacity', String(0.55 + 0.35 * breathe));
+      s1.setAttribute('offset', '0%');   s1.setAttribute('stop-color', '#fff8aa'); s1.setAttribute('stop-opacity', String(0.85 + 0.15 * breathe));
       const s2 = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
-      s2.setAttribute('offset', '100%'); s2.setAttribute('stop-color', '#ffaa00'); s2.setAttribute('stop-opacity', '0');
-      grad.appendChild(s1); grad.appendChild(s2); defs.appendChild(grad); g.appendChild(defs);
+      s2.setAttribute('offset', '50%');  s2.setAttribute('stop-color', '#ffcc00'); s2.setAttribute('stop-opacity', String(0.45 + 0.25 * breathe));
+      const s3 = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
+      s3.setAttribute('offset', '100%'); s3.setAttribute('stop-color', '#ff8800'); s3.setAttribute('stop-opacity', String(0.1 + 0.1 * breathe));
+      grad.appendChild(s1); grad.appendChild(s2); grad.appendChild(s3); defs.appendChild(grad); g.appendChild(defs);
 
       const glow = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
       glow.setAttribute('cx', cx); glow.setAttribute('cy', cy);
@@ -2343,6 +2346,18 @@ function makeLightPin(pin, isOn, isEdit, scale) {
       srcGlow.setAttribute('pointer-events', 'none');
       g.appendChild(srcGlow);
     }
+  }
+
+  // Off-state: faint red indicator ring so icon is clearly visible on any background
+  if (!isOn) {
+    const offGlow = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+    offGlow.setAttribute('cx', cx); offGlow.setAttribute('cy', cy);
+    offGlow.setAttribute('r', ICON_R * 1.3);
+    offGlow.setAttribute('fill', 'none');
+    offGlow.setAttribute('stroke', isEdit ? '#0096ff' : 'rgba(255,80,80,0.35)');
+    offGlow.setAttribute('stroke-width', String(1.5 / scale));
+    offGlow.setAttribute('pointer-events', 'none');
+    g.appendChild(offGlow);
   }
 
   // Icon badge — fixed screen size
@@ -2519,12 +2534,13 @@ function makePinDraggable(g, pin, type) {
     if (!hasMoved && Math.hypot(dx, dy) < 4) return; // dead zone — don't start drag on micro-movement
     hasMoved = true;
     // Use correct zoom for this panel
-    const svg = g.closest('.fp-svg');
+    const panelSvg = g.closest('.fp-svg');
     let s = zoom.scale || 1;
-    if (svg) {
-      const match = svg.id?.match(/fp-svg-(\d+)/);
+    if (panelSvg) {
+      const match = panelSvg.id?.match(/fp-svg-(\d+)/);
       if (match) s = PANEL_ZOOMS[Number(match[1])]?.scale || 1;
     }
+    // For single panel, zoom.scale is correct already
     pin.x = Math.round(startPos.x + dx / s);
     pin.y = Math.round(startPos.y + dy / s);
     renderZones();
@@ -3827,6 +3843,7 @@ let serverWasReachable = true;
 let serverApiAvailable = null;   // null=unknown, true=server.js up, false=local-only
 let serverCheckTimer   = null;
 let isAddonMode        = false;  // true when running as HA add-on
+let _serverBuildId     = null;   // detect server restarts for auto-reload on 8099
 
 async function checkServerHealth() {
   try {
@@ -3835,6 +3852,17 @@ async function checkServerHealth() {
     const wasDown = serverApiAvailable === false || !serverWasReachable;
     serverWasReachable = true;
     serverApiAvailable = true;
+
+    // Auto-reload on 8099 when server restarts (new buildId = new code deployed)
+    if (!IS_DIRECT_MODE && data.buildId) {
+      if (_serverBuildId === null) {
+        _serverBuildId = data.buildId; // first check — store baseline
+      } else if (_serverBuildId !== data.buildId) {
+        logEvent("ok", "Server restarted — reloading page to pick up new code.", "system");
+        setTimeout(() => window.location.reload(), 800);
+        return;
+      }
+    }
 
     // Detect add-on mode from health response
     if (data.isAddon && !isAddonMode) {

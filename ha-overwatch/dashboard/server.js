@@ -27,6 +27,7 @@ const { URL } = require("url");
 const PORT     = parseInt(process.argv[2] || process.env.PORT || "8099", 10);
 const APP_DIR  = __dirname;                          // static files (app.js, style.css, …)
 const DATA_DIR = process.argv[3] || __dirname;       // persistent data (config, zones, img)
+const SERVER_BUILD_ID = Date.now();                  // unique per server start — triggers client reload
 
 /* ─── MIME TYPES ──────────────────────────────────────────── */
 const MIME = {
@@ -298,6 +299,7 @@ const server = http.createServer(async (req, res) => {
       ok: true,
       app: "ha-overwatch",
       version: "0.10",
+      buildId: SERVER_BUILD_ID,
       isAddon,
       appDir:  APP_DIR,
       dataDir: DATA_DIR,
