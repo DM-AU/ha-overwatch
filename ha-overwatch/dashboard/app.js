@@ -2228,7 +2228,10 @@ function renderPins(panelIdx) {
   if (!svg) return;
 
   // Remove existing pin elements (they have data-pin attribute)
-  svg.querySelectorAll('[data-pin]').forEach(el => el.remove());
+  // Skip removal if a pin is being dragged — would break pointer capture
+  if (!_pinDragging) {
+    svg.querySelectorAll('[data-pin]').forEach(el => el.remove());
+  }
 
   const scale = (panelIdx !== undefined ? PANEL_ZOOMS[panelIdx]?.scale : zoom.scale) || 1;
 
@@ -2278,7 +2281,18 @@ function makeLightPin(pin, isOn, isEdit, scale) {
 
   if (showGlow) {
     const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
-    const breathe = isOn ? (0.4 + 0.6 * Math.sin(Date.now() / 1000 * Math.PI)) : 0.65; // full 0.4→1.0 range, faster
+    // Very slow, very subtle breathing — mostly steady, just a gentle pulse
+    const breathe = isOn ? (0.85 + 0.15 * Math.sin(Date.now() / 3000 * Math.PI)) : 0.65;
+
+    // Check if any zone at this location is currently triggered — dim glow so zone takes priority
+    const nearTriggeredZone = zones.some(z => {
+      const state = getZoneState(z);
+      if (state !== 'triggered' && state !== 'fault') return false;
+      const pts = z.points || [];
+      if (pts.length < 3) return false;
+      return isPointInPolygon(pin.x, pin.y, pts);
+    });
+    const glowOpacityScale = nearTriggeredZone ? 0.15 : 1.0; // near transparent when zone triggered
 
     if (!hasDir) {
       // ── Omnidirectional radial glow ────────────────────────
@@ -2286,11 +2300,11 @@ function makeLightPin(pin, isOn, isEdit, scale) {
       grad.id = `lg-${pin.id}`;
       grad.setAttribute('cx', '50%'); grad.setAttribute('cy', '50%'); grad.setAttribute('r', '50%');
       const s1 = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
-      s1.setAttribute('offset', '0%');   s1.setAttribute('stop-color', '#ffff44'); s1.setAttribute('stop-opacity', String(0.75 + 0.25 * breathe));
+      s1.setAttribute('offset', '0%');   s1.setAttribute('stop-color', '#ffff44'); s1.setAttribute('stop-opacity', String((0.75 + 0.25 * breathe) * glowOpacityScale));
       const s2 = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
-      s2.setAttribute('offset', '45%');  s2.setAttribute('stop-color', '#ffee00'); s2.setAttribute('stop-opacity', String(0.35 + 0.30 * breathe));
+      s2.setAttribute('offset', '45%');  s2.setAttribute('stop-color', '#ffee00'); s2.setAttribute('stop-opacity', String((0.35 + 0.30 * breathe) * glowOpacityScale));
       const s3 = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
-      s3.setAttribute('offset', '100%'); s3.setAttribute('stop-color', '#ffcc00'); s3.setAttribute('stop-opacity', String(0.05 + 0.10 * breathe));
+      s3.setAttribute('offset', '100%'); s3.setAttribute('stop-color', '#ffcc00'); s3.setAttribute('stop-opacity', String((0.05 + 0.10 * breathe) * glowOpacityScale));
       grad.appendChild(s1); grad.appendChild(s2); grad.appendChild(s3); defs.appendChild(grad); g.appendChild(defs);
 
       const glow = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
@@ -2349,27 +2363,32 @@ function makeLightPin(pin, isOn, isEdit, scale) {
     }
   }
 
-  // No heavy badge — just the MDI icon with a subtle shadow for readability
-  // MDI lightbulb — centred on pin, scaled to badge size
-  const iconScale = ICON_R / 12; // MDI viewBox is 24x24, so half=12
+  // Small subtle background to make icon readable on any background
+  const bg = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+  bg.setAttribute('cx', cx); bg.setAttribute('cy', cy); bg.setAttribute('r', ICON_R * 0.9);
+  bg.setAttribute('fill', 'rgba(0,0,0,0.45)');
+  bg.setAttribute('stroke', isEdit ? '#0096ff' : (isOn ? 'rgba(255,220,0,0.6)' : 'rgba(255,255,255,0.12)'));
+  bg.setAttribute('stroke-width', String((isEdit ? 2.5 : 1) / scale));
+  g.appendChild(bg);
+
+  // MDI icon — on: mdi:lightbulb (filled yellow), off: mdi:lightbulb-off-outline (grey outline with slash)
+  const iconScale = ICON_R / 12;
   const iconG = document.createElementNS('http://www.w3.org/2000/svg', 'g');
   iconG.setAttribute('transform', `translate(${cx - 12 * iconScale},${cy - 12 * iconScale}) scale(${iconScale})`);
-  // Drop shadow filter for readability on any background
-  const fDefs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
-  const filt  = document.createElementNS('http://www.w3.org/2000/svg', 'filter');
-  filt.id = `sh-${pin.id}`;
-  filt.setAttribute('x', '-50%'); filt.setAttribute('y', '-50%');
-  filt.setAttribute('width', '200%'); filt.setAttribute('height', '200%');
-  const feGauss = document.createElementNS('http://www.w3.org/2000/svg', 'feDropShadow');
-  feGauss.setAttribute('dx', '0'); feGauss.setAttribute('dy', '0');
-  feGauss.setAttribute('stdDeviation', '1.5');
-  feGauss.setAttribute('flood-color', '#000'); feGauss.setAttribute('flood-opacity', '0.8');
-  filt.appendChild(feGauss); fDefs.appendChild(filt); g.appendChild(fDefs);
-
   const bulb = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-  bulb.setAttribute('d', 'M12,2A7,7 0 0,0 5,9C5,11.38 6.19,13.47 8,14.74V17A1,1 0 0,0 9,18H15A1,1 0 0,0 16,17V14.74C17.81,13.47 19,11.38 19,9A7,7 0 0,0 12,2M9,21A1,1 0 0,0 10,22H14A1,1 0 0,0 15,21V20H9V21Z');
-  bulb.setAttribute('fill', isOn ? '#ffdd00' : '#888');
-  bulb.setAttribute('filter', `url(#sh-${pin.id})`);
+  if (isOn) {
+    // mdi:lightbulb — filled amber
+    bulb.setAttribute('d', 'M12,2A7,7 0 0,0 5,9C5,11.38 6.19,13.47 8,14.74V17A1,1 0 0,0 9,18H15A1,1 0 0,0 16,17V14.74C17.81,13.47 19,11.38 19,9A7,7 0 0,0 12,2M9,21A1,1 0 0,0 10,22H14A1,1 0 0,0 15,21V20H9V21Z');
+    bulb.setAttribute('fill', '#ffdd00');
+    bulb.setAttribute('stroke', 'none');
+  } else {
+    // mdi:lightbulb-off-outline — grey outline with diagonal slash
+    bulb.setAttribute('d', 'M12,2C9.76,2 7.78,3.05 6.5,4.68L4.93,3.11L3.5,4.5L19.5,20.5L20.89,19.11L17.6,15.82C18.5,14.61 19,13.11 19,11.5C19,7.36 15.86,4 12,2M12,4A5.5,5.5 0 0,1 17.5,9.5C17.5,10.68 17.18,11.79 16.6,12.73L13.27,9.4C13.09,8.62 12.62,7.96 12,7.57V7.57C11.06,7 10,7.04 9.16,7.5L7.66,6C9,4.75 10.41,4 12,4M3.5,9.5C3.5,11.46 4.31,13.23 5.63,14.5H5.63C6.1,14.96 6,15.63 6,16V17A1,1 0 0,0 7,18H9V20H15V18H17A1,1 0 0,0 18,17V15.93C18,15.5 17.9,15 17.5,14.58');
+    bulb.setAttribute('fill', 'none');
+    bulb.setAttribute('stroke', '#aaa');
+    bulb.setAttribute('stroke-width', '1.5');
+    bulb.setAttribute('stroke-linecap', 'round');
+  }
   iconG.appendChild(bulb);
   g.appendChild(iconG);
 
@@ -2432,17 +2451,18 @@ function makeSirenPin(pin, isOn, isEdit, scale) {
     });
   }
 
-  // Icon background
+  // Icon background — subtle dark circle
   const bg = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-  bg.setAttribute('cx', cx); bg.setAttribute('cy', cy); bg.setAttribute('r', R * 0.55);
-  bg.setAttribute('fill', isOn ? 'rgba(255,59,48,0.15)' : 'rgba(30,30,30,0.6)');
-  bg.setAttribute('stroke', isEdit ? '#0096ff' : (isOn ? '#ff3b30' : 'rgba(255,255,255,0.15)'));
-  bg.setAttribute('stroke-width', String((isEdit ? 2 : 1) / scale));
+  bg.setAttribute('cx', cx); bg.setAttribute('cy', cy); bg.setAttribute('r', R * 0.9);
+  bg.setAttribute('fill', 'rgba(0,0,0,0.45)');
+  bg.setAttribute('stroke', isEdit ? '#0096ff' : (isOn ? 'rgba(255,80,60,0.6)' : 'rgba(255,255,255,0.12)'));
+  bg.setAttribute('stroke-width', String((isEdit ? 2.5 : 1) / scale));
   g.appendChild(bg);
 
   // MDI bell icon — mdi:bell / mdi:bell-outline
   const iconG = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-  iconG.setAttribute('transform', `translate(${cx - R * 0.55},${cy - R * 0.7}) scale(${R * 0.073})`);
+  const sirenIconScale = R / 12;
+  iconG.setAttribute('transform', `translate(${cx - 12 * sirenIconScale},${cy - 12 * sirenIconScale}) scale(${sirenIconScale})`);
   const bell = document.createElementNS('http://www.w3.org/2000/svg', 'path');
   bell.setAttribute('d', 'M21,19V20H3V19L5,17V11C5,7.9 7.03,5.17 10,4.29C10,4.19 10,4.1 10,4A2,2 0 0,1 12,2A2,2 0 0,1 14,4C14,4.1 14,4.19 14,4.29C16.97,5.17 19,7.9 19,11V17L21,19M14,21A2,2 0 0,1 12,23A2,2 0 0,1 10,21');
   bell.setAttribute('fill', isOn ? '#ff3b30' : 'none');
@@ -2471,8 +2491,11 @@ let placingZoneId   = null; // zone the entity belongs to
 let _activeZoneTab  = 'sensors'; // persists across renderZonesEditor re-renders
 
 function selectPin(type, id) {
-  activePinType = type;
-  activePinId   = id;
+  activePinType   = type;
+  activePinId     = id;
+  // Clear zone/group selection so pin panel shows immediately
+  selectedZoneId  = null;
+  selectedGroupId = null;
 }
 
 // Called when user clicks a map to place a pin (single or multi-panel)
@@ -2511,10 +2534,11 @@ function makePinDraggable(g, pin, type) {
     if (e.button !== 0 && e.pointerType === 'mouse') return;
     e.stopPropagation();
     e.preventDefault();
-    dragging    = true;
-    hasMoved    = false;
-    startClient = { x: e.clientX, y: e.clientY };
-    startPos    = { x: pin.x, y: pin.y };
+    dragging      = true;
+    _pinDragging  = true;
+    hasMoved      = false;
+    startClient   = { x: e.clientX, y: e.clientY };
+    startPos      = { x: pin.x, y: pin.y };
     g.setPointerCapture(e.pointerId);
   });
 
@@ -2541,23 +2565,24 @@ function makePinDraggable(g, pin, type) {
 
   g.addEventListener('pointerup', () => {
     if (!dragging) return;
-    dragging = false;
-    g.removeAttribute('transform'); // clear visual offset — renderZones will draw at new position
+    dragging     = false;
+    _pinDragging = false;
+    g.removeAttribute('transform');
     if (hasMoved) {
       if (type === 'light') saveLight(pin);
       else saveSiren(pin);
-      renderZones(); // re-render at final position
+      renderZones();
     } else {
       selectPin(type, pin.id);
       renderZonesEditor();
     }
   });
 
-  g.addEventListener('pointercancel', () => { dragging = false; g.removeAttribute('transform'); });
+  g.addEventListener('pointercancel', () => { dragging = false; _pinDragging = false; g.removeAttribute('transform'); });
 }
 
-// Dedicated animation loop for smooth pin glow/ring animation
 let _pinAnimRunning = false;
+let _pinDragging    = false; // set during drag to suppress renderPins from removing the dragged element
 function startPinAnimLoop() {
   if (_pinAnimRunning) return;
   _pinAnimRunning = true;
