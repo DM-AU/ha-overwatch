@@ -394,6 +394,12 @@ const server = http.createServer(async (req, res) => {
 
   /* ── /ow/camera-pins ─────────────────────────────────────── */
   if (pathname === "/ow/camera-pins" && req.method === "GET") { json(res, loadPins("camera_pins")); return; }
+  if (pathname === "/ow/cam-low-res-map" && req.method === "GET") {
+    const f = path.join(DATA_DIR, "config", "cam_low_res.json");
+    try { json(res, JSON.parse(fs.readFileSync(f, "utf8"))); }
+    catch { json(res, {}); }
+    return;
+  }
   if (pathname === "/ow/save-camera-pin" && req.method === "POST") {
     try { const b = await readBody(req); savePin("camera_pins", b); json(res, { ok: true }); }
     catch (e) { err(res, e.message); } return;

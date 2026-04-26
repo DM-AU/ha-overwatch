@@ -109,18 +109,17 @@ function getCamLowRes(highResId) {
 }
 
 async function saveCamLowResMap() {
-  // Merge into uiConfig and persist via save-config
   uiConfig.cam_low_res_map = JSON.stringify(camLowResMap);
+  // Save to a dedicated file so we don't need to rebuild all of ui.yaml
   try {
     await fetch(apiPath("ow/save-config"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ filename: "config/ui.yaml", content: buildUiYaml() })
+      body: JSON.stringify({ filename: "config/cam_low_res.json", content: JSON.stringify(camLowResMap, null, 2) })
     });
-    // Sync to cameras.js
-    if (window.OW) window.OW.uiConfig = uiConfig;
-    // Update cameras.js internal map if exposed
+    // Sync to cameras.js internal map
     if (window.setCamLowResMap) window.setCamLowResMap(camLowResMap);
+    if (window.OW) window.OW.uiConfig = uiConfig;
   } catch(e) { console.warn('Failed to save cam low res map', e); }
 }
 
@@ -2253,7 +2252,7 @@ function _renderZonesInternal(targetSvg) {
       const sensors = zone.sensors || [];
       const anyActive = sensors.some(isEntityTriggered);
       if (anyActive && isDisabled) {
-        // Disarmed zone with active sensor — flash in off-colour (same flash rhythm as armed)
+        // Disarmed zone with active sensor — flash in off-colour
         const type = detectEntityType(sensors.find(isEntityTriggered) || "");
         const hex  = resolveColour(entityTypeColourOff(type));
         const fillAlpha = flashPhase ? 0.15 : 0.45;
@@ -2261,14 +2260,17 @@ function _renderZonesInternal(targetSvg) {
         poly.style.stroke      = hexToRgba(hex, fillAlpha * 0.8);
         poly.style.strokeWidth = String(1 / zoom.scale);
       } else {
-        // Clear zone (armed or disarmed, no active sensor) — invisible but clickable
-        poly.style.fill         = 'rgba(0,0,0,0)';
-        poly.style.stroke       = 'none';
-        poly.style.pointerEvents = 'all'; // must receive clicks to open zone popup
+        // Clear zone — invisible but must still receive clicks
+        poly.style.fill   = 'rgba(0,0,0,0)';
+        poly.style.stroke = 'none';
       }
+      // ALL live-mode polygons must be clickable to open the zone popup
+      poly.style.pointerEvents = 'all';
     }
 
     svg.appendChild(poly);
+    // In live mode, every zone polygon must be clickable to open the zone popup
+    if (!editorMode && !isHidden) poly.style.pointerEvents = 'all';
 
     // Handles shown when editing points OR when actively creating this zone
     if (editorMode && isSelected && (isEditingPoints || (isCreatingZone && zone.id === currentNewZone?.id))) {
@@ -7010,9 +7012,15 @@ async function init() {
   await loadLights();
   await loadSirens();
   await loadCameraPins();
-  // Load low-res camera map from uiConfig
-  try { camLowResMap = JSON.parse(uiConfig.cam_low_res_map || '{}'); } catch { camLowResMap = {}; }
+  // Load low-res camera map from dedicated file (falls back to uiConfig legacy field)
+  try {
+    const r = await fetch(apiPath("ow/cam-low-res-map") + "?v=" + Date.now());
+    camLowResMap = r.ok ? await r.json() : {};
+  } catch { 
+    try { camLowResMap = JSON.parse(uiConfig.cam_low_res_map || '{}'); } catch { camLowResMap = {}; }
+  }
   if (window.setCamLowResMap) window.setCamLowResMap(camLowResMap);
+  if (window.OW) window.OW.uiConfig = { ...uiConfig, cam_low_res_map: JSON.stringify(camLowResMap) };
   window._updateFloorBtn?.(); // show/hide floor switcher based on floor count
   bindZonesSvgEvents();
   applyFloorPanels();   // build single or multi-panel layout based on saved settings
