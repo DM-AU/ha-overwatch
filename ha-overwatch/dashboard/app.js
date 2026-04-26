@@ -2592,13 +2592,15 @@ function makeSirenPin(pin, isOn, isEdit, scale) {
     });
   }
 
-  // Icon background — subtle dark circle
-  const bg = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-  bg.setAttribute('cx', cx); bg.setAttribute('cy', cy); bg.setAttribute('r', R * 0.9);
-  bg.setAttribute('fill', 'rgba(0,0,0,0.45)');
-  bg.setAttribute('stroke', isEdit ? '#0096ff' : (isOn ? 'rgba(255,80,60,0.6)' : 'rgba(255,255,255,0.12)'));
-  bg.setAttribute('stroke-width', String((isEdit ? 2.5 : 1) / scale));
-  g.appendChild(bg);
+  // No background circle — transparent like light icon
+  if (isEdit) {
+    const editRing = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+    editRing.setAttribute('cx', cx); editRing.setAttribute('cy', cy); editRing.setAttribute('r', R * 0.9);
+    editRing.setAttribute('fill', 'none');
+    editRing.setAttribute('stroke', '#0096ff');
+    editRing.setAttribute('stroke-width', String(2.5 / scale));
+    g.appendChild(editRing);
+  }
 
   // MDI bell icon — mdi:bell / mdi:bell-outline
   const iconG = document.createElementNS('http://www.w3.org/2000/svg', 'g');
@@ -2610,10 +2612,15 @@ function makeSirenPin(pin, isOn, isEdit, scale) {
   bell.setAttribute('stroke', isOn ? '#ff1a0e' : '#888');
   bell.setAttribute('stroke-width', isOn ? '0.5' : '1');
   iconG.appendChild(bell);
-  // Off-state: red diagonal slash like lights
+  // Off-state: red diagonal slash in MDI 0-24 coordinate space
   if (!isOn) {
-    const mk = (tag, attrs) => { const el = document.createElementNS('http://www.w3.org/2000/svg', tag); Object.entries(attrs).forEach(([k,v]) => el.setAttribute(k,v)); return el; };
-    iconG.appendChild(mk('line', {x1:'-8',y1:'10',x2:'8',y2:'-8',stroke:'#ff5555','stroke-width':'1.8','stroke-linecap':'round'}));
+    const slash = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    slash.setAttribute('x1', '2');  slash.setAttribute('y1', '22');
+    slash.setAttribute('x2', '22'); slash.setAttribute('y2', '2');
+    slash.setAttribute('stroke', '#ff5555');
+    slash.setAttribute('stroke-width', '2');
+    slash.setAttribute('stroke-linecap', 'round');
+    iconG.appendChild(slash);
   }
   g.appendChild(iconG);
 
@@ -2642,7 +2649,7 @@ function makeCameraPin(pin, isEdit, scale) {
   // Background circle
   const bg = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
   bg.setAttribute('cx', cx); bg.setAttribute('cy', cy); bg.setAttribute('r', R * 0.9);
-  bg.setAttribute('fill', 'rgba(0,0,0,0.55)');
+  bg.setAttribute('fill', 'rgba(0,0,0,0.25)');
   bg.setAttribute('stroke', isEdit ? '#0096ff' : 'rgba(100,180,255,0.5)');
   bg.setAttribute('stroke-width', String((isEdit ? 2.5 : 1.2) / scale));
   g.appendChild(bg);
