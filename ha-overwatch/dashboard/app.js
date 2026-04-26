@@ -1259,12 +1259,36 @@ function applyFloorPanels() {
     handle.addEventListener('pointerup', () => {
       dragging = false;
       handle.style.background = 'rgba(255,255,255,0.06)';
+      // Save split position
+      const panels = container.querySelectorAll('.floor-panel');
+      if (panels.length >= 2) {
+        const total = dir === 'v' ? container.offsetHeight : container.offsetWidth;
+        const p0    = dir === 'v' ? panels[0].offsetHeight : panels[0].offsetWidth;
+        localStorage.setItem('ow_fp_split_pct', ((p0 / total) * 100).toFixed(1));
+      }
     });
     handle.addEventListener('mouseenter', () => { if (!dragging) handle.style.background = 'rgba(0,150,255,0.5)'; });
     handle.addEventListener('mouseleave', () => { if (!dragging) handle.style.background = 'rgba(255,255,255,0.06)'; });
   }
 
   mainEl.appendChild(container);
+
+  // Restore saved floor panel split position
+  if (n === 2) {
+    const savedPct = localStorage.getItem('ow_fp_split_pct');
+    if (savedPct) {
+      const pct = Math.min(80, Math.max(20, parseFloat(savedPct)));
+      // Apply after layout — use rAF so container has dimensions
+      requestAnimationFrame(() => {
+        const panels = container.querySelectorAll('.floor-panel');
+        if (panels.length >= 2) {
+          panels[0].style.flex = `0 0 ${pct.toFixed(1)}%`;
+          panels[1].style.flex = '1';
+          [0, 1].forEach(i => fitPanelToContainer(i));
+        }
+      });
+    }
+  }
 
   // Bind interactions for each panel
   for (let i = 0; i < n; i++) bindPanelInteraction(i);
