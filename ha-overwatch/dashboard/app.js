@@ -2023,10 +2023,11 @@ function _renderZonesInternal(targetSvg) {
       poly.style.strokeWidth = String(1 / zoom.scale);
 
     } else if (isFault) {
-      // Fault: amber fill, no prominent border
-      poly.style.fill        = "rgba(255,149,0,0.28)";
-      poly.style.stroke      = "rgba(255,149,0,0.35)";
-      poly.style.strokeWidth = String(1 / zoom.scale);
+      // Fault: flash between dark orange and bright yellow for clear distinction
+      poly.style.transition  = 'none';
+      poly.style.fill        = flashPhase ? 'rgba(255,200,0,0.65)' : 'rgba(255,120,0,0.28)';
+      poly.style.stroke      = flashPhase ? 'rgba(255,220,0,0.9)'  : 'rgba(255,120,0,0.5)';
+      poly.style.strokeWidth = String(1.5 / zoom.scale);
 
     } else if (editorMode) {
       const hex = zone.colorHex || "#0096ff";
@@ -2256,95 +2257,117 @@ function makeLightPin(pin, isOn, isEdit, scale) {
   g.setAttribute('data-pin', 'light');
   g.setAttribute('data-pin-id', pin.id);
   g.style.cursor = 'pointer';
-  g.style.pointerEvents = 'all'; // always clickable even when SVG is pointer-events:none
+  g.style.pointerEvents = 'all';
 
-  const R = 14 / scale; // base radius
+  const ICON_R   = 14 / scale;           // icon badge radius — scales with zoom so it stays same screen size
   const cx = pin.x, cy = pin.y;
+  const hasDir   = pin.direction !== undefined && pin.direction !== null && pin.direction !== '';
+  // Glow radius is in floorplan pixel space — NOT divided by scale, so it stays fixed on the map
+  const glowRadius = (pin.radius || 5) * 30; // slider 1-10 → 30-300 floorplan px
 
-  // Glow aura (always present when on, breathing animation via CSS)
   if (isOn) {
-    // Omnidirectional glow
     const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
-    const grad = document.createElementNS('http://www.w3.org/2000/svg', 'radialGradient');
-    grad.id = `lg-${pin.id}`;
-    grad.setAttribute('cx', '50%'); grad.setAttribute('cy', '50%'); grad.setAttribute('r', '50%');
-    const s1 = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
-    s1.setAttribute('offset', '0%'); s1.setAttribute('stop-color', '#ffcc44'); s1.setAttribute('stop-opacity', '0.9');
-    const s2 = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
-    s2.setAttribute('offset', '100%'); s2.setAttribute('stop-color', '#ffaa00'); s2.setAttribute('stop-opacity', '0');
-    grad.appendChild(s1); grad.appendChild(s2); defs.appendChild(grad); g.appendChild(defs);
 
-    const glowR = R * 5;
-    const glow  = document.createElementNS('http://www.w3.org/2000/svg', 'ellipse');
-    glow.setAttribute('cx', cx); glow.setAttribute('cy', cy);
-    glow.setAttribute('rx', glowR); glow.setAttribute('ry', glowR);
-    glow.setAttribute('fill', `url(#lg-${pin.id})`);
-    glow.setAttribute('opacity', flashPhase ? '0.85' : '0.55');
-    g.appendChild(glow);
+    if (!hasDir) {
+      // ── Omnidirectional radial glow ────────────────────────
+      const grad = document.createElementNS('http://www.w3.org/2000/svg', 'radialGradient');
+      grad.id = `lg-${pin.id}`;
+      grad.setAttribute('cx', '50%'); grad.setAttribute('cy', '50%'); grad.setAttribute('r', '50%');
+      const s1 = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
+      s1.setAttribute('offset', '0%'); s1.setAttribute('stop-color', '#ffee88'); s1.setAttribute('stop-opacity', flashPhase ? '0.85' : '0.5');
+      const s2 = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
+      s2.setAttribute('offset', '100%'); s2.setAttribute('stop-color', '#ffaa00'); s2.setAttribute('stop-opacity', '0');
+      grad.appendChild(s1); grad.appendChild(s2); defs.appendChild(grad); g.appendChild(defs);
 
-    // Directional cone (if direction set)
-    if (pin.direction !== undefined && pin.direction !== null && pin.direction !== '') {
-      const dir = Number(pin.direction);
-      const coneLen = R * 9;
-      const spread  = 35; // degrees
-      const rad     = (d) => d * Math.PI / 180;
+      const glow = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      glow.setAttribute('cx', cx); glow.setAttribute('cy', cy);
+      glow.setAttribute('r', glowRadius);
+      glow.setAttribute('fill', `url(#lg-${pin.id})`);
+      glow.setAttribute('pointer-events', 'none');
+      g.appendChild(glow);
+
+    } else {
+      // ── Directional cone + small source glow ───────────────
+      const dir    = Number(pin.direction);
+      const spread = pin.spread || 35; // degrees half-angle
+      const rad    = d => d * Math.PI / 180;
+
+      // Cone gradient
+      const coneGrad = document.createElementNS('http://www.w3.org/2000/svg', 'radialGradient');
+      coneGrad.id = `lg-cone-${pin.id}`;
+      coneGrad.setAttribute('cx', '0%'); coneGrad.setAttribute('cy', '50%');
+      coneGrad.setAttribute('r', '100%'); coneGrad.setAttribute('fx', '0%');
+      const c1 = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
+      c1.setAttribute('offset', '0%'); c1.setAttribute('stop-color', '#ffee88'); c1.setAttribute('stop-opacity', flashPhase ? '0.8' : '0.45');
+      const c2 = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
+      c2.setAttribute('offset', '100%'); c2.setAttribute('stop-color', '#ffaa00'); c2.setAttribute('stop-opacity', '0');
+      coneGrad.appendChild(c1); coneGrad.appendChild(c2); defs.appendChild(coneGrad); g.appendChild(defs);
+
+      // Cone path: arc-tipped triangle
+      const x1 = cx + glowRadius * Math.sin(rad(dir - spread));
+      const y1 = cy - glowRadius * Math.cos(rad(dir - spread));
+      const x2 = cx + glowRadius * Math.sin(rad(dir + spread));
+      const y2 = cy - glowRadius * Math.cos(rad(dir + spread));
+      const xM = cx + glowRadius * Math.sin(rad(dir));
+      const yM = cy - glowRadius * Math.cos(rad(dir));
       const cone = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-      const x1 = cx + coneLen * Math.sin(rad(dir - spread));
-      const y1 = cy - coneLen * Math.cos(rad(dir - spread));
-      const x2 = cx + coneLen * Math.sin(rad(dir + spread));
-      const y2 = cy - coneLen * Math.cos(rad(dir + spread));
-      cone.setAttribute('d', `M${cx},${cy} L${x1},${y1} Q${cx + coneLen * Math.sin(rad(dir)) * 1.1},${cy - coneLen * Math.cos(rad(dir)) * 1.1} ${x2},${y2} Z`);
-      cone.setAttribute('fill', '#ffcc44');
-      cone.setAttribute('fill-opacity', flashPhase ? '0.25' : '0.12');
+      cone.setAttribute('d', `M${cx},${cy} L${x1},${y1} Q${xM},${yM} ${x2},${y2} Z`);
+      cone.setAttribute('fill', `url(#lg-cone-${pin.id})`);
+      cone.setAttribute('pointer-events', 'none');
       g.appendChild(cone);
+
+      // Small tight source glow at icon
+      const srcGrad = document.createElementNS('http://www.w3.org/2000/svg', 'radialGradient');
+      srcGrad.id = `lg-src-${pin.id}`;
+      srcGrad.setAttribute('cx', '50%'); srcGrad.setAttribute('cy', '50%'); srcGrad.setAttribute('r', '50%');
+      const ss1 = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
+      ss1.setAttribute('offset', '0%'); ss1.setAttribute('stop-color', '#ffee88'); ss1.setAttribute('stop-opacity', '0.7');
+      const ss2 = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
+      ss2.setAttribute('offset', '100%'); ss2.setAttribute('stop-color', '#ffaa00'); ss2.setAttribute('stop-opacity', '0');
+      srcGrad.appendChild(ss1); srcGrad.appendChild(ss2); defs.appendChild(srcGrad);
+
+      const srcGlow = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      srcGlow.setAttribute('cx', cx); srcGlow.setAttribute('cy', cy);
+      srcGlow.setAttribute('r', ICON_R * 2.5);
+      srcGlow.setAttribute('fill', `url(#lg-src-${pin.id})`);
+      srcGlow.setAttribute('pointer-events', 'none');
+      g.appendChild(srcGlow);
     }
   }
 
-  // Icon circle background
+  // Icon badge — fixed screen size
   const bg = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-  bg.setAttribute('cx', cx); bg.setAttribute('cy', cy); bg.setAttribute('r', R);
-  bg.setAttribute('fill', isOn ? '#1a1200' : '#1a1a1a');
-  bg.setAttribute('stroke', isOn ? '#ffcc44' : '#555');
-  bg.setAttribute('stroke-width', String(1.5 / scale));
-  if (isEdit) { bg.setAttribute('stroke', '#0096ff'); bg.setAttribute('stroke-width', String(2.5 / scale)); }
+  bg.setAttribute('cx', cx); bg.setAttribute('cy', cy); bg.setAttribute('r', ICON_R * 0.8);
+  bg.setAttribute('fill', isOn ? 'rgba(40,30,0,0.75)' : 'rgba(20,20,20,0.75)');
+  bg.setAttribute('stroke', isEdit ? '#0096ff' : (isOn ? '#ffcc44' : 'rgba(255,255,255,0.25)'));
+  bg.setAttribute('stroke-width', String((isEdit ? 2.5 : 1.5) / scale));
   g.appendChild(bg);
 
-  // Bulb icon — clean lightbulb shape
+  // MDI lightbulb — centred on pin, scaled to badge size
+  const iconScale = (ICON_R * 0.8) / 12; // MDI viewBox is 24x24, so half=12
   const iconG = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-  const s = R / 12;
-  iconG.setAttribute('transform', `translate(${cx},${cy}) scale(${s})`);
-  // Bulb glass dome
-  const dome = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-  dome.setAttribute('d', 'M0,-8 C-5,-8 -8,-5 -8,0 C-8,4 -5,7 -2,8 L-2,10 L2,10 L2,8 C5,7 8,4 8,0 C8,-5 5,-8 0,-8 Z');
-  dome.setAttribute('fill', isOn ? 'rgba(255,204,68,0.3)' : 'rgba(255,255,255,0.08)');
-  dome.setAttribute('stroke', isOn ? '#ffcc44' : '#666');
-  dome.setAttribute('stroke-width', '1.2');
-  // Base lines
-  const base1 = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-  base1.setAttribute('x1', '-2'); base1.setAttribute('y1', '10');
-  base1.setAttribute('x2', '-2'); base1.setAttribute('y2', '12');
-  base1.setAttribute('stroke', isOn ? '#ffcc44' : '#555'); base1.setAttribute('stroke-width', '1.5');
-  const base2 = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-  base2.setAttribute('x1', '2'); base2.setAttribute('y1', '10');
-  base2.setAttribute('x2', '2'); base2.setAttribute('y2', '12');
-  base2.setAttribute('stroke', isOn ? '#ffcc44' : '#555'); base2.setAttribute('stroke-width', '1.5');
-  iconG.appendChild(dome); iconG.appendChild(base1); iconG.appendChild(base2);
+  iconG.setAttribute('transform', `translate(${cx - 12 * iconScale},${cy - 12 * iconScale}) scale(${iconScale})`);
+  const bulb = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  bulb.setAttribute('d', 'M12,2A7,7 0 0,0 5,9C5,11.38 6.19,13.47 8,14.74V17A1,1 0 0,0 9,18H15A1,1 0 0,0 16,17V14.74C17.81,13.47 19,11.38 19,9A7,7 0 0,0 12,2M9,21A1,1 0 0,0 10,22H14A1,1 0 0,0 15,21V20H9V21Z');
+  bulb.setAttribute('fill', isOn ? '#ffcc44' : 'none');
+  bulb.setAttribute('stroke', isOn ? '#ffaa00' : '#999');
+  bulb.setAttribute('stroke-width', String(1.2 / iconScale));
+  bulb.setAttribute('stroke-linejoin', 'round');
+  iconG.appendChild(bulb);
   g.appendChild(iconG);
 
-  // Click handler — toggle in live mode, select in editor
-  g.addEventListener('click', e => {
+  // Interaction
+  let _pinMoved = false;
+  g.addEventListener('pointerdown', e => { _pinMoved = false; e.stopPropagation(); });
+  g.addEventListener('pointermove', () => { _pinMoved = true; });
+  g.addEventListener('pointerup', e => {
     e.stopPropagation();
-    if (editorMode) {
-      selectPin('light', pin.id);
-      renderZonesEditor();
-    } else {
-      togglePinEntity(pin.entity_id);
-    }
+    if (_pinMoved) return;
+    if (editorMode) { selectPin('light', pin.id); renderZonesEditor(); }
+    else            { togglePinEntity(pin.entity_id); }
   });
 
-  // Drag in editor
   if (editorMode) makePinDraggable(g, pin, 'light');
-
   return g;
 }
 
@@ -2396,37 +2419,29 @@ function makeSirenPin(pin, isOn, isEdit, scale) {
 
   // Icon background
   const bg = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-  bg.setAttribute('cx', cx); bg.setAttribute('cy', cy); bg.setAttribute('r', R);
-  bg.setAttribute('fill', isOn ? '#1a0000' : '#1a1a1a');
-  bg.setAttribute('stroke', isOn ? '#ff3b30' : '#555');
-  bg.setAttribute('stroke-width', String(1.5 / scale));
-  if (isEdit) { bg.setAttribute('stroke', '#0096ff'); bg.setAttribute('stroke-width', String(2.5 / scale)); }
+  bg.setAttribute('cx', cx); bg.setAttribute('cy', cy); bg.setAttribute('r', R * 0.55);
+  bg.setAttribute('fill', isOn ? 'rgba(255,59,48,0.15)' : 'rgba(30,30,30,0.6)');
+  bg.setAttribute('stroke', isEdit ? '#0096ff' : (isOn ? '#ff3b30' : 'rgba(255,255,255,0.15)'));
+  bg.setAttribute('stroke-width', String((isEdit ? 2 : 1) / scale));
   g.appendChild(bg);
 
-  // Speaker/bell icon
+  // MDI bell icon — mdi:bell / mdi:bell-outline
   const iconG = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-  const s = R / 10;
-  iconG.setAttribute('transform', `translate(${cx},${cy}) scale(${s})`);
-  const speaker = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-  // Speaker cone shape
-  speaker.setAttribute('d', 'M-5,3 L-5,-3 L0,-5 L0,5 Z M0,-3 Q3,-3 3,0 Q3,3 0,3');
-  speaker.setAttribute('fill', 'none');
-  speaker.setAttribute('stroke', isOn ? '#ff3b30' : '#777');
-  speaker.setAttribute('stroke-width', '1.5');
-  speaker.setAttribute('stroke-linejoin', 'round');
-  speaker.setAttribute('stroke-linecap', 'round');
-  // Sound waves
-  const w1 = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-  w1.setAttribute('d', 'M4,-4 Q7,0 4,4');
-  w1.setAttribute('fill', 'none');
-  w1.setAttribute('stroke', isOn ? '#ff3b30' : '#555');
-  w1.setAttribute('stroke-width', '1.5');
-  w1.setAttribute('stroke-linecap', 'round');
-  iconG.appendChild(speaker); iconG.appendChild(w1);
+  iconG.setAttribute('transform', `translate(${cx - R * 0.55},${cy - R * 0.7}) scale(${R * 0.073})`);
+  const bell = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  bell.setAttribute('d', 'M21,19V20H3V19L5,17V11C5,7.9 7.03,5.17 10,4.29C10,4.19 10,4.1 10,4A2,2 0 0,1 12,2A2,2 0 0,1 14,4C14,4.1 14,4.19 14,4.29C16.97,5.17 19,7.9 19,11V17L21,19M14,21A2,2 0 0,1 12,23A2,2 0 0,1 10,21');
+  bell.setAttribute('fill', isOn ? '#ff3b30' : 'none');
+  bell.setAttribute('stroke', isOn ? '#ff1a0e' : '#888');
+  bell.setAttribute('stroke-width', isOn ? '0.5' : '1');
+  iconG.appendChild(bell);
   g.appendChild(iconG);
 
-  g.addEventListener('click', e => {
+  let _sirenMoved = false;
+  g.addEventListener('pointerdown', e => { _sirenMoved = false; e.stopPropagation(); });
+  g.addEventListener('pointermove', () => { _sirenMoved = true; });
+  g.addEventListener('pointerup', e => {
     e.stopPropagation();
+    if (_sirenMoved) return;
     if (editorMode) {
       selectPin('siren', pin.id);
       renderZonesEditor();
@@ -2650,12 +2665,26 @@ function renderZonesEditor() {
             placeholder="${isLight ? 'light.* or switch.*' : 'switch.* or siren.*'}" autocomplete="off">
         </div>
         ${isLight ? `
-        <div class="zones-editor-row">
-          <label>Direction</label>
-          <input id="pinDirectionInput" class="zones-editor-input" type="number" min="0" max="359"
-            value="${pin.direction ?? ''}" placeholder="none" style="width:70px;">
-          <span style="font-size:11px;color:#555;margin-left:4px;">° (optional)</span>
+        <div class="zones-editor-row" style="flex-direction:column;align-items:flex-start;gap:4px;">
+          <label>Radius <span id="pinRadiusVal" style="color:#ffcc44;font-weight:600;">${pin.radius || 5}</span></label>
+          <input id="pinRadiusInput" type="range" min="1" max="10" step="1" value="${pin.radius || 5}"
+            style="width:100%;accent-color:#ffcc44;">
+        </div>
+        <div class="zones-editor-row" style="flex-direction:column;align-items:flex-start;gap:4px;">
+          <label>Direction <span id="pinDirVal" style="color:#ffcc44;font-weight:600;">${pin.direction !== null && pin.direction !== undefined && pin.direction !== '' ? pin.direction + '°' : 'none (omnidirectional)'}</span></label>
+          <div style="display:flex;align-items:center;gap:8px;width:100%;">
+            <input id="pinDirectionInput" type="range" min="-1" max="359" step="1" value="${pin.direction !== null && pin.direction !== undefined && pin.direction !== '' ? pin.direction : -1}"
+              style="flex:1;accent-color:#ffcc44;">
+          </div>
+          <div style="font-size:10px;color:#555;">Slide to -1 to remove direction (full glow)</div>
+        </div>
+        ${(pin.direction !== null && pin.direction !== undefined && pin.direction !== '') ? `
+        <div class="zones-editor-row" style="flex-direction:column;align-items:flex-start;gap:4px;">
+          <label>Spread <span id="pinSpreadVal" style="color:#ffcc44;font-weight:600;">${pin.spread || 35}°</span></label>
+          <input id="pinSpreadInput" type="range" min="5" max="90" step="5" value="${pin.spread || 35}"
+            style="width:100%;accent-color:#ffcc44;">
         </div>` : ''}
+        ` : ''}
         <div class="zones-editor-row" style="margin-top:4px;">
           <label style="color:#555;font-size:11px;">Position</label>
           <span style="font-size:11px;color:#555;">${Math.round(pin.x)}, ${Math.round(pin.y)}</span>
@@ -2968,7 +2997,6 @@ function renderZonesEditor() {
         pin.name = e.target.value;
         if (activePinType === 'light') saveLight(pin); else saveSiren(pin);
       });
-      // Stop all keyboard events from bubbling to prevent zone panel tab-switching
       document.getElementById('pinEntityInput')?.addEventListener('keydown', e => e.stopPropagation());
       document.getElementById('pinEntityInput')?.addEventListener('input',   e => e.stopPropagation());
       document.getElementById('pinEntityInput')?.addEventListener('blur', e => {
@@ -2976,13 +3004,46 @@ function renderZonesEditor() {
         if (activePinType === 'light') saveLight(pin); else saveSiren(pin);
         renderZones();
       });
-      document.getElementById('pinDirectionInput')?.addEventListener('input', e => {
-        e.stopPropagation();
-        const v = e.target.value.trim();
-        pin.direction = v === '' ? null : Number(v);
-        if (activePinType === 'light') saveLight(pin);
-        renderZones();
-      });
+
+      // Radius slider — live preview, save on pointerup
+      const radiusEl = document.getElementById('pinRadiusInput');
+      const radiusVal = document.getElementById('pinRadiusVal');
+      if (radiusEl) {
+        radiusEl.addEventListener('input', e => {
+          pin.radius = Number(e.target.value);
+          if (radiusVal) radiusVal.textContent = pin.radius;
+          renderZones(); // live preview
+        });
+        radiusEl.addEventListener('change', () => saveLight(pin));
+      }
+
+      // Direction slider — -1 means no direction (omnidirectional)
+      const dirEl  = document.getElementById('pinDirectionInput');
+      const dirVal = document.getElementById('pinDirVal');
+      if (dirEl) {
+        dirEl.addEventListener('input', e => {
+          const v = Number(e.target.value);
+          pin.direction = v < 0 ? null : v;
+          if (dirVal) dirVal.textContent = v < 0 ? 'none (omnidirectional)' : v + '°';
+          renderZones(); // live preview
+          // Re-render editor to show/hide spread slider
+          if (v < 0 !== !pin.spread) renderZonesEditor();
+        });
+        dirEl.addEventListener('change', () => { saveLight(pin); renderZonesEditor(); });
+      }
+
+      // Spread slider
+      const spreadEl  = document.getElementById('pinSpreadInput');
+      const spreadVal = document.getElementById('pinSpreadVal');
+      if (spreadEl) {
+        spreadEl.addEventListener('input', e => {
+          pin.spread = Number(e.target.value);
+          if (spreadVal) spreadVal.textContent = pin.spread + '°';
+          renderZones();
+        });
+        spreadEl.addEventListener('change', () => saveLight(pin));
+      }
+
       document.getElementById('pinDoneBtn')?.addEventListener('click', () => {
         activePinId = null; activePinType = null;
         renderZones(); renderZonesEditor();
