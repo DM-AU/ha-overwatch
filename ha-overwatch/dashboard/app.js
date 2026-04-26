@@ -97,6 +97,8 @@ let zones = [];
 let groups = [];          // Zone groups
 let floors = [];          // Floor definitions [{id, name, floorplan}]
 let activeFloorId = null; // Currently displayed floor id
+let lights = [];          // Map light pins [{id, name, entity_id, floor_id, x, y, direction}]
+let sirens = [];          // Map siren pins [{id, name, entity_id, floor_id, x, y}]
 
 // Multi-panel state
 let activePanelIdx = 0;   // Which floor panel is "selected" (zoom/reset target)
@@ -716,6 +718,54 @@ async function loadGroups() {
   } catch { groups = []; }
 }
 
+/* ─── LIGHTS & SIRENS ─────────────────────────────────────── */
+async function loadLights() {
+  try {
+    const res = await fetch(apiPath("ow/lights") + "?v=" + Date.now());
+    lights = res.ok ? await res.json() : [];
+  } catch { lights = []; }
+}
+async function loadSirens() {
+  try {
+    const res = await fetch(apiPath("ow/sirens") + "?v=" + Date.now());
+    sirens = res.ok ? await res.json() : [];
+  } catch { sirens = []; }
+}
+async function saveLight(pin) {
+  await fetch(apiPath("ow/save-light"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(pin) });
+}
+async function saveSiren(pin) {
+  await fetch(apiPath("ow/save-siren"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(pin) });
+}
+async function deleteLight(id) {
+  lights = lights.filter(p => p.id !== id);
+  await fetch(apiPath("ow/delete-light"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id }) });
+}
+async function deleteSiren(id) {
+  sirens = sirens.filter(p => p.id !== id);
+  await fetch(apiPath("ow/delete-siren"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id }) });
+}
+
+// Toggle light/siren entity via HA service call
+function togglePinEntity(entityId) {
+  if (!entityId) return;
+  const isOn = haStates[entityId]?.state === "on";
+  if (entityId.startsWith("light.")) {
+    // Use HA light domain
+    if (IS_DIRECT_MODE) {
+      fetch("ow/call-service", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ domain: "light", service: isOn ? "turn_off" : "turn_on", entity_id: entityId }) });
+    } else if (haConnected && haSocket) {
+      sendHA({ type: "call_service", domain: "light", service: isOn ? "turn_off" : "turn_on",
+        service_data: { entity_id: entityId } });
+    }
+  } else {
+    owCallSwitch(entityId, !isOn);
+  }
+}
+
+
+
 async function loadFloors() {
   try {
     const res = await fetch(apiPath("ow/floors") + "?v=" + Date.now());
@@ -915,6 +965,7 @@ function renderPanelZones(idx) {
   } finally {
     activeFloorId = savedFloorId;
   }
+  renderPins(idx); // render lights & sirens for this panel
 }
 
 function renderAllPanelZones() {
@@ -1796,6 +1847,7 @@ function renderZones() {
     return;
   }
   _renderZonesInternal();
+  renderPins(); // render lights & sirens on single panel
 }
 
 // Internal zone drawing — draws into whatever element currently has id="zonesSvg"
@@ -2129,6 +2181,270 @@ function makeDraggableEditor(containerEl) {
   }
 }
 
+/* ─── PIN RENDERING (LIGHTS & SIRENS) ────────────────────── */
+// panelIdx: undefined = single panel, number = multi-panel index
+function renderPins(panelIdx) {
+  const hideLights = localStorage.getItem('ow_hide_lights') === 'true';
+  const hideSirens = localStorage.getItem('ow_hide_sirens') === 'true';
+
+  // Determine SVG and floor context
+  let svg, floorId, isFirst;
+  if (panelIdx !== undefined) {
+    svg     = getPanelSvg(panelIdx);
+    const f = getPanelFloor(panelIdx);
+    floorId = f?.id || null;
+    isFirst = floors.length === 0 || floors[0]?.id === floorId;
+  } else {
+    svg     = document.getElementById('zonesSvg');
+    floorId = activeFloorId;
+    isFirst = !floorId || floors.length === 0 || floors[0]?.id === floorId;
+  }
+  if (!svg) return;
+
+  // Remove existing pin elements (they have data-pin attribute)
+  svg.querySelectorAll('[data-pin]').forEach(el => el.remove());
+
+  const scale = (panelIdx !== undefined ? PANEL_ZOOMS[panelIdx]?.scale : zoom.scale) || 1;
+
+  // Helper: is pin visible on this floor?
+  function pinOnFloor(pin) {
+    if (!pin.floor_id) return isFirst;
+    return pin.floor_id === floorId;
+  }
+
+  // Render lights
+  if (!hideLights) {
+    lights.forEach(pin => {
+      if (!pinOnFloor(pin)) return;
+      const isOn   = haStates[pin.entity_id]?.state === 'on';
+      const isEdit = editorMode && activePinType === 'light' && activePinId === pin.id;
+      svg.appendChild(makeLightPin(pin, isOn, isEdit, scale));
+    });
+  }
+
+  // Render sirens
+  if (!hideSirens) {
+    sirens.forEach(pin => {
+      if (!pinOnFloor(pin)) return;
+      const isOn   = haStates[pin.entity_id]?.state === 'on';
+      const isEdit = editorMode && activePinType === 'siren' && activePinId === pin.id;
+      svg.appendChild(makeSirenPin(pin, isOn, isEdit, scale));
+    });
+  }
+}
+
+function makeLightPin(pin, isOn, isEdit, scale) {
+  const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  g.setAttribute('data-pin', 'light');
+  g.setAttribute('data-pin-id', pin.id);
+  g.style.cursor = 'pointer';
+
+  const R = 14 / scale; // base radius
+  const cx = pin.x, cy = pin.y;
+
+  // Glow aura (always present when on, breathing animation via CSS)
+  if (isOn) {
+    // Omnidirectional glow
+    const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+    const grad = document.createElementNS('http://www.w3.org/2000/svg', 'radialGradient');
+    grad.id = `lg-${pin.id}`;
+    grad.setAttribute('cx', '50%'); grad.setAttribute('cy', '50%'); grad.setAttribute('r', '50%');
+    const s1 = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
+    s1.setAttribute('offset', '0%'); s1.setAttribute('stop-color', '#ffcc44'); s1.setAttribute('stop-opacity', '0.9');
+    const s2 = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
+    s2.setAttribute('offset', '100%'); s2.setAttribute('stop-color', '#ffaa00'); s2.setAttribute('stop-opacity', '0');
+    grad.appendChild(s1); grad.appendChild(s2); defs.appendChild(grad); g.appendChild(defs);
+
+    const glowR = R * 5;
+    const glow  = document.createElementNS('http://www.w3.org/2000/svg', 'ellipse');
+    glow.setAttribute('cx', cx); glow.setAttribute('cy', cy);
+    glow.setAttribute('rx', glowR); glow.setAttribute('ry', glowR);
+    glow.setAttribute('fill', `url(#lg-${pin.id})`);
+    glow.setAttribute('class', 'pin-light-glow');
+    g.appendChild(glow);
+
+    // Directional cone (if direction set)
+    if (pin.direction !== undefined && pin.direction !== null && pin.direction !== '') {
+      const dir = Number(pin.direction);
+      const coneLen = R * 9;
+      const spread  = 35; // degrees
+      const rad     = (d) => d * Math.PI / 180;
+      const cone = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      const x1 = cx + coneLen * Math.sin(rad(dir - spread));
+      const y1 = cy - coneLen * Math.cos(rad(dir - spread));
+      const x2 = cx + coneLen * Math.sin(rad(dir + spread));
+      const y2 = cy - coneLen * Math.cos(rad(dir + spread));
+      cone.setAttribute('d', `M${cx},${cy} L${x1},${y1} Q${cx + coneLen * Math.sin(rad(dir)) * 1.1},${cy - coneLen * Math.cos(rad(dir)) * 1.1} ${x2},${y2} Z`);
+      cone.setAttribute('fill', '#ffcc44');
+      cone.setAttribute('fill-opacity', '0.18');
+      cone.setAttribute('class', 'pin-light-cone');
+      g.appendChild(cone);
+    }
+  }
+
+  // Icon circle background
+  const bg = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+  bg.setAttribute('cx', cx); bg.setAttribute('cy', cy); bg.setAttribute('r', R);
+  bg.setAttribute('fill', isOn ? '#1a1200' : '#1a1a1a');
+  bg.setAttribute('stroke', isOn ? '#ffcc44' : '#555');
+  bg.setAttribute('stroke-width', String(1.5 / scale));
+  if (isEdit) { bg.setAttribute('stroke', '#0096ff'); bg.setAttribute('stroke-width', String(2.5 / scale)); }
+  g.appendChild(bg);
+
+  // Bulb icon (SVG paths scaled to fit)
+  const iconG = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  const s = R / 10;
+  iconG.setAttribute('transform', `translate(${cx},${cy}) scale(${s})`);
+  const bulb = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  // Simplified bulb: circle top + rect base + lines
+  bulb.setAttribute('d', 'M0,-7 a5,5 0 1,1 0.01,0 M-2.5,1.5 L-2.5,4 Q-2.5,5.5 0,5.5 Q2.5,5.5 2.5,4 L2.5,1.5 Z M-1.5,5.5 L1.5,5.5');
+  bulb.setAttribute('fill', 'none');
+  bulb.setAttribute('stroke', isOn ? '#ffcc44' : '#777');
+  bulb.setAttribute('stroke-width', '1.5');
+  bulb.setAttribute('stroke-linecap', 'round');
+  iconG.appendChild(bulb);
+  g.appendChild(iconG);
+
+  // Click handler — toggle in live mode, select in editor
+  g.addEventListener('click', e => {
+    e.stopPropagation();
+    if (editorMode) {
+      selectPin('light', pin.id);
+      renderZonesEditor();
+    } else {
+      togglePinEntity(pin.entity_id);
+    }
+  });
+
+  // Drag in editor
+  if (editorMode) makePinDraggable(g, pin, 'light');
+
+  return g;
+}
+
+function makeSirenPin(pin, isOn, isEdit, scale) {
+  const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  g.setAttribute('data-pin', 'siren');
+  g.setAttribute('data-pin-id', pin.id);
+  g.style.cursor = 'pointer';
+
+  const R  = 14 / scale;
+  const cx = pin.x, cy = pin.y;
+
+  // Pulsing rings + flash glow when on
+  if (isOn) {
+    const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+    const grad = document.createElementNS('http://www.w3.org/2000/svg', 'radialGradient');
+    grad.id = `sg-${pin.id}`;
+    grad.setAttribute('cx', '50%'); grad.setAttribute('cy', '50%'); grad.setAttribute('r', '50%');
+    const s1 = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
+    s1.setAttribute('offset', '0%'); s1.setAttribute('stop-color', '#ff3b30'); s1.setAttribute('stop-opacity', String(flashPhase ? 0.7 : 0.35));
+    const s2 = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
+    s2.setAttribute('offset', '100%'); s2.setAttribute('stop-color', '#ff3b30'); s2.setAttribute('stop-opacity', '0');
+    grad.appendChild(s1); grad.appendChild(s2); defs.appendChild(grad); g.appendChild(defs);
+
+    const flashGlow = document.createElementNS('http://www.w3.org/2000/svg', 'ellipse');
+    flashGlow.setAttribute('cx', cx); flashGlow.setAttribute('cy', cy);
+    flashGlow.setAttribute('rx', R * 6); flashGlow.setAttribute('ry', R * 6);
+    flashGlow.setAttribute('fill', `url(#sg-${pin.id})`);
+    g.appendChild(flashGlow);
+
+    // 3 pulsing rings
+    [2.5, 4.0, 5.5].forEach((mult, i) => {
+      const ring = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      ring.setAttribute('cx', cx); ring.setAttribute('cy', cy); ring.setAttribute('r', R * mult);
+      ring.setAttribute('fill', 'none');
+      ring.setAttribute('stroke', '#ff3b30');
+      ring.setAttribute('stroke-width', String(1.2 / scale));
+      ring.setAttribute('class', 'pin-siren-ring');
+      ring.style.animationDelay = `${i * 0.4}s`;
+      g.appendChild(ring);
+    });
+  }
+
+  // Icon background
+  const bg = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+  bg.setAttribute('cx', cx); bg.setAttribute('cy', cy); bg.setAttribute('r', R);
+  bg.setAttribute('fill', isOn ? '#1a0000' : '#1a1a1a');
+  bg.setAttribute('stroke', isOn ? '#ff3b30' : '#555');
+  bg.setAttribute('stroke-width', String(1.5 / scale));
+  if (isEdit) { bg.setAttribute('stroke', '#0096ff'); bg.setAttribute('stroke-width', String(2.5 / scale)); }
+  g.appendChild(bg);
+
+  // Speaker/bell icon
+  const iconG = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  const s = R / 10;
+  iconG.setAttribute('transform', `translate(${cx},${cy}) scale(${s})`);
+  const speaker = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  // Speaker cone shape
+  speaker.setAttribute('d', 'M-5,3 L-5,-3 L0,-5 L0,5 Z M0,-3 Q3,-3 3,0 Q3,3 0,3');
+  speaker.setAttribute('fill', 'none');
+  speaker.setAttribute('stroke', isOn ? '#ff3b30' : '#777');
+  speaker.setAttribute('stroke-width', '1.5');
+  speaker.setAttribute('stroke-linejoin', 'round');
+  speaker.setAttribute('stroke-linecap', 'round');
+  // Sound waves
+  const w1 = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  w1.setAttribute('d', 'M4,-4 Q7,0 4,4');
+  w1.setAttribute('fill', 'none');
+  w1.setAttribute('stroke', isOn ? '#ff3b30' : '#555');
+  w1.setAttribute('stroke-width', '1.5');
+  w1.setAttribute('stroke-linecap', 'round');
+  iconG.appendChild(speaker); iconG.appendChild(w1);
+  g.appendChild(iconG);
+
+  g.addEventListener('click', e => {
+    e.stopPropagation();
+    if (editorMode) {
+      selectPin('siren', pin.id);
+      renderZonesEditor();
+    } else {
+      togglePinEntity(pin.entity_id);
+    }
+  });
+
+  if (editorMode) makePinDraggable(g, pin, 'siren');
+
+  return g;
+}
+
+// Pin editor state
+let activePinType = null; // 'light' | 'siren' | null
+let activePinId   = null;
+let placingPinType = null; // 'light' | 'siren' — click-to-place mode
+
+function selectPin(type, id) {
+  activePinType = type;
+  activePinId   = id;
+}
+
+function makePinDraggable(g, pin, type) {
+  let dragging = false, startClient = null, startPos = null;
+  g.addEventListener('pointerdown', e => {
+    if (!editorMode) return;
+    e.stopPropagation();
+    dragging    = true;
+    startClient = { x: e.clientX, y: e.clientY };
+    startPos    = { x: pin.x, y: pin.y };
+    g.setPointerCapture(e.pointerId);
+  });
+  g.addEventListener('pointermove', e => {
+    if (!dragging) return;
+    // Convert screen delta to floorplan coords using current zoom
+    const dScreen = { x: e.clientX - startClient.x, y: e.clientY - startClient.y };
+    const s = zoom.scale || 1;
+    pin.x = Math.round(startPos.x + dScreen.x / s);
+    pin.y = Math.round(startPos.y + dScreen.y / s);
+    renderZones();
+  });
+  g.addEventListener('pointerup', () => {
+    if (!dragging) return;
+    dragging = false;
+    if (type === 'light') saveLight(pin);
+    else saveSiren(pin);
+  });
+}
+
 function renderZonesEditor() {
   const container = document.getElementById("zonesEditorContainer");
   if (!container) return;
@@ -2218,6 +2534,54 @@ function renderZonesEditor() {
       <span style="flex:1;opacity:${isOff ? 0.5 : 1};font-size:12px;">${escapeHtml(z.name || z.id)}</span>
       ${z.hidden ? `<span style="font-size:9px;color:#555;">hidden</span>` : state === "triggered" ? `<span style="font-size:9px;color:#ff3b30;">⚠</span>` : `<span style="font-size:9px;color:#444;">${(z.points||[]).length}pt</span>`}
     </div>`;
+  }
+
+  // ── Build pin right panel (light or siren) ─────────────────
+  function buildPinRightPanel() {
+    const pin = activePinType === 'light'
+      ? lights.find(p => p.id === activePinId)
+      : sirens.find(p => p.id === activePinId);
+    if (!pin) return '';
+
+    const isLight = activePinType === 'light';
+    const label   = isLight ? 'Light' : 'Siren';
+    const icon    = isLight ? '💡' : '🔊';
+    const floorOpts = floors.map(f =>
+      `<option value="${f.id}" ${(pin.floor_id || floors[0]?.id) === f.id ? 'selected' : ''}>${escapeHtml(f.name)}</option>`
+    ).join('');
+
+    return `
+      <div class="zed-right-content">
+        <div class="zones-editor-section-title">${icon} ${label}</div>
+        <div class="zones-editor-row">
+          <label>Name</label>
+          <input id="pinNameInput" class="zones-editor-input" value="${escapeHtml(pin.name || '')}" placeholder="Name">
+        </div>
+        <div class="zones-editor-row">
+          <label>Entity</label>
+          <input id="pinEntityInput" class="zones-editor-input" value="${escapeHtml(pin.entity_id || '')}"
+            placeholder="${isLight ? 'light.* or switch.*' : 'switch.* or siren.*'}">
+        </div>
+        ${floors.length > 1 ? `
+        <div class="zones-editor-row">
+          <label>Floor</label>
+          <select id="pinFloorSelect" style="flex:1;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:5px 8px;color:#fff;font-size:12px;">
+            ${floorOpts}
+          </select>
+        </div>` : ''}
+        ${isLight ? `
+        <div class="zones-editor-row">
+          <label>Direction</label>
+          <input id="pinDirectionInput" class="zones-editor-input" type="number" min="0" max="359"
+            value="${pin.direction ?? ''}" placeholder="0-359° (optional)">
+          <span style="font-size:11px;color:#555;margin-left:4px;">°</span>
+        </div>` : ''}
+        <div class="zones-editor-row" style="margin-top:8px;">
+          <label style="color:#888;font-size:11px;">Position</label>
+          <span style="font-size:11px;color:#555;">${Math.round(pin.x)}, ${Math.round(pin.y)}</span>
+        </div>
+        <button id="pinDeleteBtn" style="margin-top:12px;background:rgba(255,59,48,0.15);border:1px solid rgba(255,59,48,0.4);color:#ff3b30;border-radius:8px;padding:6px 12px;cursor:pointer;width:100%;font-size:12px;">Delete ${label}</button>
+      </div>`;
   }
 
   // ── Build right panel ──────────────────────────────────────
@@ -2355,13 +2719,15 @@ function renderZonesEditor() {
           <div class="zed-actions">
             <button id="addGroupBtn">+ Group</button>
             <button id="addZoneBtn">+ Zone</button>
+            <button id="addLightBtn" title="Click map to place light">+ Light</button>
+            <button id="addSirenBtn" title="Click map to place siren">+ Siren</button>
             ${selectedZone ? `<button id="editPointsBtn" style="${isEditingPoints ? 'border-color:rgba(255,204,0,0.5);color:#ffcc00;' : ''}">${editPtsLabel}</button>` : ""}
             ${selectedZone ? `<button id="undoZonesBtn" title="Undo last change">↩ Undo</button>` : ""}
             ${(selectedZone || selectedGroup) ? `<button id="deleteZoneBtn" class="danger">Delete</button>` : ""}
           </div>
         </div>
         <!-- RIGHT PANEL — completely hidden when nothing selected -->
-        <div class="zed-right" style="${(!selectedZone && !selectedGroup) ? 'display:none;' : ''}">${buildRightPanel()}</div>
+        <div class="zed-right" style="${(!selectedZone && !selectedGroup && !activePinId) ? 'display:none;' : ''}">${activePinId ? buildPinRightPanel() : buildRightPanel()}</div>
       </div>
       <div class="zed-resize-handle" id="zedResizeHandle"></div>
     </div>
@@ -2431,6 +2797,31 @@ function renderZonesEditor() {
     groups.push(ng);
     selectedGroupId = id; selectedZoneId = null;
     saveGroup(ng); renderZonesEditor();
+  });
+
+  // Add Light — enter placement mode
+  document.getElementById("addLightBtn")?.addEventListener("click", () => {
+    placingPinType = 'light';
+    activePinType  = null; activePinId = null;
+    selectedZoneId = null; selectedGroupId = null;
+    isCreatingZone = false;
+    // Visual cue: crosshair on SVG
+    const svg = document.getElementById('zonesSvg');
+    if (svg) svg.style.cursor = 'crosshair';
+    showToast('Click the map to place the light', 'info', 2000);
+    renderZonesEditor();
+  });
+
+  // Add Siren — enter placement mode
+  document.getElementById("addSirenBtn")?.addEventListener("click", () => {
+    placingPinType = 'siren';
+    activePinType  = null; activePinId = null;
+    selectedZoneId = null; selectedGroupId = null;
+    isCreatingZone = false;
+    const svg = document.getElementById('zonesSvg');
+    if (svg) svg.style.cursor = 'crosshair';
+    showToast('Click the map to place the siren', 'info', 2000);
+    renderZonesEditor();
   });
 
   // Delete
@@ -2509,6 +2900,42 @@ function renderZonesEditor() {
       selectedGroupId = null;
       renderZonesEditor();
     });
+  }
+
+  // ── Pin config wiring ─────────────────────────────────────
+  if (activePinId) {
+    const pin = activePinType === 'light'
+      ? lights.find(p => p.id === activePinId)
+      : sirens.find(p => p.id === activePinId);
+    if (pin) {
+      document.getElementById('pinNameInput')?.addEventListener('input', e => {
+        pin.name = e.target.value;
+        if (activePinType === 'light') saveLight(pin); else saveSiren(pin);
+      });
+      document.getElementById('pinEntityInput')?.addEventListener('blur', e => {
+        pin.entity_id = e.target.value.trim();
+        if (activePinType === 'light') saveLight(pin); else saveSiren(pin);
+        renderZones();
+      });
+      document.getElementById('pinFloorSelect')?.addEventListener('change', e => {
+        pin.floor_id = e.target.value;
+        if (activePinType === 'light') saveLight(pin); else saveSiren(pin);
+        renderZones();
+      });
+      document.getElementById('pinDirectionInput')?.addEventListener('input', e => {
+        const v = e.target.value.trim();
+        pin.direction = v === '' ? null : Number(v);
+        if (activePinType === 'light') saveLight(pin);
+        renderZones();
+      });
+      document.getElementById('pinDeleteBtn')?.addEventListener('click', () => {
+        if (!confirm(`Delete this ${activePinType}?`)) return;
+        if (activePinType === 'light') deleteLight(activePinId);
+        else deleteSiren(activePinId);
+        activePinId = null; activePinType = null;
+        renderZones(); renderZonesEditor();
+      });
+    }
   }
 
   // ── Zone config wiring ───────────────────────────────────
@@ -2790,6 +3217,24 @@ function bindZonesSvgEvents() {
     const sx = e.clientX, sy = e.clientY;
     const fp = screenToFloorplan(sx, sy);
 
+    // 0) Place a new light/siren pin
+    if (placingPinType) {
+      const type = placingPinType;
+      placingPinType = null;
+      const pin = {
+        id: (type === 'light' ? 'light_' : 'siren_') + Date.now(),
+        name: type === 'light' ? 'New Light' : 'New Siren',
+        entity_id: '',
+        floor_id: activeFloorId || null,
+        x: Math.round(fp.x), y: Math.round(fp.y),
+        direction: null,
+      };
+      if (type === 'light') { lights.push(pin); saveLight(pin); selectPin('light', pin.id); }
+      else                  { sirens.push(pin); saveSiren(pin); selectPin('siren', pin.id); }
+      renderZones(); renderZonesEditor();
+      e.stopPropagation(); return;
+    }
+
     // 1) Dragging a vertex handle — capture and block pan
     if (target.classList.contains("zone-handle")) {
       draggingHandle = { zoneId: target.dataset.zoneId, idx: Number(target.dataset.index) };
@@ -2865,6 +3310,10 @@ function bindZonesSvgEvents() {
     highlightedZoneId = null; highlightedUntil      = 0;
     highlightedGroupId = null; highlightedGroupUntil = 0;
     isEditingPoints = false;
+    activePinId = null; activePinType = null;
+    placingPinType = null;
+    const svgEl = document.getElementById('zonesSvg');
+    if (svgEl) svgEl.style.cursor = '';
     renderZones();
     renderZonesEditor();
     // Do NOT stopPropagation here — outer pan handler will pick it up
@@ -4133,6 +4582,17 @@ function renderSettingsPanel() {
             </div>
             <div style="font-size:11px;color:#777;margin-top:4px;"><b>Zone only:</b> just the triggered zone flashes.<br><b>Whole group:</b> all zones in the group flash.</div>
           </div>
+          <div class="settings-field">
+            <label>Map icons</label>
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:6px;">
+              <input type="checkbox" id="hideLightsChk" ${localStorage.getItem('ow_hide_lights') === 'true' ? 'checked' : ''}>
+              Hide light icons on map
+            </label>
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:4px;">
+              <input type="checkbox" id="hideSirensChk" ${localStorage.getItem('ow_hide_sirens') === 'true' ? 'checked' : ''}>
+              Hide siren icons on map
+            </label>
+          </div>
         </div>
 
         <div class="settings-section">
@@ -4393,6 +4853,18 @@ function renderSettingsPanel() {
   if (hideCamChk) hideCamChk.onchange = () => {
     localStorage.setItem("ow_hide_camera_status", hideCamChk.checked);
     applyStatusVisibility();
+  };
+
+  // ── Map icon visibility ───────────────────────────────────────
+  const hideLightsChk = document.getElementById('hideLightsChk');
+  const hideSirensChk = document.getElementById('hideSirensChk');
+  if (hideLightsChk) hideLightsChk.onchange = () => {
+    localStorage.setItem('ow_hide_lights', hideLightsChk.checked ? 'true' : 'false');
+    renderZones();
+  };
+  if (hideSirensChk) hideSirensChk.onchange = () => {
+    localStorage.setItem('ow_hide_sirens', hideSirensChk.checked ? 'true' : 'false');
+    renderZones();
   };
 
   // ── Floor settings ────────────────────────────────────────────
@@ -5498,6 +5970,8 @@ async function init() {
   await loadZones();
   await loadGroups();
   await loadFloors();   // sets activeFloorId, loads correct floor image, calls initFloorplan
+  await loadLights();
+  await loadSirens();
   window._updateFloorBtn?.(); // show/hide floor switcher based on floor count
   bindZonesSvgEvents();
   applyFloorPanels();   // build single or multi-panel layout based on saved settings

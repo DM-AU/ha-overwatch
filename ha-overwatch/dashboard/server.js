@@ -170,7 +170,29 @@ function parseZoneYaml(text) {
   return z;
 }
 
-/* ─── FLOORS ──────────────────────────────────────────────── */
+/* ─── LIGHTS & SIRENS (MAP PINS) ──────────────────────────── */
+// Stored as config/lights.json and config/sirens.json
+// Each pin: { id, name, entity_id, floor_id, x, y, direction }
+function pinsFile(type) {
+  return path.join(DATA_DIR, "config", `${type}.json`);
+}
+function loadPins(type) {
+  try { return JSON.parse(fs.readFileSync(pinsFile(type), "utf8")); }
+  catch { return []; }
+}
+function savePin(type, pin) {
+  const pins = loadPins(type);
+  const idx  = pins.findIndex(p => p.id === pin.id);
+  if (idx >= 0) pins[idx] = pin; else pins.push(pin);
+  fs.mkdirSync(path.dirname(pinsFile(type)), { recursive: true });
+  fs.writeFileSync(pinsFile(type), JSON.stringify(pins, null, 2), "utf8");
+}
+function deletePin(type, id) {
+  const pins = loadPins(type).filter(p => p.id !== id);
+  fs.writeFileSync(pinsFile(type), JSON.stringify(pins, null, 2), "utf8");
+}
+
+
 const FLOORS_FILE = () => path.join(DATA_DIR, "config", "floors.json");
 
 function loadFloors() {
@@ -337,6 +359,26 @@ const server = http.createServer(async (req, res) => {
       json(res, { ok: true });
     } catch (e) { err(res, e.message); }
     return;
+  }
+
+  /* ── /ow/lights & /ow/sirens — map pin CRUD ─────────────── */
+  if (pathname === "/ow/lights"  && req.method === "GET") { json(res, loadPins("lights"));  return; }
+  if (pathname === "/ow/sirens"  && req.method === "GET") { json(res, loadPins("sirens"));  return; }
+  if (pathname === "/ow/save-light"   && req.method === "POST") {
+    try { const b = await readBody(req); savePin("lights", b); json(res, { ok: true }); }
+    catch (e) { err(res, e.message); } return;
+  }
+  if (pathname === "/ow/save-siren"   && req.method === "POST") {
+    try { const b = await readBody(req); savePin("sirens", b); json(res, { ok: true }); }
+    catch (e) { err(res, e.message); } return;
+  }
+  if (pathname === "/ow/delete-light" && req.method === "POST") {
+    try { const b = await readBody(req); deletePin("lights", b.id); json(res, { ok: true }); }
+    catch (e) { err(res, e.message); } return;
+  }
+  if (pathname === "/ow/delete-siren" && req.method === "POST") {
+    try { const b = await readBody(req); deletePin("sirens", b.id); json(res, { ok: true }); }
+    catch (e) { err(res, e.message); } return;
   }
 
   /* ── /api/upload-floorplan ───────────────────────────────── */

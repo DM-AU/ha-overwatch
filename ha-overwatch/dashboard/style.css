@@ -738,6 +738,46 @@ display: flex;
   animation: zone-flash 0.7s ease-in-out infinite;
 }
 
+/* ── Light pin glow ─────────────────────────────────────────── */
+@keyframes light-breathe {
+  0%, 100% { opacity: 0.7; transform: scale(1); }
+  50%       { opacity: 1.0; transform: scale(1.12); }
+}
+
+.pin-light-glow {
+  animation: light-breathe 2s ease-in-out infinite;
+  transform-origin: center;
+  transform-box: fill-box;
+}
+
+.pin-light-cone {
+  animation: light-breathe 2s ease-in-out infinite;
+  transform-box: fill-box;
+}
+
+/* ── Siren ring pulse ───────────────────────────────────────── */
+@keyframes siren-ring {
+  0%   { r: var(--ring-start, 14px); opacity: 0.8; }
+  100% { r: var(--ring-end,   80px); opacity: 0; }
+}
+
+.pin-siren-ring {
+  animation: siren-ring-expand 1.6s ease-out infinite;
+}
+
+@keyframes siren-ring-expand {
+  0%   { opacity: 0.8; stroke-width: 2px; }
+  100% { opacity: 0;   stroke-width: 0.5px; transform: scale(3); }
+}
+
+.pin-siren-ring {
+  transform-origin: center;
+  transform-box: fill-box;
+  animation: siren-ring-expand 1.6s ease-out infinite;
+}
+
+
+
 /* ============================================================
  * SEARCH PANEL
  * ============================================================ */
