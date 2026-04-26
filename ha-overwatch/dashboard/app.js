@@ -2185,9 +2185,12 @@ function makeDraggableEditor(containerEl) {
       isCreatingZone = false;
       isEditingPoints = false;
       currentNewZone = null;
-      editorPosRestored = false; // allow re-restore next open
+      activePinId = null; activePinType = null;
+      placingPinType = null; placingEntityId = null;
+      editorPosRestored = false;
       const svg = document.getElementById("zonesSvg");
-      if (svg) svg.style.pointerEvents = "none";
+      if (svg) { svg.style.pointerEvents = "none"; svg.style.cursor = ""; }
+      document.querySelectorAll('.fp-svg').forEach(s => s.style.cursor = '');
       const zonesBtn = document.getElementById("zonesBtn");
       if (zonesBtn) zonesBtn.classList.remove("active");
       renderZonesEditor();
@@ -2253,6 +2256,7 @@ function makeLightPin(pin, isOn, isEdit, scale) {
   g.setAttribute('data-pin', 'light');
   g.setAttribute('data-pin-id', pin.id);
   g.style.cursor = 'pointer';
+  g.style.pointerEvents = 'all'; // always clickable even when SVG is pointer-events:none
 
   const R = 14 / scale; // base radius
   const cx = pin.x, cy = pin.y;
@@ -2305,18 +2309,26 @@ function makeLightPin(pin, isOn, isEdit, scale) {
   if (isEdit) { bg.setAttribute('stroke', '#0096ff'); bg.setAttribute('stroke-width', String(2.5 / scale)); }
   g.appendChild(bg);
 
-  // Bulb icon (SVG paths scaled to fit)
+  // Bulb icon — clean lightbulb shape
   const iconG = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-  const s = R / 10;
+  const s = R / 12;
   iconG.setAttribute('transform', `translate(${cx},${cy}) scale(${s})`);
-  const bulb = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-  // Simplified bulb: circle top + rect base + lines
-  bulb.setAttribute('d', 'M0,-7 a5,5 0 1,1 0.01,0 M-2.5,1.5 L-2.5,4 Q-2.5,5.5 0,5.5 Q2.5,5.5 2.5,4 L2.5,1.5 Z M-1.5,5.5 L1.5,5.5');
-  bulb.setAttribute('fill', 'none');
-  bulb.setAttribute('stroke', isOn ? '#ffcc44' : '#777');
-  bulb.setAttribute('stroke-width', '1.5');
-  bulb.setAttribute('stroke-linecap', 'round');
-  iconG.appendChild(bulb);
+  // Bulb glass dome
+  const dome = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  dome.setAttribute('d', 'M0,-8 C-5,-8 -8,-5 -8,0 C-8,4 -5,7 -2,8 L-2,10 L2,10 L2,8 C5,7 8,4 8,0 C8,-5 5,-8 0,-8 Z');
+  dome.setAttribute('fill', isOn ? 'rgba(255,204,68,0.3)' : 'rgba(255,255,255,0.08)');
+  dome.setAttribute('stroke', isOn ? '#ffcc44' : '#666');
+  dome.setAttribute('stroke-width', '1.2');
+  // Base lines
+  const base1 = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+  base1.setAttribute('x1', '-2'); base1.setAttribute('y1', '10');
+  base1.setAttribute('x2', '-2'); base1.setAttribute('y2', '12');
+  base1.setAttribute('stroke', isOn ? '#ffcc44' : '#555'); base1.setAttribute('stroke-width', '1.5');
+  const base2 = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+  base2.setAttribute('x1', '2'); base2.setAttribute('y1', '10');
+  base2.setAttribute('x2', '2'); base2.setAttribute('y2', '12');
+  base2.setAttribute('stroke', isOn ? '#ffcc44' : '#555'); base2.setAttribute('stroke-width', '1.5');
+  iconG.appendChild(dome); iconG.appendChild(base1); iconG.appendChild(base2);
   g.appendChild(iconG);
 
   // Click handler — toggle in live mode, select in editor
@@ -2341,6 +2353,7 @@ function makeSirenPin(pin, isOn, isEdit, scale) {
   g.setAttribute('data-pin', 'siren');
   g.setAttribute('data-pin-id', pin.id);
   g.style.cursor = 'pointer';
+  g.style.pointerEvents = 'all'; // always clickable even when SVG is pointer-events:none
 
   const R  = 14 / scale;
   const cx = pin.x, cy = pin.y;
@@ -2440,19 +2453,24 @@ function selectPin(type, id) {
 
 // Called when user clicks a map to place a pin (single or multi-panel)
 function placePinAtFloorplanCoord(x, y, floorId) {
-  const type = placingPinType;
+  const type     = placingPinType;
   const entityId = placingEntityId || '';
+  const zoneId   = placingZoneId;
   placingPinType  = null;
   placingEntityId = null;
   placingZoneId   = null;
   // Reset cursors
   document.querySelectorAll('#zonesSvg, .fp-svg').forEach(s => s.style.cursor = '');
 
+  // Inherit floor from the zone the entity belongs to
+  const zone = zones.find(z => z.id === zoneId);
+  const pinFloor = zone?.floor_id || floorId || activeFloorId || null;
+
   const pin = {
     id:        (type === 'light' ? 'light_' : 'siren_') + Date.now(),
     name:      entityId.split('.').pop() || (type === 'light' ? 'New Light' : 'New Siren'),
     entity_id: entityId,
-    floor_id:  floorId || activeFloorId || null,
+    floor_id:  pinFloor,
     x:         Math.round(x),
     y:         Math.round(y),
     direction: null,
@@ -2618,9 +2636,6 @@ function renderZonesEditor() {
     const isLight = activePinType === 'light';
     const label   = isLight ? 'Light' : 'Siren';
     const icon    = isLight ? '💡' : '🔊';
-    const floorOpts = floors.map(f =>
-      `<option value="${f.id}" ${(pin.floor_id || floors[0]?.id) === f.id ? 'selected' : ''}>${escapeHtml(f.name)}</option>`
-    ).join('');
 
     return `
       <div class="zed-right-content">
@@ -2632,27 +2647,21 @@ function renderZonesEditor() {
         <div class="zones-editor-row">
           <label>Entity</label>
           <input id="pinEntityInput" class="zones-editor-input" value="${escapeHtml(pin.entity_id || '')}"
-            placeholder="${isLight ? 'light.* or switch.*' : 'switch.* or siren.*'}">
+            placeholder="${isLight ? 'light.* or switch.*' : 'switch.* or siren.*'}" autocomplete="off">
         </div>
-        ${floors.length > 1 ? `
-        <div class="zones-editor-row">
-          <label>Floor</label>
-          <select id="pinFloorSelect" style="flex:1;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:5px 8px;color:#fff;font-size:12px;">
-            ${floorOpts}
-          </select>
-        </div>` : ''}
         ${isLight ? `
         <div class="zones-editor-row">
           <label>Direction</label>
           <input id="pinDirectionInput" class="zones-editor-input" type="number" min="0" max="359"
-            value="${pin.direction ?? ''}" placeholder="0-359° (optional)">
-          <span style="font-size:11px;color:#555;margin-left:4px;">°</span>
+            value="${pin.direction ?? ''}" placeholder="none" style="width:70px;">
+          <span style="font-size:11px;color:#555;margin-left:4px;">° (optional)</span>
         </div>` : ''}
-        <div class="zones-editor-row" style="margin-top:8px;">
-          <label style="color:#888;font-size:11px;">Position</label>
+        <div class="zones-editor-row" style="margin-top:4px;">
+          <label style="color:#555;font-size:11px;">Position</label>
           <span style="font-size:11px;color:#555;">${Math.round(pin.x)}, ${Math.round(pin.y)}</span>
         </div>
-        <button id="pinDeleteBtn" style="margin-top:12px;background:rgba(255,59,48,0.15);border:1px solid rgba(255,59,48,0.4);color:#ff3b30;border-radius:8px;padding:6px 12px;cursor:pointer;width:100%;font-size:12px;">Delete ${label}</button>
+        <button id="pinDoneBtn" style="margin-top:12px;background:rgba(0,150,255,0.15);border:1px solid rgba(0,150,255,0.4);color:#0096ff;border-radius:8px;padding:6px 12px;cursor:pointer;width:100%;font-size:12px;">Done</button>
+        <button id="pinDeleteBtn" style="margin-top:6px;background:rgba(255,59,48,0.15);border:1px solid rgba(255,59,48,0.4);color:#ff3b30;border-radius:8px;padding:6px 12px;cursor:pointer;width:100%;font-size:12px;">Delete ${label}</button>
       </div>`;
   }
 
@@ -2959,21 +2968,24 @@ function renderZonesEditor() {
         pin.name = e.target.value;
         if (activePinType === 'light') saveLight(pin); else saveSiren(pin);
       });
+      // Stop all keyboard events from bubbling to prevent zone panel tab-switching
+      document.getElementById('pinEntityInput')?.addEventListener('keydown', e => e.stopPropagation());
+      document.getElementById('pinEntityInput')?.addEventListener('input',   e => e.stopPropagation());
       document.getElementById('pinEntityInput')?.addEventListener('blur', e => {
         pin.entity_id = e.target.value.trim();
         if (activePinType === 'light') saveLight(pin); else saveSiren(pin);
         renderZones();
       });
-      document.getElementById('pinFloorSelect')?.addEventListener('change', e => {
-        pin.floor_id = e.target.value;
-        if (activePinType === 'light') saveLight(pin); else saveSiren(pin);
-        renderZones();
-      });
       document.getElementById('pinDirectionInput')?.addEventListener('input', e => {
+        e.stopPropagation();
         const v = e.target.value.trim();
         pin.direction = v === '' ? null : Number(v);
         if (activePinType === 'light') saveLight(pin);
         renderZones();
+      });
+      document.getElementById('pinDoneBtn')?.addEventListener('click', () => {
+        activePinId = null; activePinType = null;
+        renderZones(); renderZonesEditor();
       });
       document.getElementById('pinDeleteBtn')?.addEventListener('click', () => {
         if (!confirm(`Delete this ${activePinType}?`)) return;
