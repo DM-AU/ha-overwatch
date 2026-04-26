@@ -151,6 +151,7 @@ function camStreamUrl(entityId) {
 
 /* ── Tile entity resolution ──────────────────────────────────── */
 function tileEntityFor(highResId) {
+  if (localStorage.getItem('ow_cam_always_high_res') === 'true') return highResId;
   return camLowResMap[highResId] || highResId;
 }
 
@@ -992,6 +993,7 @@ function initCameraPage() {
   // Expose for settings panel source toggle
   window.renderCameraStatusBar = renderCameraStatusBar;
   window.openCameraModal       = openCameraModal;
+  window.setCamLowResMap       = map => { camLowResMap = map; };
 
   // Initial renders
   renderCameraStatusBar();

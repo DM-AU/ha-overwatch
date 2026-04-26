@@ -100,6 +100,29 @@ let activeFloorId = null; // Currently displayed floor id
 let lights     = [];      // Map light pins [{id, name, entity_id, floor_id, x, y, direction}]
 let sirens     = [];      // Map siren pins [{id, name, entity_id, floor_id, x, y}]
 let cameraPins = [];      // Map camera pins [{id, name, entity_id, floor_id, x, y}]
+let camLowResMap = {};    // { "camera.high": "camera.low" } — persisted to ui.yaml
+
+function getCamLowRes(highResId) {
+  const forceHigh = localStorage.getItem('ow_cam_always_high_res') === 'true';
+  if (forceHigh) return highResId;
+  return camLowResMap[highResId] || highResId;
+}
+
+async function saveCamLowResMap() {
+  // Merge into uiConfig and persist via save-config
+  uiConfig.cam_low_res_map = JSON.stringify(camLowResMap);
+  try {
+    await fetch(apiPath("ow/save-config"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename: "config/ui.yaml", content: buildUiYaml() })
+    });
+    // Sync to cameras.js
+    if (window.OW) window.OW.uiConfig = uiConfig;
+    // Update cameras.js internal map if exposed
+    if (window.setCamLowResMap) window.setCamLowResMap(camLowResMap);
+  } catch(e) { console.warn('Failed to save cam low res map', e); }
+}
 
 // Multi-panel state
 let activePanelIdx = 0;   // Which floor panel is "selected" (zoom/reset target)
@@ -3026,8 +3049,9 @@ function renderZonePopupContent() {
     <div style="margin-bottom:6px;">
       <div style="font-size:10px;text-transform:uppercase;color:#555;letter-spacing:0.1em;margin-bottom:4px;">Cameras</div>
       ${cameras_.map(e => {
+        const resolvedId = getCamLowRes(e);
         const thumbUrl = showThumbs
-          ? (window.OW?.apiPath ? window.OW.apiPath(`ow/camera_proxy/${e}`) : `ow/camera_proxy/${e}`) + `?t=${Date.now()}`
+          ? (window.OW?.apiPath ? window.OW.apiPath(`ow/camera_proxy/${resolvedId}`) : `ow/camera_proxy/${resolvedId}`) + `?t=${Date.now()}`
           : null;
         return `<div style="margin-bottom:6px;">
           ${showThumbs ? `<img data-cam="${escapeHtml(e)}" src="${thumbUrl}" style="width:100%;height:120px;object-fit:cover;border-radius:6px;background:#111;display:block;margin-bottom:4px;" onerror="this.style.display='none'">` : ''}
@@ -3134,8 +3158,9 @@ function renderZonePopupContent() {
     const intervalMs = (parseInt(localStorage.getItem('ow_snap_interval') || window.OW?.uiConfig?.cam_snapshot_interval || 2) || 2) * 1000;
     _zonePopupTimer = setInterval(() => {
       popup.querySelectorAll('img[data-cam]').forEach(img => {
-        const e = img.dataset.cam;
-        const base = window.OW?.apiPath ? window.OW.apiPath(`ow/camera_proxy/${e}`) : `ow/camera_proxy/${e}`;
+        const e    = img.dataset.cam;
+        const res  = getCamLowRes(e);
+        const base = window.OW?.apiPath ? window.OW.apiPath(`ow/camera_proxy/${res}`) : `ow/camera_proxy/${res}`;
         img.src = `${base}?t=${Date.now()}`;
       });
     }, intervalMs);
@@ -3953,14 +3978,28 @@ function deviceRow(entityId, devType) {
       style="background:none;border:1px solid ${alreadyPlaced ? '#64b4ff' : 'rgba(255,255,255,0.2)'};border-radius:4px;padding:2px 5px;cursor:pointer;font-size:10px;color:${alreadyPlaced ? '#64b4ff' : '#666'};flex-shrink:0;">📍</button>`;
   }
 
+  // Camera: low-res entity sub-row
+  const lowResRow = devType === 'cameras' ? (() => {
+    const lowId = getCamLowRes(entityId);
+    return `<div class="cam-low-res-row" style="display:flex;align-items:center;gap:6px;padding:2px 0 4px 18px;width:100%;">
+      <span style="font-size:10px;color:#555;white-space:nowrap;">Low res:</span>
+      <input class="cam-low-res-input" data-high="${escapeHtml(entityId)}"
+        type="text" value="${escapeHtml(lowId === entityId ? '' : lowId)}"
+        placeholder="camera.entity_low (optional)"
+        style="flex:1;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:4px;padding:2px 6px;font-size:10px;color:#ccc;outline:none;"
+        autocomplete="off">
+    </div>`;
+  })() : '';
+
   return `
-    <div class="ha-entity-row" data-entity-id="${escapeHtml(entityId)}" data-dev-type="${devType}">
+    <div class="ha-entity-row" data-entity-id="${escapeHtml(entityId)}" data-dev-type="${devType}" style="flex-wrap:wrap;">
       <span style="font-size:9px;color:#555;flex-shrink:0;">${icon}</span>
       <div class="ha-entity-state ${stateClass}"></div>
       <span class="ha-entity-id" title="${escapeHtml(entityId)}">${escapeHtml(shortId)}</span>
       <span class="ha-entity-type">${escapeHtml(stateStr)}</span>
       ${pinBtn}
       <button class="ha-entity-remove" data-entity-id="${escapeHtml(entityId)}" title="Remove">✕</button>
+      ${lowResRow}
     </div>`;
 }
 
@@ -3983,6 +4022,18 @@ function bindDeviceSearch(selectedZone, inputId, resultsId, devType, listId) {
         if (devType === "sensors") subscribeHAEntities();
         refreshList();
       };
+    });
+    // Low-res camera input — save on blur/enter
+    listEl.querySelectorAll(".cam-low-res-input").forEach(inp => {
+      inp.addEventListener('keydown', e => e.stopPropagation());
+      inp.addEventListener('blur', () => {
+        const highId = inp.dataset.high;
+        const lowVal = inp.value.trim();
+        if (lowVal) camLowResMap[highId] = lowVal;
+        else delete camLowResMap[highId];
+        saveCamLowResMap();
+      });
+      inp.addEventListener('keydown', e => { if (e.key === 'Enter') inp.blur(); });
     });
     // Pin button — enter placement mode for this entity
     listEl.querySelectorAll(".ha-entity-pin").forEach(btn => {
@@ -5626,6 +5677,13 @@ function renderSettingsPanel() {
               <span>Hide camera name labels on tiles</span>
             </label>
           </div>
+          <div class="settings-field" style="margin-top:6px;">
+            <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
+              <input type="checkbox" id="cfgAlwaysHighRes" ${localStorage.getItem('ow_cam_always_high_res') === 'true' ? 'checked' : ''}
+                style="width:16px;height:16px;accent-color:#0096ff;cursor:pointer;">
+              <span>Always use high resolution (ignore low-res assignments)</span>
+            </label>
+          </div>
         </div>
 
         <div class="settings-section">
@@ -5791,6 +5849,12 @@ function renderSettingsPanel() {
     document.querySelectorAll('.cam-tile-label').forEach(el => {
       el.style.display = this.checked ? 'none' : '';
     });
+  });
+
+  document.getElementById("cfgAlwaysHighRes")?.addEventListener("change", function() {
+    localStorage.setItem('ow_cam_always_high_res', this.checked ? 'true' : 'false');
+    // Update cameras.js so grid refreshes with correct res
+    if (window.renderCameraStatusBar) { window.renderCameraStatusBar(); applyStatusVisibility(); }
   });
 
   // ── Sidebar position ─────────────────────────────────────────
@@ -6946,7 +7010,9 @@ async function init() {
   await loadLights();
   await loadSirens();
   await loadCameraPins();
-  if (haConnected) subscribeHAEntities(); // include pin entities in subscription
+  // Load low-res camera map from uiConfig
+  try { camLowResMap = JSON.parse(uiConfig.cam_low_res_map || '{}'); } catch { camLowResMap = {}; }
+  if (window.setCamLowResMap) window.setCamLowResMap(camLowResMap);
   window._updateFloorBtn?.(); // show/hide floor switcher based on floor count
   bindZonesSvgEvents();
   applyFloorPanels();   // build single or multi-panel layout based on saved settings
