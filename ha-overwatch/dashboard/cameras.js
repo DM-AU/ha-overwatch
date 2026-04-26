@@ -152,7 +152,9 @@ function camStreamUrl(entityId) {
 /* ── Tile entity resolution ──────────────────────────────────── */
 function tileEntityFor(highResId) {
   if (localStorage.getItem('ow_cam_always_high_res') === 'true') return highResId;
-  return camLowResMap[highResId] || highResId;
+  const resolved = camLowResMap[highResId] || highResId;
+  if (resolved !== highResId) console.log(`[CAM] Low-res: ${highResId} → ${resolved}`);
+  return resolved;
 }
 
 function friendlyName(entityId) {
@@ -992,20 +994,82 @@ function bindModal() {
   });
 
   document.getElementById('camModalFullscreenBtn')?.addEventListener('click', () => {
-    const modal = document.getElementById('cameraModal');
-    if (!modal) return;
-    if (!document.fullscreenElement) {
-      modal.requestFullscreen?.() || modal.webkitRequestFullscreen?.() || modal.mozRequestFullScreen?.();
-    } else {
-      document.exitFullscreen?.() || document.webkitExitFullscreen?.() || document.mozCancelFullScreen?.();
-    }
+    if (!camModalEntityId) return;
+    openCameraFullscreen(camModalEntityId);
   });
 
-  // Update fullscreen button icon when state changes
   document.addEventListener('fullscreenchange', () => {
     const btn = document.getElementById('camModalFullscreenBtn');
-    if (btn) btn.textContent = document.fullscreenElement ? '✕⛶' : '⛶';
+    if (btn) btn.textContent = document.fullscreenElement ? '⊡' : '⛶';
   });
+}
+
+/* ── Proper fullscreen — dedicated overlay, then native API ──── */
+function openCameraFullscreen(entityId) {
+  // Remove any existing fullscreen overlay
+  document.getElementById('camFullscreenOverlay')?.remove();
+
+  const isLive = camMode === 'live';
+  const overlay = document.createElement('div');
+  overlay.id = 'camFullscreenOverlay';
+  overlay.style.cssText = `
+    position:fixed; inset:0; z-index:99999;
+    background:#000;
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+  `;
+
+  const label = document.createElement('div');
+  label.textContent = friendlyName(entityId);
+  label.style.cssText = 'position:absolute;top:12px;left:16px;color:#fff;font-size:14px;font-weight:600;opacity:0.8;z-index:2;';
+
+  const closeBtn = document.createElement('button');
+  closeBtn.textContent = '✕';
+  closeBtn.style.cssText = 'position:absolute;top:10px;right:14px;background:rgba(0,0,0,0.5);border:1px solid rgba(255,255,255,0.2);color:#fff;border-radius:6px;padding:6px 12px;cursor:pointer;font-size:16px;z-index:2;';
+  closeBtn.onclick = () => {
+    if (document.fullscreenElement) document.exitFullscreen?.();
+    overlay.remove();
+  };
+
+  const media = document.createElement('div');
+  media.style.cssText = 'width:100%;height:100%;display:flex;align-items:center;justify-content:center;';
+
+  if (isLive) {
+    const img = document.createElement('img');
+    img.src = camStreamUrl(entityId); // always high-res in fullscreen
+    img.style.cssText = 'max-width:100%;max-height:100%;object-fit:contain;';
+    media.appendChild(img);
+  } else {
+    const img = document.createElement('img');
+    img.src = camSnapshotUrl(entityId); // always high-res in fullscreen
+    img.style.cssText = 'max-width:100%;max-height:100%;object-fit:contain;';
+    // Refresh snapshot at configured interval
+    const intervalMs = (parseInt(localStorage.getItem('ow_snap_interval') || window.OW?.uiConfig?.cam_snapshot_interval || 2) || 2) * 1000;
+    const timer = setInterval(() => {
+      if (!document.body.contains(overlay)) { clearInterval(timer); return; }
+      img.src = camSnapshotUrl(entityId) + '&r=' + Date.now();
+    }, intervalMs);
+    overlay.addEventListener('remove', () => clearInterval(timer));
+    media.appendChild(img);
+  }
+
+  overlay.appendChild(label);
+  overlay.appendChild(media);
+  overlay.appendChild(closeBtn);
+  document.body.appendChild(overlay);
+
+  // Request native fullscreen on the overlay element
+  overlay.requestFullscreen?.()
+    || overlay.webkitRequestFullscreen?.()
+    || overlay.mozRequestFullScreen?.();
+
+  // Close on Escape
+  const escHandler = e => {
+    if (e.key === 'Escape') { overlay.remove(); document.removeEventListener('keydown', escHandler); }
+  };
+  document.addEventListener('keydown', escHandler);
+  document.addEventListener('fullscreenchange', () => {
+    if (!document.fullscreenElement && document.body.contains(overlay)) overlay.remove();
+  }, { once: true });
 }
 
 // buildCamYamlPatch removed — partial saves destroyed ui.yaml.
@@ -1024,17 +1088,23 @@ async function initCameraPage() {
     if (r.ok) {
       camLowResMap = await r.json();
       OW.uiConfig.cam_low_res_map = JSON.stringify(camLowResMap);
+      console.log('[CAM] Low-res map loaded:', camLowResMap);
     } else {
       camLowResMap = JSON.parse(OW.uiConfig.cam_low_res_map || '{}');
+      console.log('[CAM] Low-res map from uiConfig:', camLowResMap);
     }
-  } catch { try { camLowResMap = JSON.parse(OW.uiConfig.cam_low_res_map || '{}'); } catch {} }
+  } catch(e) { 
+    console.warn('[CAM] Failed to load low-res map:', e);
+    try { camLowResMap = JSON.parse(OW.uiConfig.cam_low_res_map || '{}'); } catch { camLowResMap = {}; }
+  }
 
   try { camPinned = new Set(JSON.parse(OW.uiConfig.cam_pinned || '[]')); } catch {}
 
   // Expose for settings panel source toggle
   window.renderCameraStatusBar = renderCameraStatusBar;
   window.openCameraModal       = openCameraModal;
-  window.setCamLowResMap       = map => { camLowResMap = map; };
+  window.openCameraFullscreen  = openCameraFullscreen;
+  window.setCamLowResMap       = map => { camLowResMap = map; console.log('[CAM] Low-res map updated:', map); };
 
   // Initial renders
   renderCameraStatusBar();

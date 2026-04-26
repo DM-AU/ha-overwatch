@@ -3059,7 +3059,7 @@ function renderZonePopupContent() {
           ${showThumbs ? `<img data-cam="${escapeHtml(e)}" src="${thumbUrl}" style="width:100%;height:120px;object-fit:cover;border-radius:6px;background:#111;display:block;margin-bottom:4px;" onerror="this.style.display='none'">` : ''}
           <div style="display:flex;align-items:center;padding:2px 0;">
             <span style="flex:1;color:#ccc;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">📷 ${escapeHtml(e.split('.').pop())}</span>
-            <button class="zp-cam-view" data-entity="${escapeHtml(e)}" style="background:rgba(0,150,255,0.15);border:1px solid rgba(0,150,255,0.35);color:#0096ff;border-radius:5px;padding:3px 10px;cursor:pointer;font-size:11px;">▶ View</button>
+            <button class="zp-cam-view" data-entity="${escapeHtml(e)}" style="background:rgba(0,150,255,0.15);border:1px solid rgba(0,150,255,0.35);color:#0096ff;border-radius:5px;padding:3px 10px;cursor:pointer;font-size:11px;">⛶ Full</button>
           </div>
         </div>`;
       }).join('')}
@@ -3130,7 +3130,8 @@ function renderZonePopupContent() {
   // Camera view buttons
   popup.querySelectorAll('.zp-cam-view').forEach(btn => {
     btn.addEventListener('click', () => {
-      if (window.openCameraModal) window.openCameraModal(btn.dataset.entity);
+      if (window.openCameraFullscreen) window.openCameraFullscreen(btn.dataset.entity);
+      else if (window.openCameraModal) window.openCameraModal(btn.dataset.entity);
     });
   });
 
