@@ -981,6 +981,21 @@ function bindPanelInteraction(idx) {
   // Select panel on click — not passive so preventDefault works in pan handler
   panelEl.addEventListener('pointerdown', e => { setActivePanel(idx); }, { capture: true });
 
+  // Pin placement — intercept click on the panel SVG when in placing mode
+  panelEl.addEventListener('click', e => {
+    if (!placingPinType) return;
+    e.stopPropagation();
+    // Convert screen coords to floorplan coords for this panel
+    const panelSvg = getPanelSvg(idx);
+    if (!panelSvg) return;
+    const rect = panelSvg.getBoundingClientRect();
+    const z    = PANEL_ZOOMS[idx] || { scale: 1, x: 0, y: 0 };
+    const fpX  = (e.clientX - rect.left - z.x) / z.scale;
+    const fpY  = (e.clientY - rect.top  - z.y) / z.scale;
+    const floor = getPanelFloor(idx);
+    placePinAtFloorplanCoord(fpX, fpY, floor?.id || null);
+  });
+
   // Pan
   let panning = false, panStart = null;
 
@@ -2260,7 +2275,7 @@ function makeLightPin(pin, isOn, isEdit, scale) {
     glow.setAttribute('cx', cx); glow.setAttribute('cy', cy);
     glow.setAttribute('rx', glowR); glow.setAttribute('ry', glowR);
     glow.setAttribute('fill', `url(#lg-${pin.id})`);
-    glow.setAttribute('class', 'pin-light-glow');
+    glow.setAttribute('opacity', flashPhase ? '0.85' : '0.55');
     g.appendChild(glow);
 
     // Directional cone (if direction set)
@@ -2276,8 +2291,7 @@ function makeLightPin(pin, isOn, isEdit, scale) {
       const y2 = cy - coneLen * Math.cos(rad(dir + spread));
       cone.setAttribute('d', `M${cx},${cy} L${x1},${y1} Q${cx + coneLen * Math.sin(rad(dir)) * 1.1},${cy - coneLen * Math.cos(rad(dir)) * 1.1} ${x2},${y2} Z`);
       cone.setAttribute('fill', '#ffcc44');
-      cone.setAttribute('fill-opacity', '0.18');
-      cone.setAttribute('class', 'pin-light-cone');
+      cone.setAttribute('fill-opacity', flashPhase ? '0.25' : '0.12');
       g.appendChild(cone);
     }
   }
@@ -2349,15 +2363,20 @@ function makeSirenPin(pin, isOn, isEdit, scale) {
     flashGlow.setAttribute('fill', `url(#sg-${pin.id})`);
     g.appendChild(flashGlow);
 
-    // 3 pulsing rings
-    [2.5, 4.0, 5.5].forEach((mult, i) => {
-      const ring = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-      ring.setAttribute('cx', cx); ring.setAttribute('cy', cy); ring.setAttribute('r', R * mult);
+    // 3 rings at different expansion stages driven by flashPhase cycle
+    // We simulate expansion using 3 static rings at different radii/opacities
+    const ringPhase = (Date.now() % 1600) / 1600; // 0-1 over 1.6s
+    [0, 0.33, 0.66].forEach((offset) => {
+      const phase = (ringPhase + offset) % 1;
+      const ringR = R * (2 + phase * 4);
+      const ringO = Math.max(0, 0.7 * (1 - phase));
+      const ring  = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      ring.setAttribute('cx', cx); ring.setAttribute('cy', cy);
+      ring.setAttribute('r', ringR);
       ring.setAttribute('fill', 'none');
       ring.setAttribute('stroke', '#ff3b30');
-      ring.setAttribute('stroke-width', String(1.2 / scale));
-      ring.setAttribute('class', 'pin-siren-ring');
-      ring.style.animationDelay = `${i * 0.4}s`;
+      ring.setAttribute('stroke-width', String(1.5 / scale));
+      ring.setAttribute('opacity', String(ringO));
       g.appendChild(ring);
     });
   }
@@ -2408,14 +2427,39 @@ function makeSirenPin(pin, isOn, isEdit, scale) {
   return g;
 }
 
-// Pin editor state
 let activePinType = null; // 'light' | 'siren' | null
 let activePinId   = null;
-let placingPinType = null; // 'light' | 'siren' — click-to-place mode
+let placingPinType  = null; // 'light' | 'siren' — click-to-place mode
+let placingEntityId = null; // entity_id being placed
+let placingZoneId   = null; // zone the entity belongs to
 
 function selectPin(type, id) {
   activePinType = type;
   activePinId   = id;
+}
+
+// Called when user clicks a map to place a pin (single or multi-panel)
+function placePinAtFloorplanCoord(x, y, floorId) {
+  const type = placingPinType;
+  const entityId = placingEntityId || '';
+  placingPinType  = null;
+  placingEntityId = null;
+  placingZoneId   = null;
+  // Reset cursors
+  document.querySelectorAll('#zonesSvg, .fp-svg').forEach(s => s.style.cursor = '');
+
+  const pin = {
+    id:        (type === 'light' ? 'light_' : 'siren_') + Date.now(),
+    name:      entityId.split('.').pop() || (type === 'light' ? 'New Light' : 'New Siren'),
+    entity_id: entityId,
+    floor_id:  floorId || activeFloorId || null,
+    x:         Math.round(x),
+    y:         Math.round(y),
+    direction: null,
+  };
+  if (type === 'light') { lights.push(pin); saveLight(pin); selectPin('light', pin.id); }
+  else                  { sirens.push(pin); saveSiren(pin); selectPin('siren', pin.id); }
+  renderZones(); renderZonesEditor();
 }
 
 function makePinDraggable(g, pin, type) {
@@ -2430,9 +2474,15 @@ function makePinDraggable(g, pin, type) {
   });
   g.addEventListener('pointermove', e => {
     if (!dragging) return;
-    // Convert screen delta to floorplan coords using current zoom
+    // Use correct zoom — find which panel this SVG belongs to
+    const svg = g.closest('.fp-svg');
+    let s = zoom.scale || 1;
+    if (svg) {
+      // Multi-panel: find panel index from SVG id (fp-svg-0, fp-svg-1)
+      const match = svg.id?.match(/fp-svg-(\d+)/);
+      if (match) s = PANEL_ZOOMS[Number(match[1])]?.scale || 1;
+    }
     const dScreen = { x: e.clientX - startClient.x, y: e.clientY - startClient.y };
-    const s = zoom.scale || 1;
     pin.x = Math.round(startPos.x + dScreen.x / s);
     pin.y = Math.round(startPos.y + dScreen.y / s);
     renderZones();
@@ -2443,6 +2493,28 @@ function makePinDraggable(g, pin, type) {
     if (type === 'light') saveLight(pin);
     else saveSiren(pin);
   });
+}
+
+// Dedicated animation loop for smooth pin glow/ring animation
+let _pinAnimRunning = false;
+function startPinAnimLoop() {
+  if (_pinAnimRunning) return;
+  _pinAnimRunning = true;
+  function loop() {
+    const hasActiveSirens = sirens.some(p => haStates[p.entity_id]?.state === 'on');
+    const hasActiveLights = lights.some(p => haStates[p.entity_id]?.state === 'on');
+    if (hasActiveSirens || hasActiveLights) {
+      renderPins();
+      if (getNumPanels() > 1) {
+        const n = getNumPanels();
+        for (let i = 0; i < n; i++) renderPins(i);
+      }
+      requestAnimationFrame(loop);
+    } else {
+      _pinAnimRunning = false;
+    }
+  }
+  requestAnimationFrame(loop);
 }
 
 function renderZonesEditor() {
@@ -2719,8 +2791,6 @@ function renderZonesEditor() {
           <div class="zed-actions">
             <button id="addGroupBtn">+ Group</button>
             <button id="addZoneBtn">+ Zone</button>
-            <button id="addLightBtn" title="Click map to place light">+ Light</button>
-            <button id="addSirenBtn" title="Click map to place siren">+ Siren</button>
             ${selectedZone ? `<button id="editPointsBtn" style="${isEditingPoints ? 'border-color:rgba(255,204,0,0.5);color:#ffcc00;' : ''}">${editPtsLabel}</button>` : ""}
             ${selectedZone ? `<button id="undoZonesBtn" title="Undo last change">↩ Undo</button>` : ""}
             ${(selectedZone || selectedGroup) ? `<button id="deleteZoneBtn" class="danger">Delete</button>` : ""}
@@ -2799,30 +2869,7 @@ function renderZonesEditor() {
     saveGroup(ng); renderZonesEditor();
   });
 
-  // Add Light — enter placement mode
-  document.getElementById("addLightBtn")?.addEventListener("click", () => {
-    placingPinType = 'light';
-    activePinType  = null; activePinId = null;
-    selectedZoneId = null; selectedGroupId = null;
-    isCreatingZone = false;
-    // Visual cue: crosshair on SVG
-    const svg = document.getElementById('zonesSvg');
-    if (svg) svg.style.cursor = 'crosshair';
-    showToast('Click the map to place the light', 'info', 2000);
-    renderZonesEditor();
-  });
-
-  // Add Siren — enter placement mode
-  document.getElementById("addSirenBtn")?.addEventListener("click", () => {
-    placingPinType = 'siren';
-    activePinType  = null; activePinId = null;
-    selectedZoneId = null; selectedGroupId = null;
-    isCreatingZone = false;
-    const svg = document.getElementById('zonesSvg');
-    if (svg) svg.style.cursor = 'crosshair';
-    showToast('Click the map to place the siren', 'info', 2000);
-    renderZonesEditor();
-  });
+  // Add Light / Add Siren — now triggered via 📍 button in zone's Lights/Sirens tab
 
   // Delete
   document.getElementById("deleteZoneBtn")?.addEventListener("click", () => {
@@ -3075,12 +3122,24 @@ function deviceRow(entityId, devType) {
   const shortId   = entityId.split(".").pop() || entityId;
   const icons = { sensors:"⬡", cameras:"⊡", lights:"⊙", sirens:"⊛" };
   const icon = icons[devType] || "·";
+
+  // For lights and sirens: show pin button — filled if already placed, outline if not
+  let pinBtn = '';
+  if (devType === 'lights' || devType === 'sirens') {
+    const pinArr = devType === 'lights' ? lights : sirens;
+    const alreadyPlaced = pinArr.some(p => p.entity_id === entityId);
+    pinBtn = `<button class="ha-entity-pin" data-entity-id="${escapeHtml(entityId)}" data-pin-type="${devType === 'lights' ? 'light' : 'siren'}"
+      title="${alreadyPlaced ? 'Reposition on map' : 'Place on map'}"
+      style="background:none;border:1px solid ${alreadyPlaced ? '#ffcc44' : 'rgba(255,255,255,0.2)'};border-radius:4px;padding:2px 5px;cursor:pointer;font-size:10px;color:${alreadyPlaced ? '#ffcc44' : '#666'};flex-shrink:0;">📍</button>`;
+  }
+
   return `
     <div class="ha-entity-row" data-entity-id="${escapeHtml(entityId)}" data-dev-type="${devType}">
       <span style="font-size:9px;color:#555;flex-shrink:0;">${icon}</span>
       <div class="ha-entity-state ${stateClass}"></div>
       <span class="ha-entity-id" title="${escapeHtml(entityId)}">${escapeHtml(shortId)}</span>
       <span class="ha-entity-type">${escapeHtml(stateStr)}</span>
+      ${pinBtn}
       <button class="ha-entity-remove" data-entity-id="${escapeHtml(entityId)}" title="Remove">✕</button>
     </div>`;
 }
@@ -3103,6 +3162,31 @@ function bindDeviceSearch(selectedZone, inputId, resultsId, devType, listId) {
         saveZone(selectedZone);
         if (devType === "sensors") subscribeHAEntities();
         refreshList();
+      };
+    });
+    // Pin button — enter placement mode for this entity
+    listEl.querySelectorAll(".ha-entity-pin").forEach(btn => {
+      btn.onclick = e => {
+        e.stopPropagation();
+        const entityId = btn.dataset.entityId;
+        const pinType  = btn.dataset.pinType; // 'light' or 'siren'
+        // If already placed, select it for repositioning
+        const existing = pinType === 'light'
+          ? lights.find(p => p.entity_id === entityId)
+          : sirens.find(p => p.entity_id === entityId);
+        if (existing) {
+          selectPin(pinType, existing.id);
+          renderZones(); renderZonesEditor();
+          return;
+        }
+        // Enter placement mode
+        placingPinType   = pinType;
+        placingEntityId  = entityId;
+        placingZoneId    = selectedZone.id;
+        activePinId      = null; activePinType = null;
+        // Show crosshair on all SVGs
+        document.querySelectorAll('#zonesSvg, .fp-svg').forEach(s => s.style.cursor = 'crosshair');
+        showToast(`Click the map to place ${pinType === 'light' ? '💡' : '🔊'} ${entityId.split('.').pop()}`, 'info');
       };
     });
   }
@@ -3219,19 +3303,7 @@ function bindZonesSvgEvents() {
 
     // 0) Place a new light/siren pin
     if (placingPinType) {
-      const type = placingPinType;
-      placingPinType = null;
-      const pin = {
-        id: (type === 'light' ? 'light_' : 'siren_') + Date.now(),
-        name: type === 'light' ? 'New Light' : 'New Siren',
-        entity_id: '',
-        floor_id: activeFloorId || null,
-        x: Math.round(fp.x), y: Math.round(fp.y),
-        direction: null,
-      };
-      if (type === 'light') { lights.push(pin); saveLight(pin); selectPin('light', pin.id); }
-      else                  { sirens.push(pin); saveSiren(pin); selectPin('siren', pin.id); }
-      renderZones(); renderZonesEditor();
+      placePinAtFloorplanCoord(fp.x, fp.y, activeFloorId);
       e.stopPropagation(); return;
     }
 
@@ -4011,6 +4083,10 @@ function connectHA() {
           // Real-time camera grid update
           if (window.camUpdate) window.camUpdate();
         }
+
+        // Start pin animation loop when a light or siren entity changes state
+        const isPinEntity = [...lights, ...sirens].some(p => p.entity_id === data.entity_id);
+        if (isPinEntity) startPinAnimLoop();
       }
     }
   };
@@ -4167,6 +4243,10 @@ function subscribeHAEntities() {
     for (const s of (zone.lights  || []))  haSubscribedEntities.add(s);
     for (const s of (zone.sirens  || []))  haSubscribedEntities.add(s);
   }
+
+  // Map pin entities (lights and sirens placed on map)
+  for (const pin of lights) if (pin.entity_id) haSubscribedEntities.add(pin.entity_id);
+  for (const pin of sirens) if (pin.entity_id) haSubscribedEntities.add(pin.entity_id);
 }
 
 /* Track last logged alarm state to avoid duplicate entries on reconnect */
@@ -5972,6 +6052,7 @@ async function init() {
   await loadFloors();   // sets activeFloorId, loads correct floor image, calls initFloorplan
   await loadLights();
   await loadSirens();
+  if (haConnected) subscribeHAEntities(); // include pin entities in subscription
   window._updateFloorBtn?.(); // show/hide floor switcher based on floor count
   bindZonesSvgEvents();
   applyFloorPanels();   // build single or multi-panel layout based on saved settings
