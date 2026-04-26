@@ -2847,6 +2847,179 @@ function makePinDraggable(g, pin, type) {
 let _pinAnimRunning = false;
 let _pinDragging    = false; // set during drag to suppress renderPins from removing the dragged element
 let _draggingPinId  = null;  // id of pin currently being dragged
+/* ─── ZONE DETAIL POPUP ───────────────────────────────────── */
+let _zonePopupZoneId = null;
+let _zonePopupEl     = null;
+let _zonePopupTimer  = null; // for camera snapshot refresh
+
+function openZonePopup(zoneId, clientX, clientY) {
+  closeZonePopup();
+  _zonePopupZoneId = zoneId;
+
+  const popup = document.createElement('div');
+  popup.id = 'zonePopup';
+  popup.style.cssText = `
+    position:fixed; z-index:8000;
+    background:rgba(14,14,14,0.97);
+    border:1px solid rgba(255,255,255,0.12);
+    border-radius:12px;
+    box-shadow:0 8px 32px rgba(0,0,0,0.6);
+    width:300px; max-height:80vh;
+    overflow-y:auto;
+    font-size:13px; color:#e0e0e0;
+    pointer-events:all;
+  `;
+  document.body.appendChild(popup);
+  _zonePopupEl = popup;
+
+  // Position: prefer right of click, flip left if near right edge, flip up if near bottom
+  const pw = 308, ph = 500;
+  let left = clientX + 12;
+  let top  = clientY - 40;
+  if (left + pw > window.innerWidth  - 10) left = clientX - pw - 12;
+  if (top  + ph > window.innerHeight - 10) top  = window.innerHeight - ph - 10;
+  if (top  < 10) top = 10;
+  popup.style.left = left + 'px';
+  popup.style.top  = top  + 'px';
+
+  renderZonePopupContent();
+}
+
+function closeZonePopup() {
+  if (_zonePopupTimer) { clearInterval(_zonePopupTimer); _zonePopupTimer = null; }
+  if (_zonePopupEl) { _zonePopupEl.remove(); _zonePopupEl = null; }
+  _zonePopupZoneId = null;
+}
+
+function renderZonePopupContent() {
+  const popup = _zonePopupEl;
+  if (!popup || !_zonePopupZoneId) return;
+  const zone = zones.find(z => z.id === _zonePopupZoneId);
+  if (!zone) { closeZonePopup(); return; }
+
+  const showThumbs = localStorage.getItem('ow_zone_popup_thumbs') === 'true';
+  const isEnabled  = getZoneState(zone) !== 'disabled';
+  const sensors    = zone.sensors || [];
+  const lights_    = zone.lights  || [];
+  const sirens_    = zone.sirens  || [];
+  const cameras_   = zone.cameras || [];
+
+  // ── Arm/Disarm ────────────────────────────────────────────
+  const armHtml = `
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
+      <div style="font-weight:600;font-size:14px;color:#fff;">${escapeHtml(zone.name)}</div>
+      <div style="display:flex;gap:6px;align-items:center;">
+        <button id="zpArm"   style="background:${isEnabled  ? 'rgba(0,150,255,0.25)' : 'rgba(255,255,255,0.06)'};border:1px solid ${isEnabled  ? 'rgba(0,150,255,0.5)' : 'rgba(255,255,255,0.12)'};color:${isEnabled  ? '#0096ff' : '#888'};border-radius:6px;padding:4px 10px;cursor:pointer;font-size:12px;">Armed</button>
+        <button id="zpDisarm" style="background:${!isEnabled ? 'rgba(255,59,48,0.25)' : 'rgba(255,255,255,0.06)'};border:1px solid ${!isEnabled ? 'rgba(255,59,48,0.5)' : 'rgba(255,255,255,0.12)'};color:${!isEnabled ? '#ff3b30' : '#888'};border-radius:6px;padding:4px 10px;cursor:pointer;font-size:12px;">Disarmed</button>
+      </div>
+    </div>`;
+
+  // ── Sensors ───────────────────────────────────────────────
+  const sensorHtml = sensors.length ? `
+    <div style="margin-bottom:10px;">
+      <div style="font-size:11px;text-transform:uppercase;color:#555;letter-spacing:0.08em;margin-bottom:5px;">Sensors</div>
+      ${sensors.map(e => {
+        const st    = haStates[e];
+        const state = st?.state || '—';
+        const triggered = isEntityTriggered(e);
+        const dot   = `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${triggered ? '#ff3b30' : '#34c759'};margin-right:6px;flex-shrink:0;"></span>`;
+        return `<div style="display:flex;align-items:center;padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.05);">
+          ${dot}<span style="flex:1;color:#ccc;font-size:12px;">${escapeHtml(e.split('.').pop())}</span>
+          <span style="color:${triggered ? '#ff3b30' : '#34c759'};font-size:11px;font-weight:600;">${escapeHtml(state.toUpperCase())}</span>
+        </div>`;
+      }).join('')}
+    </div>` : '';
+
+  // ── Lights ────────────────────────────────────────────────
+  const lightHtml = lights_.length ? `
+    <div style="margin-bottom:10px;">
+      <div style="font-size:11px;text-transform:uppercase;color:#555;letter-spacing:0.08em;margin-bottom:5px;">Lights</div>
+      ${lights_.map(e => {
+        const on = haStates[e]?.state === 'on';
+        return `<div style="display:flex;align-items:center;padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.05);">
+          <span style="flex:1;color:#ccc;font-size:12px;">💡 ${escapeHtml(e.split('.').pop())}</span>
+          <button class="zp-light-toggle" data-entity="${escapeHtml(e)}" style="background:${on ? 'rgba(255,204,0,0.2)' : 'rgba(255,255,255,0.06)'};border:1px solid ${on ? 'rgba(255,204,0,0.5)' : 'rgba(255,255,255,0.12)'};color:${on ? '#ffcc00' : '#888'};border-radius:6px;padding:3px 10px;cursor:pointer;font-size:11px;font-weight:600;">${on ? 'ON' : 'OFF'}</button>
+        </div>`;
+      }).join('')}
+    </div>` : '';
+
+  // ── Sirens ────────────────────────────────────────────────
+  const sirenHtml = sirens_.length ? `
+    <div style="margin-bottom:10px;">
+      <div style="font-size:11px;text-transform:uppercase;color:#555;letter-spacing:0.08em;margin-bottom:5px;">Sirens</div>
+      ${sirens_.map(e => {
+        const on = haStates[e]?.state === 'on';
+        return `<div style="display:flex;align-items:center;padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.05);">
+          <span style="flex:1;color:#ccc;font-size:12px;">🔊 ${escapeHtml(e.split('.').pop())}</span>
+          <button class="zp-siren-toggle" data-entity="${escapeHtml(e)}" style="background:${on ? 'rgba(255,59,48,0.2)' : 'rgba(255,255,255,0.06)'};border:1px solid ${on ? 'rgba(255,59,48,0.5)' : 'rgba(255,255,255,0.12)'};color:${on ? '#ff3b30' : '#888'};border-radius:6px;padding:3px 10px;cursor:pointer;font-size:11px;font-weight:600;">${on ? 'ON' : 'OFF'}</button>
+        </div>`;
+      }).join('')}
+    </div>` : '';
+
+  // ── Cameras ───────────────────────────────────────────────
+  const cameraHtml = cameras_.length ? `
+    <div style="margin-bottom:6px;">
+      <div style="font-size:11px;text-transform:uppercase;color:#555;letter-spacing:0.08em;margin-bottom:5px;">Cameras</div>
+      ${cameras_.map(e => {
+        const thumbUrl = showThumbs ? apiPath(`ow/camera-snapshot/${e.replace('camera.', '')}?v=${Date.now()}`) : null;
+        return `<div style="margin-bottom:6px;">
+          ${showThumbs ? `<img src="${thumbUrl}" style="width:100%;height:120px;object-fit:cover;border-radius:6px;background:#111;display:block;margin-bottom:4px;" onerror="this.style.display='none'">` : ''}
+          <div style="display:flex;align-items:center;padding:2px 0;">
+            <span style="flex:1;color:#ccc;font-size:12px;">📷 ${escapeHtml(e.split('.').pop())}</span>
+            <button class="zp-cam-view" data-entity="${escapeHtml(e)}" style="background:rgba(0,150,255,0.15);border:1px solid rgba(0,150,255,0.35);color:#0096ff;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:11px;">▶ View</button>
+          </div>
+        </div>`;
+      }).join('')}
+    </div>` : '';
+
+  popup.innerHTML = `
+    <div style="padding:14px;">
+      ${armHtml}
+      ${sensorHtml}
+      ${lightHtml}
+      ${sirenHtml}
+      ${cameraHtml}
+      <div style="text-align:right;margin-top:8px;border-top:1px solid rgba(255,255,255,0.06);padding-top:8px;">
+        <button id="zpClose" style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);color:#888;border-radius:6px;padding:5px 14px;cursor:pointer;font-size:12px;">Close</button>
+      </div>
+    </div>`;
+
+  // Wire events
+  popup.querySelector('#zpClose')?.addEventListener('click', closeZonePopup);
+
+  popup.querySelector('#zpArm')?.addEventListener('click', () => {
+    owCallSwitch(`switch.overwatch_zone_${zoneSlug(zone)}`, true);
+    setTimeout(renderZonePopupContent, 300);
+  });
+  popup.querySelector('#zpDisarm')?.addEventListener('click', () => {
+    owCallSwitch(`switch.overwatch_zone_${zoneSlug(zone)}`, false);
+    setTimeout(renderZonePopupContent, 300);
+  });
+
+  popup.querySelectorAll('.zp-light-toggle').forEach(btn => {
+    btn.addEventListener('click', () => {
+      _callService(btn.dataset.entity, haStates[btn.dataset.entity]?.state === 'on' ? 'turn_off' : 'turn_on');
+      setTimeout(renderZonePopupContent, 300);
+    });
+  });
+  popup.querySelectorAll('.zp-siren-toggle').forEach(btn => {
+    btn.addEventListener('click', () => {
+      _callService(btn.dataset.entity, haStates[btn.dataset.entity]?.state === 'on' ? 'turn_off' : 'turn_on');
+      setTimeout(renderZonePopupContent, 300);
+    });
+  });
+  popup.querySelectorAll('.zp-cam-view').forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (window.openCameraModal) window.openCameraModal(btn.dataset.entity);
+    });
+  });
+}
+
+// Re-render popup when HA state changes (keep toggles in sync)
+function refreshZonePopupIfOpen() {
+  if (_zonePopupEl && _zonePopupZoneId) renderZonePopupContent();
+}
+
 function startPinAnimLoop() {
   if (_pinAnimRunning) return;
   _pinAnimRunning = true;
@@ -3801,12 +3974,18 @@ function bindZonesSvgEvents() {
       }
     }
 
-    // 3) Clicking a polygon — select it (unless editing points on another zone)
-    // Hidden zones cannot be selected. Can't switch zones while editing points.
+    // 3) Clicking a polygon — in live mode open zone popup, in editor mode select it
     if (target.classList.contains("zone-polygon")) {
       const zoneId = target.dataset.zoneId;
       const zone   = zones.find(z => z.id === zoneId);
       if (zone?.hidden) { e.stopPropagation(); return; }
+
+      // LIVE MODE — show zone detail popup
+      if (!editorMode) {
+        openZonePopup(zoneId, e.clientX, e.clientY);
+        e.stopPropagation(); return;
+      }
+
       if (isEditingPoints && selectedZoneId && zoneId !== selectedZoneId) {
         e.stopPropagation(); return;
       }
@@ -4573,10 +4752,10 @@ function connectHA() {
 
         // Render zones + check for zone state transitions when a subscribed entity changes
         if (haSubscribedEntities.has(data.entity_id)) {
-          checkZoneStateChanges();   // detect trigger/clear/fault transitions and log them
+          checkZoneStateChanges();
           renderZones();
           if (editorMode) renderZonesEditor();
-          // Real-time camera grid update
+          refreshZonePopupIfOpen(); // keep popup toggles in sync
           if (window.camUpdate) window.camUpdate();
         }
 
@@ -5172,6 +5351,13 @@ function renderSettingsPanel() {
               <input type="checkbox" id="hideCamPinsChk" ${localStorage.getItem('ow_hide_cam_pins') === 'true' ? 'checked' : ''}>
               Hide camera icons on map
             </label>
+            <div style="margin-top:10px;border-top:1px solid rgba(255,255,255,0.06);padding-top:8px;">
+              <label style="font-size:12px;color:#aaa;display:block;margin-bottom:4px;">Zone detail popup</label>
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                <input type="checkbox" id="zonePopupThumbsChk" ${localStorage.getItem('ow_zone_popup_thumbs') === 'true' ? 'checked' : ''}>
+                Show camera thumbnails in zone panel
+              </label>
+            </div>
           </div>
         </div>
 
@@ -5450,6 +5636,11 @@ function renderSettingsPanel() {
   if (hideCamPinsChk) hideCamPinsChk.onchange = () => {
     localStorage.setItem('ow_hide_cam_pins', hideCamPinsChk.checked ? 'true' : 'false');
     renderZones();
+  };
+  const zonePopupThumbsChk = document.getElementById('zonePopupThumbsChk');
+  if (zonePopupThumbsChk) zonePopupThumbsChk.onchange = () => {
+    localStorage.setItem('ow_zone_popup_thumbs', zonePopupThumbsChk.checked ? 'true' : 'false');
+    refreshZonePopupIfOpen();
   };
 
   // ── Floor settings ────────────────────────────────────────────

@@ -2166,7 +2166,15 @@ body[data-split-dir="v"] .split-handle::before {
 }
 body[data-split-dir="v"] .split-handle::after { width: 40px; height: 2px; }
 
-/* ── View toggle buttons ──────────────────────────── */
+/* ── Zone detail popup ──────────────────────────────────── */
+#zonePopup {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,0.12) transparent;
+}
+#zonePopup button:hover { opacity: 0.85; }
+#zonePopup img { border: 1px solid rgba(255,255,255,0.08); }
+
+
 .view-toggle-btn {
   background: transparent;
   border: 1px solid rgba(255,255,255,0.12);
