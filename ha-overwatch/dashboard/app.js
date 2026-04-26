@@ -2262,13 +2262,19 @@ function makeLightPin(pin, isOn, isEdit, scale) {
   const ICON_R   = 14 / scale;           // icon badge radius — scales with zoom so it stays same screen size
   const cx = pin.x, cy = pin.y;
   const hasDir   = pin.direction !== undefined && pin.direction !== null && pin.direction !== '';
-  // Glow radius is in floorplan pixel space — NOT divided by scale, so it stays fixed on the map
-  const glowRadius = (pin.radius || 5) * 30; // slider 1-10 → 30-300 floorplan px
+  // Glow radius — slider 1-10, each step = 5% of floorplan width
+  // We use a fixed pixel size relative to the SVG viewBox, not zoom-dependent
+  const svgEl   = g.closest('svg') || document.getElementById('zonesSvg');
+  const imgW    = svgEl ? Number(svgEl.getAttribute('width') || 2000) : 2000;
+  const glowRadius = (pin.radius || 5) * (imgW * 0.025); // 1→2.5%, 10→25% of image width
 
-  if (isOn) {
+  // Show glow in editor even when light is off, so user can tune placement
+  const showGlow = isOn || (editorMode && isEdit);
+
+  if (showGlow) {
     const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
-    // Smooth sine-wave breathing — gentle 2.4s cycle, no harsh on/off flash
-    const breathe = 0.55 + 0.45 * Math.sin(Date.now() / 1200 * Math.PI);
+    // Smooth sine-wave breathing — gentle 2.4s cycle. In editor show at fixed mid-opacity.
+    const breathe = isOn ? (0.55 + 0.45 * Math.sin(Date.now() / 1200 * Math.PI)) : 0.6;
 
     if (!hasDir) {
       // ── Omnidirectional radial glow ────────────────────────
@@ -2276,7 +2282,7 @@ function makeLightPin(pin, isOn, isEdit, scale) {
       grad.id = `lg-${pin.id}`;
       grad.setAttribute('cx', '50%'); grad.setAttribute('cy', '50%'); grad.setAttribute('r', '50%');
       const s1 = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
-      s1.setAttribute('offset', '0%'); s1.setAttribute('stop-color', '#ffee88'); s1.setAttribute('stop-opacity', String(0.3 + 0.55 * breathe));
+      s1.setAttribute('offset', '0%'); s1.setAttribute('stop-color', '#ffee88'); s1.setAttribute('stop-opacity', String(0.55 + 0.35 * breathe));
       const s2 = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
       s2.setAttribute('offset', '100%'); s2.setAttribute('stop-color', '#ffaa00'); s2.setAttribute('stop-opacity', '0');
       grad.appendChild(s1); grad.appendChild(s2); defs.appendChild(grad); g.appendChild(defs);
@@ -2342,8 +2348,8 @@ function makeLightPin(pin, isOn, isEdit, scale) {
   // Icon badge — fixed screen size
   const bg = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
   bg.setAttribute('cx', cx); bg.setAttribute('cy', cy); bg.setAttribute('r', ICON_R * 0.8);
-  bg.setAttribute('fill', isOn ? 'rgba(40,30,0,0.75)' : 'rgba(20,20,20,0.75)');
-  bg.setAttribute('stroke', isEdit ? '#0096ff' : (isOn ? '#ffcc44' : 'rgba(255,255,255,0.25)'));
+  bg.setAttribute('fill', isOn ? 'rgba(40,30,0,0.85)' : 'rgba(40,40,40,0.85)');
+  bg.setAttribute('stroke', isEdit ? '#0096ff' : (isOn ? '#ffcc44' : 'rgba(255,255,255,0.5)'));
   bg.setAttribute('stroke-width', String((isEdit ? 2.5 : 1.5) / scale));
   g.appendChild(bg);
 
@@ -2354,7 +2360,7 @@ function makeLightPin(pin, isOn, isEdit, scale) {
   const bulb = document.createElementNS('http://www.w3.org/2000/svg', 'path');
   bulb.setAttribute('d', 'M12,2A7,7 0 0,0 5,9C5,11.38 6.19,13.47 8,14.74V17A1,1 0 0,0 9,18H15A1,1 0 0,0 16,17V14.74C17.81,13.47 19,11.38 19,9A7,7 0 0,0 12,2M9,21A1,1 0 0,0 10,22H14A1,1 0 0,0 15,21V20H9V21Z');
   bulb.setAttribute('fill', isOn ? '#ffcc44' : 'none');
-  bulb.setAttribute('stroke', isOn ? '#ffaa00' : '#999');
+  bulb.setAttribute('stroke', isOn ? '#ffaa00' : '#ccc');
   bulb.setAttribute('stroke-width', String(1.2 / iconScale));
   bulb.setAttribute('stroke-linejoin', 'round');
   iconG.appendChild(bulb);
@@ -2455,6 +2461,7 @@ let activePinId   = null;
 let placingPinType  = null; // 'light' | 'siren' — click-to-place mode
 let placingEntityId = null; // entity_id being placed
 let placingZoneId   = null; // zone the entity belongs to
+let _activeZoneTab  = 'sensors'; // persists across renderZonesEditor re-renders
 
 function selectPin(type, id) {
   activePinType = type;
@@ -2675,25 +2682,24 @@ function renderZonesEditor() {
             placeholder="${isLight ? 'light.* or switch.*' : 'switch.* or siren.*'}" autocomplete="off">
         </div>
         ${isLight ? `
-        <div class="zones-editor-row" style="flex-direction:column;align-items:flex-start;gap:4px;">
-          <label>Range <span id="pinRadiusVal" style="color:#ffcc44;font-weight:600;">${pin.radius || 5}</span></label>
+        <div class="zones-editor-row" style="flex-direction:column;align-items:flex-start;gap:2px;margin-top:8px;">
+          <label style="margin-bottom:2px;">Range <span id="pinRadiusVal" style="color:#ffcc44;font-weight:600;">${pin.radius || 5}</span></label>
           <input id="pinRadiusInput" type="range" min="1" max="10" step="1" value="${pin.radius || 5}"
-            style="width:100%;accent-color:#ffcc44;">
+            style="width:100%;accent-color:#ffcc44;margin-bottom:2px;">
           <div style="font-size:10px;color:#555;">Distance glow extends from icon</div>
         </div>
-        <div class="zones-editor-row" style="flex-direction:column;align-items:flex-start;gap:4px;">
-          <label>Direction <span id="pinDirVal" style="color:#ffcc44;font-weight:600;">${pin.direction !== null && pin.direction !== undefined && pin.direction !== '' ? pin.direction + '°' : 'none'}</span></label>
+        <div class="zones-editor-row" style="flex-direction:column;align-items:flex-start;gap:2px;margin-top:10px;">
+          <label style="margin-bottom:2px;">Direction <span id="pinDirVal" style="color:#ffcc44;font-weight:600;">${pin.direction !== null && pin.direction !== undefined && pin.direction !== '' ? pin.direction + '°' : 'none'}</span></label>
           <input id="pinDirectionInput" type="range" min="-1" max="359" step="1" value="${pin.direction !== null && pin.direction !== undefined && pin.direction !== '' ? pin.direction : -1}"
-            style="width:100%;accent-color:#ffcc44;">
+            style="width:100%;accent-color:#ffcc44;margin-bottom:2px;">
           <div style="font-size:10px;color:#555;">Drag to -1 (left) for omnidirectional glow</div>
         </div>
-        ${(pin.direction !== null && pin.direction !== undefined && pin.direction !== '') ? `
-        <div class="zones-editor-row" style="flex-direction:column;align-items:flex-start;gap:4px;">
-          <label>Spread <span id="pinSpreadVal" style="color:#ffcc44;font-weight:600;">${pin.spread || 35}°</span></label>
+        <div id="pinSpreadRow" class="zones-editor-row" style="flex-direction:column;align-items:flex-start;gap:2px;margin-top:10px;${(pin.direction !== null && pin.direction !== undefined && pin.direction !== '') ? '' : 'display:none;'}">
+          <label style="margin-bottom:2px;">Spread <span id="pinSpreadVal" style="color:#ffcc44;font-weight:600;">${pin.spread || 35}°</span></label>
           <input id="pinSpreadInput" type="range" min="5" max="90" step="5" value="${pin.spread || 35}"
-            style="width:100%;accent-color:#ffcc44;">
+            style="width:100%;accent-color:#ffcc44;margin-bottom:2px;">
           <div style="font-size:10px;color:#555;">Cone half-angle — narrow for spotlight, wide for flood</div>
-        </div>` : ''}
+        </div>
         ` : ''}
         <div class="zones-editor-row" style="margin-top:4px;">
           <label style="color:#555;font-size:11px;">Position</label>
@@ -2787,27 +2793,27 @@ function renderZonesEditor() {
           </div>` : ''}
           <div class="ha-section" style="margin-top:2px;flex:1;display:flex;flex-direction:column;">
             <div class="ha-device-tabs" id="haDeviceTabs">
-              <button class="ha-device-tab active" data-tab="sensors">Sensors</button>
-              <button class="ha-device-tab" data-tab="cameras">Cameras</button>
-              <button class="ha-device-tab" data-tab="lights">Lights</button>
-              <button class="ha-device-tab" data-tab="sirens">Sirens</button>
+              <button class="ha-device-tab ${_activeZoneTab==='sensors'?'active':''}" data-tab="sensors">Sensors</button>
+              <button class="ha-device-tab ${_activeZoneTab==='cameras'?'active':''}" data-tab="cameras">Cameras</button>
+              <button class="ha-device-tab ${_activeZoneTab==='lights'?'active':''}" data-tab="lights">Lights</button>
+              <button class="ha-device-tab ${_activeZoneTab==='sirens'?'active':''}" data-tab="sirens">Sirens</button>
             </div>
-            <div class="ha-tab-panel" id="tabPanel_sensors" style="flex:1;overflow-y:auto;">
+            <div class="ha-tab-panel" id="tabPanel_sensors" style="${_activeZoneTab==='sensors'?'flex:1;overflow-y:auto;':'display:none;'}">
               <div class="entity-search-wrap"><input type="text" id="entitySearchInput" class="entity-search-input" placeholder="Search HA entities…" autocomplete="off">
               <div class="entity-search-results" id="entitySearchResults" style="display:none;"></div></div>
               <div class="ha-entity-list" id="zoneEntityList">${(selectedZone.sensors||[]).map(e=>deviceRow(e,"sensors")).join("")}</div>
             </div>
-            <div class="ha-tab-panel" id="tabPanel_cameras" style="display:none;">
+            <div class="ha-tab-panel" id="tabPanel_cameras" style="${_activeZoneTab==='cameras'?'flex:1;overflow-y:auto;':'display:none;'}">
               <div class="entity-search-wrap"><input type="text" id="cameraSearchInput" class="entity-search-input" placeholder="Search camera entities…" autocomplete="off">
               <div class="entity-search-results" id="cameraSearchResults" style="display:none;"></div></div>
               <div class="ha-entity-list" id="zoneCameraList">${(selectedZone.cameras||[]).map(e=>deviceRow(e,"cameras")).join("")}</div>
             </div>
-            <div class="ha-tab-panel" id="tabPanel_lights" style="display:none;">
+            <div class="ha-tab-panel" id="tabPanel_lights" style="${_activeZoneTab==='lights'?'flex:1;overflow-y:auto;':'display:none;'}">
               <div class="entity-search-wrap"><input type="text" id="lightSearchInput" class="entity-search-input" placeholder="Search light entities…" autocomplete="off">
               <div class="entity-search-results" id="lightSearchResults" style="display:none;"></div></div>
               <div class="ha-entity-list" id="zoneLightList">${(selectedZone.lights||[]).map(e=>deviceRow(e,"lights")).join("")}</div>
             </div>
-            <div class="ha-tab-panel" id="tabPanel_sirens" style="display:none;">
+            <div class="ha-tab-panel" id="tabPanel_sirens" style="${_activeZoneTab==='sirens'?'flex:1;overflow-y:auto;':'display:none;'}">
               <div class="entity-search-wrap"><input type="text" id="sirenSearchInput" class="entity-search-input" placeholder="Search siren entities…" autocomplete="off">
               <div class="entity-search-results" id="sirenSearchResults" style="display:none;"></div></div>
               <div class="ha-entity-list" id="zoneSirenList">${(selectedZone.sirens||[]).map(e=>deviceRow(e,"sirens")).join("")}</div>
@@ -3034,12 +3040,13 @@ function renderZonesEditor() {
         dirEl.addEventListener('input', e => {
           const v = Number(e.target.value);
           pin.direction = v < 0 ? null : v;
-          if (dirVal) dirVal.textContent = v < 0 ? 'none (omnidirectional)' : v + '°';
+          if (dirVal) dirVal.textContent = v < 0 ? 'none' : v + '°';
+          // Show/hide spread row dynamically
+          const spreadRow = document.getElementById('pinSpreadRow');
+          if (spreadRow) spreadRow.style.display = v < 0 ? 'none' : 'flex';
           renderZones(); // live preview
-          // Re-render editor to show/hide spread slider
-          if (v < 0 !== !pin.spread) renderZonesEditor();
         });
-        dirEl.addEventListener('change', () => { saveLight(pin); renderZonesEditor(); });
+        dirEl.addEventListener('change', () => saveLight(pin));
       }
 
       // Spread slider
@@ -3112,10 +3119,12 @@ function renderZonesEditor() {
     // Device tabs
     document.getElementById("haDeviceTabs")?.querySelectorAll(".ha-device-tab").forEach(btn => {
       btn.addEventListener("click", () => {
+        _activeZoneTab = btn.dataset.tab; // persist across re-renders
         document.querySelectorAll(".ha-device-tab").forEach(b => b.classList.remove("active"));
-        document.querySelectorAll(".ha-tab-panel").forEach(p => p.style.display = "none");
+        document.querySelectorAll(".ha-tab-panel").forEach(p => { p.style.display = "none"; p.style.flex = ""; });
         btn.classList.add("active");
-        document.getElementById("tabPanel_" + btn.dataset.tab)?.style && (document.getElementById("tabPanel_" + btn.dataset.tab).style.display = "block");
+        const panel = document.getElementById("tabPanel_" + btn.dataset.tab);
+        if (panel) { panel.style.display = ""; panel.style.flex = "1"; panel.style.overflowY = "auto"; }
       });
     });
 
