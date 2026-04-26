@@ -500,13 +500,22 @@ function bindPan() {
     if (e.target.closest(".zones-editor, .search-panel, .settings-panel, .log-panel, .sidebar, .zoom-controls")) return;
     e.preventDefault();
     const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
-    // Use coords relative to the outer container, not viewport
-    const rect = outer.getBoundingClientRect();
-    const cx = e.clientX - rect.left;
-    const cy = e.clientY - rect.top;
-    zoom.x = cx - (cx - zoom.x) * factor;
-    zoom.y = cy - (cy - zoom.y) * factor;
-    zoom.scale = Math.min(10, Math.max(0.1, zoom.scale * factor));
+    const rect   = outer.getBoundingClientRect();
+    const cx     = e.clientX - rect.left;
+    const cy     = e.clientY - rect.top;
+    const newScale = Math.min(10, Math.max(0.1, zoom.scale * factor));
+    // Zoom around cursor
+    zoom.x = cx - (cx - zoom.x) * (newScale / zoom.scale);
+    zoom.y = cy - (cy - zoom.y) * (newScale / zoom.scale);
+    zoom.scale = newScale;
+    // Clamp so map can't fly completely off-screen
+    const img = document.getElementById('floorplanImage');
+    if (img) {
+      const iw = img.naturalWidth * zoom.scale;
+      const ih = img.naturalHeight * zoom.scale;
+      zoom.x = Math.min(rect.width * 0.9, Math.max(-iw + rect.width * 0.1, zoom.x));
+      zoom.y = Math.min(rect.height * 0.9, Math.max(-ih + rect.height * 0.1, zoom.y));
+    }
     applyTransform();
     saveZoom();
   }, { passive: false });
@@ -757,20 +766,32 @@ async function deleteSiren(id) {
 }
 
 // Toggle light/siren entity via HA service call
-function togglePinEntity(entityId) {
+function togglePinEntity(entityId, pinId) {
   if (!entityId) return;
-  const isOn = haStates[entityId]?.state === "on";
-  if (entityId.startsWith("light.")) {
-    // Use HA light domain
-    if (IS_DIRECT_MODE) {
-      fetch("ow/call-service", { method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ domain: "light", service: isOn ? "turn_off" : "turn_on", entity_id: entityId }) });
-    } else if (haConnected && haSocket) {
-      sendHA({ type: "call_service", domain: "light", service: isOn ? "turn_off" : "turn_on",
-        service_data: { entity_id: entityId } });
+  // Check if this pin is set to toggle all zone lights
+  const pin = lights.find(p => p.id === pinId);
+  if (pin?.tapAll) {
+    // Find the zone that contains this entity and toggle all its lights
+    const zone = zones.find(z => (z.lights || []).includes(entityId));
+    if (zone && zone.lights?.length) {
+      const allOn = zone.lights.every(e => haStates[e]?.state === 'on');
+      zone.lights.forEach(e => _callService(e, allOn ? 'turn_off' : 'turn_on'));
+      return;
     }
-  } else {
-    owCallSwitch(entityId, !isOn);
+  }
+  _callService(entityId, haStates[entityId]?.state === 'on' ? 'turn_off' : 'turn_on');
+}
+
+function _callService(entityId, service) {
+  if (!entityId) return;
+  const domain = entityId.startsWith("light.") ? "light"
+               : entityId.startsWith("siren.") ? "siren"
+               : "switch";
+  if (IS_DIRECT_MODE) {
+    fetch("ow/call-service", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ domain, service, entity_id: entityId }) });
+  } else if (haConnected && haSocket) {
+    sendHA({ type: "call_service", domain, service, service_data: { entity_id: entityId } });
   }
 }
 
@@ -1873,6 +1894,7 @@ setInterval(() => {
 }, 700);
 
 function renderZones() {
+  if (_pinDragging) return; // never re-render during drag — would remove dragged element
   // In multi-panel mode, render to each panel's SVG instead of the single zonesSvg
   if (getNumPanels() > 1 && document.querySelector('.floor-panel')) {
     renderAllPanelZones();
@@ -2417,7 +2439,7 @@ function makeLightPin(pin, isOn, isEdit, scale) {
     let _moved = false;
     g.addEventListener('pointerdown', e => { _moved = false; e.stopPropagation(); });
     g.addEventListener('pointermove', e => { if (Math.hypot(e.movementX, e.movementY) > 2) _moved = true; });
-    g.addEventListener('pointerup',   e => { e.stopPropagation(); if (!_moved) togglePinEntity(pin.entity_id); });
+    g.addEventListener('pointerup',   e => { e.stopPropagation(); if (!_moved) togglePinEntity(pin.entity_id, pin.id); });
   }
 
   return g;
@@ -2451,12 +2473,12 @@ function makeSirenPin(pin, isOn, isEdit, scale) {
     flashGlow.setAttribute('fill', `url(#sg-${pin.id})`);
     g.appendChild(flashGlow);
 
-    // 3 rings at different expansion stages driven by flashPhase cycle
-    // We simulate expansion using 3 static rings at different radii/opacities
-    const ringPhase = (Date.now() % 1600) / 1600; // 0-1 over 1.6s
+    // 3 rings at different expansion stages driven by time
+    const ringPhase = (Date.now() % 1600) / 1600;
+    const maxRingR  = R * (2 + (pin.radius || 4)); // radius setting controls max expansion
     [0, 0.33, 0.66].forEach((offset) => {
       const phase = (ringPhase + offset) % 1;
-      const ringR = R * (2 + phase * 4);
+      const ringR = R * 1.2 + (maxRingR - R * 1.2) * phase;
       const ringO = Math.max(0, 0.7 * (1 - phase));
       const ring  = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
       ring.setAttribute('cx', cx); ring.setAttribute('cy', cy);
@@ -2495,7 +2517,7 @@ function makeSirenPin(pin, isOn, isEdit, scale) {
     let _moved = false;
     g.addEventListener('pointerdown', e => { _moved = false; e.stopPropagation(); });
     g.addEventListener('pointermove', e => { if (Math.hypot(e.movementX, e.movementY) > 2) _moved = true; });
-    g.addEventListener('pointerup',   e => { e.stopPropagation(); if (!_moved) togglePinEntity(pin.entity_id); });
+    g.addEventListener('pointerup',   e => { e.stopPropagation(); if (!_moved) togglePinEntity(pin.entity_id, pin.id); });
   }
 
   return g;
@@ -2595,6 +2617,7 @@ function makePinDraggable(g, pin, type) {
     } else {
       e.stopPropagation(); // prevent SVG empty-canvas handler from clearing activePinId
       selectPin(type, pin.id);
+      console.log('[OW PIN] tap: activePinId=', activePinId, 'selectedZoneId=', selectedZoneId);
       renderZones();
       renderZonesEditor();
     }
@@ -2767,7 +2790,21 @@ function renderZonesEditor() {
           <label style="color:#555;font-size:11px;">Position</label>
           <span style="font-size:11px;color:#555;">${Math.round(pin.x)}, ${Math.round(pin.y)}</span>
         </div>
-        <button id="pinDoneBtn" style="margin-top:12px;background:rgba(0,150,255,0.15);border:1px solid rgba(0,150,255,0.4);color:#0096ff;border-radius:8px;padding:6px 12px;cursor:pointer;width:100%;font-size:12px;">Done</button>
+        ${isLight ? `
+        <div style="margin-top:10px;border-top:1px solid rgba(255,255,255,0.06);padding-top:8px;">
+          <label style="font-size:12px;color:#aaa;">Tap action</label>
+          <div style="display:flex;gap:6px;margin-top:4px;">
+            <button id="pinTapThis" class="settings-toggle ${!pin.tapAll ? 'active' : ''}" style="flex:1;font-size:11px;">This light</button>
+            <button id="pinTapAll"  class="settings-toggle ${pin.tapAll  ? 'active' : ''}" style="flex:1;font-size:11px;">All zone lights</button>
+          </div>
+        </div>` : `
+        <div style="margin-top:10px;border-top:1px solid rgba(255,255,255,0.06);padding-top:8px;">
+          <label style="font-size:12px;color:#aaa;">Aura radius <span id="pinRadiusVal" style="color:#ff6666;font-weight:600;">${pin.radius || 4}</span></label>
+          <input id="pinRadiusInput" type="range" min="1" max="10" step="1" value="${pin.radius || 4}"
+            style="width:100%;accent-color:#ff6666;margin-top:4px;display:block;">
+          <div style="font-size:10px;color:#555;margin-top:2px;">Pulsing ring size when active</div>
+        </div>`}
+        <button id="pinDoneBtn" style="margin-top:10px;background:rgba(0,150,255,0.15);border:1px solid rgba(0,150,255,0.4);color:#0096ff;border-radius:8px;padding:6px 12px;cursor:pointer;width:100%;font-size:12px;">Done</button>
         <button id="pinDeleteBtn" style="margin-top:6px;background:rgba(255,59,48,0.15);border:1px solid rgba(255,59,48,0.4);color:#ff3b30;border-radius:8px;padding:6px 12px;cursor:pointer;width:100%;font-size:12px;">Delete ${label}</button>
       </div>`;
   }
@@ -3121,6 +3158,30 @@ function renderZonesEditor() {
           renderZones();
         });
         spreadEl.addEventListener('change', () => saveLight(pin));
+      }
+
+      // Tap action buttons (lights only)
+      document.getElementById('pinTapThis')?.addEventListener('click', () => {
+        pin.tapAll = false;
+        if (activePinType === 'light') saveLight(pin);
+        renderZonesEditor();
+      });
+      document.getElementById('pinTapAll')?.addEventListener('click', () => {
+        pin.tapAll = true;
+        if (activePinType === 'light') saveLight(pin);
+        renderZonesEditor();
+      });
+
+      // Siren radius slider
+      const sirenRadiusEl  = document.getElementById('pinRadiusInput');
+      const sirenRadiusVal = document.getElementById('pinRadiusVal');
+      if (sirenRadiusEl && activePinType === 'siren') {
+        sirenRadiusEl.addEventListener('input', e => {
+          pin.radius = Number(e.target.value);
+          if (sirenRadiusVal) sirenRadiusVal.textContent = pin.radius;
+          renderZones();
+        });
+        sirenRadiusEl.addEventListener('change', () => saveSiren(pin));
       }
 
       document.getElementById('pinDoneBtn')?.addEventListener('click', () => {
