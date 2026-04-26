@@ -429,6 +429,7 @@ function bindZoomControls() {
   if (!zoomIn) return;
 
   function zoomAroundCenter(factor) {
+    if (mapLocked && !editorMode) return;
     const panel = document.getElementById("mapPanel");
     const vw = (panel && panel.offsetWidth > 0) ? panel.offsetWidth : window.innerWidth;
     const vh = (panel && panel.offsetHeight > 0) ? panel.offsetHeight : window.innerHeight;
@@ -442,6 +443,7 @@ function bindZoomControls() {
   zoomIn.onclick    = () => zoomAroundCenter(1.15);
   zoomOut.onclick   = () => zoomAroundCenter(1 / 1.15);
   zoomReset.onclick = () => {
+    if (mapLocked && !editorMode) return;
     const wrapper = document.getElementById("floorplanWrapper");
     const img     = document.getElementById("floorplanImage");
     if (wrapper && img) {
@@ -1414,12 +1416,15 @@ function bindZoomControlsMultiPanel() {
   const origReset = zoomReset.onclick;
 
   zoomIn.onclick = () => {
+    if (mapLocked && !editorMode) return;
     if (getNumPanels() > 1) zoomPanel(1.15); else origIn?.();
   };
   zoomOut.onclick = () => {
+    if (mapLocked && !editorMode) return;
     if (getNumPanels() > 1) zoomPanel(1 / 1.15); else origOut?.();
   };
   zoomReset.onclick = () => {
+    if (mapLocked && !editorMode) return;
     if (getNumPanels() > 1) fitPanelToContainer(activePanelIdx); else origReset?.();
   };
 }
@@ -3045,13 +3050,13 @@ function renderZonePopupContent() {
     owCallSwitch(zSwitchId, true);
     if (haStates[zSwitchId]) haStates[zSwitchId] = { ...haStates[zSwitchId], state: 'on' };
     else haStates[zSwitchId] = { state: 'on' };
-    renderZonePopupContent();
+    refreshZonePopupIfOpen(); // surgical — preserves camera img tags
   });
   popup.querySelector('#zpDisarm')?.addEventListener('click', () => {
     owCallSwitch(zSwitchId, false);
     if (haStates[zSwitchId]) haStates[zSwitchId] = { ...haStates[zSwitchId], state: 'off' };
     else haStates[zSwitchId] = { state: 'off' };
-    renderZonePopupContent();
+    refreshZonePopupIfOpen();
   });
 
   // Individual light toggles — optimistic
@@ -3059,10 +3064,9 @@ function renderZonePopupContent() {
     btn.addEventListener('click', () => {
       const e = btn.dataset.entity;
       const on = haStates[e]?.state === 'on';
-      // Optimistic: flip local state immediately
       if (haStates[e]) haStates[e] = { ...haStates[e], state: on ? 'off' : 'on' };
       _callService(e, on ? 'turn_off' : 'turn_on');
-      renderZonePopupContent();
+      refreshZonePopupIfOpen();
     });
   });
 
@@ -3073,7 +3077,7 @@ function renderZonePopupContent() {
       if (haStates[e]) haStates[e] = { ...haStates[e], state: turnOn ? 'on' : 'off' };
       _callService(e, turnOn ? 'turn_on' : 'turn_off');
     });
-    renderZonePopupContent();
+    refreshZonePopupIfOpen();
   });
 
   // Individual siren toggles — optimistic
@@ -3083,7 +3087,7 @@ function renderZonePopupContent() {
       const on = haStates[e]?.state === 'on';
       if (haStates[e]) haStates[e] = { ...haStates[e], state: on ? 'off' : 'on' };
       _callService(e, on ? 'turn_off' : 'turn_on');
-      renderZonePopupContent();
+      refreshZonePopupIfOpen();
     });
   });
 
@@ -3094,7 +3098,7 @@ function renderZonePopupContent() {
       if (haStates[e]) haStates[e] = { ...haStates[e], state: turnOn ? 'on' : 'off' };
       _callService(e, turnOn ? 'turn_on' : 'turn_off');
     });
-    renderZonePopupContent();
+    refreshZonePopupIfOpen();
   });
 
   // Camera view buttons
