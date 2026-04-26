@@ -3025,7 +3025,7 @@ function renderZonePopupContent() {
           ? (window.OW?.apiPath ? window.OW.apiPath(`ow/camera_proxy/${e}`) : `ow/camera_proxy/${e}`) + `?t=${Date.now()}`
           : null;
         return `<div style="margin-bottom:6px;">
-          ${showThumbs ? `<img src="${thumbUrl}" style="width:100%;height:120px;object-fit:cover;border-radius:6px;background:#111;display:block;margin-bottom:4px;" onerror="this.style.display='none'">` : ''}
+          ${showThumbs ? `<img data-cam="${escapeHtml(e)}" src="${thumbUrl}" style="width:100%;height:120px;object-fit:cover;border-radius:6px;background:#111;display:block;margin-bottom:4px;" onerror="this.style.display='none'">` : ''}
           <div style="display:flex;align-items:center;padding:2px 0;">
             <span style="flex:1;color:#ccc;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">📷 ${escapeHtml(e.split('.').pop())}</span>
             <button class="zp-cam-view" data-entity="${escapeHtml(e)}" style="background:rgba(0,150,255,0.15);border:1px solid rgba(0,150,255,0.35);color:#0096ff;border-radius:5px;padding:3px 10px;cursor:pointer;font-size:11px;">▶ View</button>
@@ -3039,13 +3039,18 @@ function renderZonePopupContent() {
   // ── Wire events ───────────────────────────────────────────
   popup.querySelector('#zpClose')?.addEventListener('click', closeZonePopup);
 
-  // Arm/Disarm — optimistic update (don't wait for HA round-trip)
+  // Arm/Disarm — optimistic: flip the zone switch in haStates immediately
+  const zSwitchId = `switch.overwatch_zone_${zoneSlug(zone)}`;
   popup.querySelector('#zpArm')?.addEventListener('click', () => {
-    owCallSwitch(`switch.overwatch_zone_${zoneSlug(zone)}`, true);
-    renderZonePopupContent(); // instant UI update
+    owCallSwitch(zSwitchId, true);
+    if (haStates[zSwitchId]) haStates[zSwitchId] = { ...haStates[zSwitchId], state: 'on' };
+    else haStates[zSwitchId] = { state: 'on' };
+    renderZonePopupContent();
   });
   popup.querySelector('#zpDisarm')?.addEventListener('click', () => {
-    owCallSwitch(`switch.overwatch_zone_${zoneSlug(zone)}`, false);
+    owCallSwitch(zSwitchId, false);
+    if (haStates[zSwitchId]) haStates[zSwitchId] = { ...haStates[zSwitchId], state: 'off' };
+    else haStates[zSwitchId] = { state: 'off' };
     renderZonePopupContent();
   });
 
@@ -3117,6 +3122,19 @@ function renderZonePopupContent() {
     });
     titlebar.addEventListener('pointerup',    () => { dragging = false; titlebar.style.cursor = 'grab'; });
     titlebar.addEventListener('pointercancel',() => { dragging = false; titlebar.style.cursor = 'grab'; });
+  }
+
+  // Thumbnail refresh — match snapshot interval setting, only update <img> srcs (don't re-render whole popup)
+  if (_zonePopupTimer) { clearInterval(_zonePopupTimer); _zonePopupTimer = null; }
+  if (showThumbs && cameras_.length) {
+    const intervalMs = (parseInt(localStorage.getItem('ow_snap_interval') || window.OW?.uiConfig?.cam_snapshot_interval || 2) || 2) * 1000;
+    _zonePopupTimer = setInterval(() => {
+      popup.querySelectorAll('img[data-cam]').forEach(img => {
+        const e = img.dataset.cam;
+        const base = window.OW?.apiPath ? window.OW.apiPath(`ow/camera_proxy/${e}`) : `ow/camera_proxy/${e}`;
+        img.src = `${base}?t=${Date.now()}`;
+      });
+    }, intervalMs);
   }
 }
 
