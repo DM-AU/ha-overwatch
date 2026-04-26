@@ -982,12 +982,21 @@ function bindModal() {
 /* ── Override sidebar loading for camera page ─────────────────── */
 // app.js loads modules/sidebar.html by default.
 // We hook after DOMContentLoaded once OW is ready to swap in camera sidebar.
-function initCameraPage() {
+async function initCameraPage() {
   const OW = window.OW;
 
-  // Parse config — localStorage overrides uiConfig for per-device settings
-  camMode = (localStorage.getItem('ow_cam_mode') || OW.uiConfig.cam_default_mode || 'snapshot') === 'live' ? 'live' : 'snapshot';
-  try { camLowResMap = JSON.parse(OW.uiConfig.cam_low_res_map || '{}'); } catch {}
+  // Parse config
+  // Load low-res map from dedicated file (more reliable than uiConfig round-trip)
+  try {
+    const r = await fetch(OW.apiPath('ow/cam-low-res-map') + '?v=' + Date.now());
+    if (r.ok) {
+      camLowResMap = await r.json();
+      OW.uiConfig.cam_low_res_map = JSON.stringify(camLowResMap);
+    } else {
+      camLowResMap = JSON.parse(OW.uiConfig.cam_low_res_map || '{}');
+    }
+  } catch { try { camLowResMap = JSON.parse(OW.uiConfig.cam_low_res_map || '{}'); } catch {} }
+
   try { camPinned = new Set(JSON.parse(OW.uiConfig.cam_pinned || '[]')); } catch {}
 
   // Expose for settings panel source toggle
