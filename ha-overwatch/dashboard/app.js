@@ -2879,21 +2879,51 @@ function openZonePopup(zoneId, clientX, clientY) {
     overflow-y:auto;
     font-size:13px; color:#e0e0e0;
     pointer-events:all;
+    user-select:none;
   `;
   document.body.appendChild(popup);
   _zonePopupEl = popup;
 
-  // Position: prefer right of click, flip left if near right edge, flip up if near bottom
-  const pw = 308, ph = 500;
+  // Position: prefer right of click, flip left if near right edge
+  const pw = 308;
   let left = clientX + 12;
   let top  = clientY - 40;
   if (left + pw > window.innerWidth  - 10) left = clientX - pw - 12;
-  if (top  + ph > window.innerHeight - 10) top  = window.innerHeight - ph - 10;
+  if (top  + 500 > window.innerHeight - 10) top  = window.innerHeight - 510;
   if (top  < 10) top = 10;
   popup.style.left = left + 'px';
   popup.style.top  = top  + 'px';
 
+  // ── Make draggable via title bar ─────────────────────────
   renderZonePopupContent();
+
+  // Attach drag after content is rendered (need the titlebar)
+  requestAnimationFrame(() => {
+    const titlebar = popup.querySelector('#zpTitlebar');
+    if (!titlebar) return;
+    let dragging = false, ox = 0, oy = 0;
+    titlebar.style.cursor = 'grab';
+    titlebar.addEventListener('pointerdown', e => {
+      if (e.target.closest('button')) return; // don't drag on button clicks
+      dragging = true;
+      ox = e.clientX - popup.offsetLeft;
+      oy = e.clientY - popup.offsetTop;
+      titlebar.style.cursor = 'grabbing';
+      titlebar.setPointerCapture(e.pointerId);
+      e.preventDefault();
+    });
+    titlebar.addEventListener('pointermove', e => {
+      if (!dragging) return;
+      let nx = e.clientX - ox;
+      let ny = e.clientY - oy;
+      nx = Math.max(0, Math.min(window.innerWidth  - popup.offsetWidth,  nx));
+      ny = Math.max(0, Math.min(window.innerHeight - popup.offsetHeight, ny));
+      popup.style.left = nx + 'px';
+      popup.style.top  = ny + 'px';
+    });
+    titlebar.addEventListener('pointerup',    () => { dragging = false; titlebar.style.cursor = 'grab'; });
+    titlebar.addEventListener('pointercancel',() => { dragging = false; titlebar.style.cursor = 'grab'; });
+  });
 }
 
 function closeZonePopup() {
@@ -2909,60 +2939,79 @@ function renderZonePopupContent() {
   if (!zone) { closeZonePopup(); return; }
 
   const showThumbs = localStorage.getItem('ow_zone_popup_thumbs') === 'true';
-  const isEnabled  = getZoneState(zone) !== 'disabled';
-  const sensors    = zone.sensors || [];
-  const lights_    = zone.lights  || [];
-  const sirens_    = zone.sirens  || [];
-  const cameras_   = zone.cameras || [];
+  const zState     = getZoneState(zone);
+  const isArmed    = zState !== 'disabled';
+  const sensors_   = zone.sensors  || [];
+  const lights_    = zone.lights   || [];
+  const sirens_    = zone.sirens   || [];
+  const cameras_   = zone.cameras  || [];
 
-  // ── Arm/Disarm ────────────────────────────────────────────
+  // ── Arm/Disarm row ────────────────────────────────────────
   const armHtml = `
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
-      <div style="font-weight:600;font-size:14px;color:#fff;">${escapeHtml(zone.name)}</div>
-      <div style="display:flex;gap:6px;align-items:center;">
-        <button id="zpArm"   style="background:${isEnabled  ? 'rgba(0,150,255,0.25)' : 'rgba(255,255,255,0.06)'};border:1px solid ${isEnabled  ? 'rgba(0,150,255,0.5)' : 'rgba(255,255,255,0.12)'};color:${isEnabled  ? '#0096ff' : '#888'};border-radius:6px;padding:4px 10px;cursor:pointer;font-size:12px;">Armed</button>
-        <button id="zpDisarm" style="background:${!isEnabled ? 'rgba(255,59,48,0.25)' : 'rgba(255,255,255,0.06)'};border:1px solid ${!isEnabled ? 'rgba(255,59,48,0.5)' : 'rgba(255,255,255,0.12)'};color:${!isEnabled ? '#ff3b30' : '#888'};border-radius:6px;padding:4px 10px;cursor:pointer;font-size:12px;">Disarmed</button>
+    <div id="zpTitlebar" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;padding-bottom:10px;border-bottom:1px solid rgba(255,255,255,0.08);">
+      <div style="font-weight:600;font-size:14px;color:#fff;flex:1;">🏠 ${escapeHtml(zone.name)}</div>
+      <div style="display:flex;gap:5px;margin-left:8px;">
+        <button id="zpArm"    style="background:${isArmed   ? 'rgba(0,150,255,0.3)'  : 'rgba(255,255,255,0.06)'};border:1px solid ${isArmed   ? 'rgba(0,150,255,0.6)'  : 'rgba(255,255,255,0.12)'};color:${isArmed   ? '#4db8ff' : '#666'};border-radius:6px;padding:4px 10px;cursor:pointer;font-size:11px;font-weight:600;">Armed</button>
+        <button id="zpDisarm" style="background:${!isArmed  ? 'rgba(255,59,48,0.3)'  : 'rgba(255,255,255,0.06)'};border:1px solid ${!isArmed  ? 'rgba(255,59,48,0.6)'  : 'rgba(255,255,255,0.12)'};color:${!isArmed  ? '#ff6b6b' : '#666'};border-radius:6px;padding:4px 10px;cursor:pointer;font-size:11px;font-weight:600;">Disarmed</button>
+        <button id="zpClose"  style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);color:#888;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:12px;line-height:1;">✕</button>
       </div>
     </div>`;
 
   // ── Sensors ───────────────────────────────────────────────
-  const sensorHtml = sensors.length ? `
+  const sensorHtml = sensors_.length ? `
     <div style="margin-bottom:10px;">
-      <div style="font-size:11px;text-transform:uppercase;color:#555;letter-spacing:0.08em;margin-bottom:5px;">Sensors</div>
-      ${sensors.map(e => {
-        const st    = haStates[e];
-        const state = st?.state || '—';
+      <div style="font-size:10px;text-transform:uppercase;color:#555;letter-spacing:0.1em;margin-bottom:4px;">Sensors</div>
+      ${sensors_.map(e => {
         const triggered = isEntityTriggered(e);
-        const dot   = `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${triggered ? '#ff3b30' : '#34c759'};margin-right:6px;flex-shrink:0;"></span>`;
-        return `<div style="display:flex;align-items:center;padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.05);">
-          ${dot}<span style="flex:1;color:#ccc;font-size:12px;">${escapeHtml(e.split('.').pop())}</span>
-          <span style="color:${triggered ? '#ff3b30' : '#34c759'};font-size:11px;font-weight:600;">${escapeHtml(state.toUpperCase())}</span>
+        const state = haStates[e]?.state || '—';
+        return `<div style="display:flex;align-items:center;padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.04);">
+          <span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${triggered ? '#ff3b30' : '#34c759'};margin-right:7px;flex-shrink:0;"></span>
+          <span style="flex:1;color:#ccc;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(e.split('.').pop())}</span>
+          <span style="color:${triggered ? '#ff6b6b' : '#34c759'};font-size:11px;font-weight:600;margin-left:6px;">${escapeHtml(state.toUpperCase())}</span>
         </div>`;
       }).join('')}
     </div>` : '';
 
   // ── Lights ────────────────────────────────────────────────
+  const allLightsOn  = lights_.length && lights_.every(e => haStates[e]?.state === 'on');
+  const someLight    = lights_.some(e => haStates[e]?.state === 'on');
   const lightHtml = lights_.length ? `
     <div style="margin-bottom:10px;">
-      <div style="font-size:11px;text-transform:uppercase;color:#555;letter-spacing:0.08em;margin-bottom:5px;">Lights</div>
+      <div style="display:flex;align-items:center;margin-bottom:4px;">
+        <div style="font-size:10px;text-transform:uppercase;color:#555;letter-spacing:0.1em;flex:1;">Lights</div>
+        ${lights_.length > 1 ? `<button class="zp-all-lights" data-on="${allLightsOn ? '0' : '1'}"
+          style="background:${someLight ? 'rgba(255,204,0,0.2)' : 'rgba(255,255,255,0.06)'};border:1px solid ${someLight ? 'rgba(255,204,0,0.4)' : 'rgba(255,255,255,0.1)'};color:${someLight ? '#ffcc00' : '#888'};border-radius:5px;padding:2px 8px;cursor:pointer;font-size:10px;font-weight:600;">
+          ${allLightsOn ? 'All OFF' : 'All ON'}</button>` : ''}
+      </div>
       ${lights_.map(e => {
         const on = haStates[e]?.state === 'on';
-        return `<div style="display:flex;align-items:center;padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.05);">
-          <span style="flex:1;color:#ccc;font-size:12px;">💡 ${escapeHtml(e.split('.').pop())}</span>
-          <button class="zp-light-toggle" data-entity="${escapeHtml(e)}" style="background:${on ? 'rgba(255,204,0,0.2)' : 'rgba(255,255,255,0.06)'};border:1px solid ${on ? 'rgba(255,204,0,0.5)' : 'rgba(255,255,255,0.12)'};color:${on ? '#ffcc00' : '#888'};border-radius:6px;padding:3px 10px;cursor:pointer;font-size:11px;font-weight:600;">${on ? 'ON' : 'OFF'}</button>
+        return `<div style="display:flex;align-items:center;padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.04);">
+          <span style="flex:1;color:#ccc;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">💡 ${escapeHtml(e.split('.').pop())}</span>
+          <button class="zp-light-toggle" data-entity="${escapeHtml(e)}"
+            style="background:${on ? 'rgba(255,204,0,0.2)' : 'rgba(255,255,255,0.06)'};border:1px solid ${on ? 'rgba(255,204,0,0.5)' : 'rgba(255,255,255,0.12)'};color:${on ? '#ffcc00' : '#888'};border-radius:5px;padding:3px 10px;cursor:pointer;font-size:11px;font-weight:600;min-width:40px;">
+            ${on ? 'ON' : 'OFF'}</button>
         </div>`;
       }).join('')}
     </div>` : '';
 
   // ── Sirens ────────────────────────────────────────────────
+  const allSirensOn  = sirens_.length && sirens_.every(e => haStates[e]?.state === 'on');
+  const someSiren    = sirens_.some(e => haStates[e]?.state === 'on');
   const sirenHtml = sirens_.length ? `
     <div style="margin-bottom:10px;">
-      <div style="font-size:11px;text-transform:uppercase;color:#555;letter-spacing:0.08em;margin-bottom:5px;">Sirens</div>
+      <div style="display:flex;align-items:center;margin-bottom:4px;">
+        <div style="font-size:10px;text-transform:uppercase;color:#555;letter-spacing:0.1em;flex:1;">Sirens</div>
+        ${sirens_.length > 1 ? `<button class="zp-all-sirens" data-on="${allSirensOn ? '0' : '1'}"
+          style="background:${someSiren ? 'rgba(255,59,48,0.2)' : 'rgba(255,255,255,0.06)'};border:1px solid ${someSiren ? 'rgba(255,59,48,0.4)' : 'rgba(255,255,255,0.1)'};color:${someSiren ? '#ff6b6b' : '#888'};border-radius:5px;padding:2px 8px;cursor:pointer;font-size:10px;font-weight:600;">
+          ${allSirensOn ? 'All OFF' : 'All ON'}</button>` : ''}
+      </div>
       ${sirens_.map(e => {
         const on = haStates[e]?.state === 'on';
-        return `<div style="display:flex;align-items:center;padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.05);">
-          <span style="flex:1;color:#ccc;font-size:12px;">🔊 ${escapeHtml(e.split('.').pop())}</span>
-          <button class="zp-siren-toggle" data-entity="${escapeHtml(e)}" style="background:${on ? 'rgba(255,59,48,0.2)' : 'rgba(255,255,255,0.06)'};border:1px solid ${on ? 'rgba(255,59,48,0.5)' : 'rgba(255,255,255,0.12)'};color:${on ? '#ff3b30' : '#888'};border-radius:6px;padding:3px 10px;cursor:pointer;font-size:11px;font-weight:600;">${on ? 'ON' : 'OFF'}</button>
+        return `<div style="display:flex;align-items:center;padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.04);">
+          <span style="flex:1;color:#ccc;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">🔊 ${escapeHtml(e.split('.').pop())}</span>
+          <button class="zp-siren-toggle" data-entity="${escapeHtml(e)}"
+            style="background:${on ? 'rgba(255,59,48,0.2)' : 'rgba(255,255,255,0.06)'};border:1px solid ${on ? 'rgba(255,59,48,0.5)' : 'rgba(255,255,255,0.12)'};color:${on ? '#ff6b6b' : '#888'};border-radius:5px;padding:3px 10px;cursor:pointer;font-size:11px;font-weight:600;min-width:40px;">
+            ${on ? 'ON' : 'OFF'}</button>
         </div>`;
       }).join('')}
     </div>` : '';
@@ -2970,60 +3019,105 @@ function renderZonePopupContent() {
   // ── Cameras ───────────────────────────────────────────────
   const cameraHtml = cameras_.length ? `
     <div style="margin-bottom:6px;">
-      <div style="font-size:11px;text-transform:uppercase;color:#555;letter-spacing:0.08em;margin-bottom:5px;">Cameras</div>
+      <div style="font-size:10px;text-transform:uppercase;color:#555;letter-spacing:0.1em;margin-bottom:4px;">Cameras</div>
       ${cameras_.map(e => {
-        const thumbUrl = showThumbs ? apiPath(`ow/camera-snapshot/${e.replace('camera.', '')}?v=${Date.now()}`) : null;
+        const thumbUrl = showThumbs
+          ? (window.OW?.apiPath ? window.OW.apiPath(`ow/camera_proxy/${e}`) : `ow/camera_proxy/${e}`) + `?t=${Date.now()}`
+          : null;
         return `<div style="margin-bottom:6px;">
           ${showThumbs ? `<img src="${thumbUrl}" style="width:100%;height:120px;object-fit:cover;border-radius:6px;background:#111;display:block;margin-bottom:4px;" onerror="this.style.display='none'">` : ''}
           <div style="display:flex;align-items:center;padding:2px 0;">
-            <span style="flex:1;color:#ccc;font-size:12px;">📷 ${escapeHtml(e.split('.').pop())}</span>
-            <button class="zp-cam-view" data-entity="${escapeHtml(e)}" style="background:rgba(0,150,255,0.15);border:1px solid rgba(0,150,255,0.35);color:#0096ff;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:11px;">▶ View</button>
+            <span style="flex:1;color:#ccc;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">📷 ${escapeHtml(e.split('.').pop())}</span>
+            <button class="zp-cam-view" data-entity="${escapeHtml(e)}" style="background:rgba(0,150,255,0.15);border:1px solid rgba(0,150,255,0.35);color:#0096ff;border-radius:5px;padding:3px 10px;cursor:pointer;font-size:11px;">▶ View</button>
           </div>
         </div>`;
       }).join('')}
     </div>` : '';
 
-  popup.innerHTML = `
-    <div style="padding:14px;">
-      ${armHtml}
-      ${sensorHtml}
-      ${lightHtml}
-      ${sirenHtml}
-      ${cameraHtml}
-      <div style="text-align:right;margin-top:8px;border-top:1px solid rgba(255,255,255,0.06);padding-top:8px;">
-        <button id="zpClose" style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);color:#888;border-radius:6px;padding:5px 14px;cursor:pointer;font-size:12px;">Close</button>
-      </div>
-    </div>`;
+  popup.innerHTML = `<div style="padding:14px;">${armHtml}${sensorHtml}${lightHtml}${sirenHtml}${cameraHtml}</div>`;
 
-  // Wire events
+  // ── Wire events ───────────────────────────────────────────
   popup.querySelector('#zpClose')?.addEventListener('click', closeZonePopup);
 
+  // Arm/Disarm — optimistic update (don't wait for HA round-trip)
   popup.querySelector('#zpArm')?.addEventListener('click', () => {
     owCallSwitch(`switch.overwatch_zone_${zoneSlug(zone)}`, true);
-    setTimeout(renderZonePopupContent, 300);
+    renderZonePopupContent(); // instant UI update
   });
   popup.querySelector('#zpDisarm')?.addEventListener('click', () => {
     owCallSwitch(`switch.overwatch_zone_${zoneSlug(zone)}`, false);
-    setTimeout(renderZonePopupContent, 300);
+    renderZonePopupContent();
   });
 
+  // Individual light toggles — optimistic
   popup.querySelectorAll('.zp-light-toggle').forEach(btn => {
     btn.addEventListener('click', () => {
-      _callService(btn.dataset.entity, haStates[btn.dataset.entity]?.state === 'on' ? 'turn_off' : 'turn_on');
-      setTimeout(renderZonePopupContent, 300);
+      const e = btn.dataset.entity;
+      const on = haStates[e]?.state === 'on';
+      // Optimistic: flip local state immediately
+      if (haStates[e]) haStates[e] = { ...haStates[e], state: on ? 'off' : 'on' };
+      _callService(e, on ? 'turn_off' : 'turn_on');
+      renderZonePopupContent();
     });
   });
+
+  // All lights on/off
+  popup.querySelector('.zp-all-lights')?.addEventListener('click', btn => {
+    const turnOn = btn.currentTarget.dataset.on === '1';
+    lights_.forEach(e => {
+      if (haStates[e]) haStates[e] = { ...haStates[e], state: turnOn ? 'on' : 'off' };
+      _callService(e, turnOn ? 'turn_on' : 'turn_off');
+    });
+    renderZonePopupContent();
+  });
+
+  // Individual siren toggles — optimistic
   popup.querySelectorAll('.zp-siren-toggle').forEach(btn => {
     btn.addEventListener('click', () => {
-      _callService(btn.dataset.entity, haStates[btn.dataset.entity]?.state === 'on' ? 'turn_off' : 'turn_on');
-      setTimeout(renderZonePopupContent, 300);
+      const e = btn.dataset.entity;
+      const on = haStates[e]?.state === 'on';
+      if (haStates[e]) haStates[e] = { ...haStates[e], state: on ? 'off' : 'on' };
+      _callService(e, on ? 'turn_off' : 'turn_on');
+      renderZonePopupContent();
     });
   });
+
+  // All sirens on/off
+  popup.querySelector('.zp-all-sirens')?.addEventListener('click', btn => {
+    const turnOn = btn.currentTarget.dataset.on === '1';
+    sirens_.forEach(e => {
+      if (haStates[e]) haStates[e] = { ...haStates[e], state: turnOn ? 'on' : 'off' };
+      _callService(e, turnOn ? 'turn_on' : 'turn_off');
+    });
+    renderZonePopupContent();
+  });
+
+  // Camera view buttons
   popup.querySelectorAll('.zp-cam-view').forEach(btn => {
     btn.addEventListener('click', () => {
       if (window.openCameraModal) window.openCameraModal(btn.dataset.entity);
     });
   });
+
+  // Re-attach drag (titlebar was recreated)
+  const titlebar = popup.querySelector('#zpTitlebar');
+  if (titlebar && !titlebar._dragBound) {
+    titlebar._dragBound = true;
+    let dragging = false, ox = 0, oy = 0;
+    titlebar.style.cursor = 'grab';
+    titlebar.addEventListener('pointerdown', e => {
+      if (e.target.closest('button')) return;
+      dragging = true; ox = e.clientX - popup.offsetLeft; oy = e.clientY - popup.offsetTop;
+      titlebar.style.cursor = 'grabbing'; titlebar.setPointerCapture(e.pointerId); e.preventDefault();
+    });
+    titlebar.addEventListener('pointermove', e => {
+      if (!dragging) return;
+      popup.style.left = Math.max(0, Math.min(window.innerWidth  - popup.offsetWidth,  e.clientX - ox)) + 'px';
+      popup.style.top  = Math.max(0, Math.min(window.innerHeight - popup.offsetHeight, e.clientY - oy)) + 'px';
+    });
+    titlebar.addEventListener('pointerup',    () => { dragging = false; titlebar.style.cursor = 'grab'; });
+    titlebar.addEventListener('pointercancel',() => { dragging = false; titlebar.style.cursor = 'grab'; });
+  }
 }
 
 // Re-render popup when HA state changes (keep toggles in sync)
