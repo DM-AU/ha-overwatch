@@ -2592,14 +2592,17 @@ function makeSirenPin(pin, isOn, isEdit, scale) {
     });
   }
 
-  // No background circle — transparent like light icon
+  // Subtle background circle — matches light icon style
+  const bg = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+  bg.setAttribute('cx', cx); bg.setAttribute('cy', cy); bg.setAttribute('r', R * 0.9);
+  bg.setAttribute('fill', isOn ? 'rgba(40,0,0,0.5)' : 'rgba(40,40,40,0.5)');
+  bg.setAttribute('stroke', isEdit ? '#0096ff' : (isOn ? 'rgba(255,80,60,0.7)' : 'rgba(255,255,255,0.35)'));
+  bg.setAttribute('stroke-width', String((isEdit ? 2.5 : 1.2) / scale));
+  g.appendChild(bg);
+
+  // No edit ring needed — bg stroke handles it
   if (isEdit) {
-    const editRing = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-    editRing.setAttribute('cx', cx); editRing.setAttribute('cy', cy); editRing.setAttribute('r', R * 0.9);
-    editRing.setAttribute('fill', 'none');
-    editRing.setAttribute('stroke', '#0096ff');
-    editRing.setAttribute('stroke-width', String(2.5 / scale));
-    g.appendChild(editRing);
+    // Already handled above
   }
 
   // MDI bell icon — mdi:bell / mdi:bell-outline
@@ -2609,8 +2612,8 @@ function makeSirenPin(pin, isOn, isEdit, scale) {
   const bell = document.createElementNS('http://www.w3.org/2000/svg', 'path');
   bell.setAttribute('d', 'M21,19V20H3V19L5,17V11C5,7.9 7.03,5.17 10,4.29C10,4.19 10,4.1 10,4A2,2 0 0,1 12,2A2,2 0 0,1 14,4C14,4.1 14,4.19 14,4.29C16.97,5.17 19,7.9 19,11V17L21,19M14,21A2,2 0 0,1 12,23A2,2 0 0,1 10,21');
   bell.setAttribute('fill', isOn ? '#ff3b30' : 'none');
-  bell.setAttribute('stroke', isOn ? '#ff1a0e' : '#888');
-  bell.setAttribute('stroke-width', isOn ? '0.5' : '1');
+  bell.setAttribute('stroke', isOn ? '#ff1a0e' : '#ccc');
+  bell.setAttribute('stroke-width', isOn ? '0.5' : '1.2');
   iconG.appendChild(bell);
   // Off-state: red diagonal slash in MDI 0-24 coordinate space
   if (!isOn) {
