@@ -168,7 +168,8 @@ function getActiveCameras() {
   const cfg   = OW.uiConfig;
 
   camMaxVisible = parseInt(cfg.cam_max_visible) || 0;
-  try { camLowResMap = JSON.parse(cfg.cam_low_res_map || '{}'); } catch {}
+  // Do NOT reset camLowResMap here — it's loaded once at init from cam_low_res.json
+  // and updated via setCamLowResMap. Resetting from uiConfig would overwrite saved values.
   try { camPinned = new Set(JSON.parse(cfg.cam_pinned || '[]')); } catch {}
 
   const cooldownMs = (parseInt(localStorage.getItem("ow_cam_cooldown") || cfg.cam_cooldown) || 30) * 1000;
@@ -948,6 +949,22 @@ function camUpdate() {
 
 /* ── Modal bindings ─────────────────────────────────────────── */
 function bindModal() {
+  // Inject fullscreen button into modal if not already present
+  const modal = document.getElementById('cameraModal');
+  if (modal && !document.getElementById('camModalFullscreenBtn')) {
+    // Find the button row (contains camModalClose)
+    const closeBtn = document.getElementById('camModalClose');
+    if (closeBtn) {
+      const fsBtn = document.createElement('button');
+      fsBtn.id = 'camModalFullscreenBtn';
+      fsBtn.textContent = '⛶';
+      fsBtn.title = 'Full screen';
+      fsBtn.style.cssText = closeBtn.style.cssText || '';
+      fsBtn.className = closeBtn.className || 'cam-mode-btn';
+      closeBtn.parentNode.insertBefore(fsBtn, closeBtn);
+    }
+  }
+
   document.getElementById('camModalClose')?.addEventListener('click', closeCameraModal);
   document.getElementById('camModalBackdrop')?.addEventListener('click', closeCameraModal);
 
@@ -969,10 +986,25 @@ function bindModal() {
       camPinned.add(camModalEntityId);
       pinBtn.textContent = '📌 Unpin';
     }
-    // Update uiConfig in memory — persisted next time user hits Save Settings
     OW.uiConfig.cam_pinned = JSON.stringify([...camPinned]);
     renderCameraStatusBar();
     renderCameraGrid();
+  });
+
+  document.getElementById('camModalFullscreenBtn')?.addEventListener('click', () => {
+    const modal = document.getElementById('cameraModal');
+    if (!modal) return;
+    if (!document.fullscreenElement) {
+      modal.requestFullscreen?.() || modal.webkitRequestFullscreen?.() || modal.mozRequestFullScreen?.();
+    } else {
+      document.exitFullscreen?.() || document.webkitExitFullscreen?.() || document.mozCancelFullScreen?.();
+    }
+  });
+
+  // Update fullscreen button icon when state changes
+  document.addEventListener('fullscreenchange', () => {
+    const btn = document.getElementById('camModalFullscreenBtn');
+    if (btn) btn.textContent = document.fullscreenElement ? '✕⛶' : '⛶';
   });
 }
 
