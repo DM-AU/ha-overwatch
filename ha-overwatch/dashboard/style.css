@@ -7,6 +7,29 @@
 *::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 4px; }
 *::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.22); }
 
+/* ============================================================
+ * GLOBAL FORM ELEMENTS
+ * ============================================================ */
+select {
+  background: rgba(255,255,255,0.08);
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 8px;
+  color: #fff;
+  padding: 5px 28px 5px 10px;
+  font-size: 13px;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%23999' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  outline: none;
+  transition: border-color 0.15s;
+}
+select:hover  { border-color: rgba(255,255,255,0.3); }
+select:focus  { border-color: rgba(0,150,255,0.6); }
+select option { background: #1a1a1a; color: #fff; }
+
 :root {
   --sidebar-width: 72px;
   --sidebar-icon-size: 26px;

@@ -2267,6 +2267,8 @@ function makeLightPin(pin, isOn, isEdit, scale) {
 
   if (isOn) {
     const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+    // Smooth sine-wave breathing — gentle 2.4s cycle, no harsh on/off flash
+    const breathe = 0.55 + 0.45 * Math.sin(Date.now() / 1200 * Math.PI);
 
     if (!hasDir) {
       // ── Omnidirectional radial glow ────────────────────────
@@ -2274,7 +2276,7 @@ function makeLightPin(pin, isOn, isEdit, scale) {
       grad.id = `lg-${pin.id}`;
       grad.setAttribute('cx', '50%'); grad.setAttribute('cy', '50%'); grad.setAttribute('r', '50%');
       const s1 = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
-      s1.setAttribute('offset', '0%'); s1.setAttribute('stop-color', '#ffee88'); s1.setAttribute('stop-opacity', flashPhase ? '0.85' : '0.5');
+      s1.setAttribute('offset', '0%'); s1.setAttribute('stop-color', '#ffee88'); s1.setAttribute('stop-opacity', String(0.3 + 0.55 * breathe));
       const s2 = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
       s2.setAttribute('offset', '100%'); s2.setAttribute('stop-color', '#ffaa00'); s2.setAttribute('stop-opacity', '0');
       grad.appendChild(s1); grad.appendChild(s2); defs.appendChild(grad); g.appendChild(defs);
@@ -2284,6 +2286,7 @@ function makeLightPin(pin, isOn, isEdit, scale) {
       glow.setAttribute('r', glowRadius);
       glow.setAttribute('fill', `url(#lg-${pin.id})`);
       glow.setAttribute('pointer-events', 'none');
+      glow.style.mixBlendMode = 'screen'; // additive blending — won't wash out red zone colours
       g.appendChild(glow);
 
     } else {
@@ -2298,7 +2301,7 @@ function makeLightPin(pin, isOn, isEdit, scale) {
       coneGrad.setAttribute('cx', '0%'); coneGrad.setAttribute('cy', '50%');
       coneGrad.setAttribute('r', '100%'); coneGrad.setAttribute('fx', '0%');
       const c1 = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
-      c1.setAttribute('offset', '0%'); c1.setAttribute('stop-color', '#ffee88'); c1.setAttribute('stop-opacity', flashPhase ? '0.8' : '0.45');
+      c1.setAttribute('offset', '0%'); c1.setAttribute('stop-color', '#ffee88'); c1.setAttribute('stop-opacity', String(0.25 + 0.55 * breathe));
       const c2 = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
       c2.setAttribute('offset', '100%'); c2.setAttribute('stop-color', '#ffaa00'); c2.setAttribute('stop-opacity', '0');
       coneGrad.appendChild(c1); coneGrad.appendChild(c2); defs.appendChild(coneGrad); g.appendChild(defs);
@@ -2314,6 +2317,7 @@ function makeLightPin(pin, isOn, isEdit, scale) {
       cone.setAttribute('d', `M${cx},${cy} L${x1},${y1} Q${xM},${yM} ${x2},${y2} Z`);
       cone.setAttribute('fill', `url(#lg-cone-${pin.id})`);
       cone.setAttribute('pointer-events', 'none');
+      cone.style.mixBlendMode = 'screen';
       g.appendChild(cone);
 
       // Small tight source glow at icon
@@ -2356,18 +2360,16 @@ function makeLightPin(pin, isOn, isEdit, scale) {
   iconG.appendChild(bulb);
   g.appendChild(iconG);
 
-  // Interaction
-  let _pinMoved = false;
-  g.addEventListener('pointerdown', e => { _pinMoved = false; e.stopPropagation(); });
-  g.addEventListener('pointermove', () => { _pinMoved = true; });
-  g.addEventListener('pointerup', e => {
-    e.stopPropagation();
-    if (_pinMoved) return;
-    if (editorMode) { selectPin('light', pin.id); renderZonesEditor(); }
-    else            { togglePinEntity(pin.entity_id); }
-  });
+  // Live mode: tap to toggle. Editor mode: handled by makePinDraggable (tap=select, drag=move)
+  if (editorMode) {
+    makePinDraggable(g, pin, 'light');
+  } else {
+    let _moved = false;
+    g.addEventListener('pointerdown', e => { _moved = false; e.stopPropagation(); });
+    g.addEventListener('pointermove', e => { if (Math.hypot(e.movementX, e.movementY) > 2) _moved = true; });
+    g.addEventListener('pointerup',   e => { e.stopPropagation(); if (!_moved) togglePinEntity(pin.entity_id); });
+  }
 
-  if (editorMode) makePinDraggable(g, pin, 'light');
   return g;
 }
 
@@ -2436,21 +2438,14 @@ function makeSirenPin(pin, isOn, isEdit, scale) {
   iconG.appendChild(bell);
   g.appendChild(iconG);
 
-  let _sirenMoved = false;
-  g.addEventListener('pointerdown', e => { _sirenMoved = false; e.stopPropagation(); });
-  g.addEventListener('pointermove', () => { _sirenMoved = true; });
-  g.addEventListener('pointerup', e => {
-    e.stopPropagation();
-    if (_sirenMoved) return;
-    if (editorMode) {
-      selectPin('siren', pin.id);
-      renderZonesEditor();
-    } else {
-      togglePinEntity(pin.entity_id);
-    }
-  });
-
-  if (editorMode) makePinDraggable(g, pin, 'siren');
+  if (editorMode) {
+    makePinDraggable(g, pin, 'siren');
+  } else {
+    let _moved = false;
+    g.addEventListener('pointerdown', e => { _moved = false; e.stopPropagation(); });
+    g.addEventListener('pointermove', e => { if (Math.hypot(e.movementX, e.movementY) > 2) _moved = true; });
+    g.addEventListener('pointerup',   e => { e.stopPropagation(); if (!_moved) togglePinEntity(pin.entity_id); });
+  }
 
   return g;
 }
@@ -2496,35 +2491,50 @@ function placePinAtFloorplanCoord(x, y, floorId) {
 }
 
 function makePinDraggable(g, pin, type) {
-  let dragging = false, startClient = null, startPos = null;
+  // Drag state
+  let dragging = false, startClient = null, startPos = null, hasMoved = false;
+
   g.addEventListener('pointerdown', e => {
-    if (!editorMode) return;
+    if (e.button !== 0 && e.pointerType === 'mouse') return;
     e.stopPropagation();
+    e.preventDefault();
     dragging    = true;
+    hasMoved    = false;
     startClient = { x: e.clientX, y: e.clientY };
     startPos    = { x: pin.x, y: pin.y };
     g.setPointerCapture(e.pointerId);
   });
+
   g.addEventListener('pointermove', e => {
     if (!dragging) return;
-    // Use correct zoom — find which panel this SVG belongs to
+    const dx = e.clientX - startClient.x;
+    const dy = e.clientY - startClient.y;
+    if (!hasMoved && Math.hypot(dx, dy) < 4) return; // dead zone — don't start drag on micro-movement
+    hasMoved = true;
+    // Use correct zoom for this panel
     const svg = g.closest('.fp-svg');
     let s = zoom.scale || 1;
     if (svg) {
-      // Multi-panel: find panel index from SVG id (fp-svg-0, fp-svg-1)
       const match = svg.id?.match(/fp-svg-(\d+)/);
       if (match) s = PANEL_ZOOMS[Number(match[1])]?.scale || 1;
     }
-    const dScreen = { x: e.clientX - startClient.x, y: e.clientY - startClient.y };
-    pin.x = Math.round(startPos.x + dScreen.x / s);
-    pin.y = Math.round(startPos.y + dScreen.y / s);
+    pin.x = Math.round(startPos.x + dx / s);
+    pin.y = Math.round(startPos.y + dy / s);
     renderZones();
   });
-  g.addEventListener('pointerup', () => {
+
+  g.addEventListener('pointerup', e => {
     if (!dragging) return;
     dragging = false;
-    if (type === 'light') saveLight(pin);
-    else saveSiren(pin);
+    if (hasMoved) {
+      // Save final position
+      if (type === 'light') saveLight(pin);
+      else saveSiren(pin);
+    } else {
+      // Was a tap — select the pin in editor
+      selectPin(type, pin.id);
+      renderZonesEditor();
+    }
   });
 }
 
@@ -2666,23 +2676,23 @@ function renderZonesEditor() {
         </div>
         ${isLight ? `
         <div class="zones-editor-row" style="flex-direction:column;align-items:flex-start;gap:4px;">
-          <label>Radius <span id="pinRadiusVal" style="color:#ffcc44;font-weight:600;">${pin.radius || 5}</span></label>
+          <label>Range <span id="pinRadiusVal" style="color:#ffcc44;font-weight:600;">${pin.radius || 5}</span></label>
           <input id="pinRadiusInput" type="range" min="1" max="10" step="1" value="${pin.radius || 5}"
             style="width:100%;accent-color:#ffcc44;">
+          <div style="font-size:10px;color:#555;">Distance glow extends from icon</div>
         </div>
         <div class="zones-editor-row" style="flex-direction:column;align-items:flex-start;gap:4px;">
-          <label>Direction <span id="pinDirVal" style="color:#ffcc44;font-weight:600;">${pin.direction !== null && pin.direction !== undefined && pin.direction !== '' ? pin.direction + '°' : 'none (omnidirectional)'}</span></label>
-          <div style="display:flex;align-items:center;gap:8px;width:100%;">
-            <input id="pinDirectionInput" type="range" min="-1" max="359" step="1" value="${pin.direction !== null && pin.direction !== undefined && pin.direction !== '' ? pin.direction : -1}"
-              style="flex:1;accent-color:#ffcc44;">
-          </div>
-          <div style="font-size:10px;color:#555;">Slide to -1 to remove direction (full glow)</div>
+          <label>Direction <span id="pinDirVal" style="color:#ffcc44;font-weight:600;">${pin.direction !== null && pin.direction !== undefined && pin.direction !== '' ? pin.direction + '°' : 'none'}</span></label>
+          <input id="pinDirectionInput" type="range" min="-1" max="359" step="1" value="${pin.direction !== null && pin.direction !== undefined && pin.direction !== '' ? pin.direction : -1}"
+            style="width:100%;accent-color:#ffcc44;">
+          <div style="font-size:10px;color:#555;">Drag to -1 (left) for omnidirectional glow</div>
         </div>
         ${(pin.direction !== null && pin.direction !== undefined && pin.direction !== '') ? `
         <div class="zones-editor-row" style="flex-direction:column;align-items:flex-start;gap:4px;">
           <label>Spread <span id="pinSpreadVal" style="color:#ffcc44;font-weight:600;">${pin.spread || 35}°</span></label>
           <input id="pinSpreadInput" type="range" min="5" max="90" step="5" value="${pin.spread || 35}"
             style="width:100%;accent-color:#ffcc44;">
+          <div style="font-size:10px;color:#555;">Cone half-angle — narrow for spotlight, wide for flood</div>
         </div>` : ''}
         ` : ''}
         <div class="zones-editor-row" style="margin-top:4px;">
