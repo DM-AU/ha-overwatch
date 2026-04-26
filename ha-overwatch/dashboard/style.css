@@ -2137,11 +2137,23 @@ body.view-split[data-split-dir="v"] .split-panel-cam { flex: 1; width: 100%; }
   cursor: col-resize;
   width: 6px;
   height: auto;
+  position: relative;
+}
+/* Expand touch hit area without changing visual size */
+.split-handle::before {
+  content: '';
+  position: absolute;
+  top: 0; bottom: 0;
+  left: -10px; right: -10px;
 }
 body[data-split-dir="v"] .split-handle {
   cursor: row-resize;
   height: 6px;
   width: auto;
+}
+body[data-split-dir="v"] .split-handle::before {
+  left: 0; right: 0;
+  top: -10px; bottom: -10px;
 }
 .split-handle:hover,
 .split-handle.dragging { background: rgba(0,150,255,0.5); }
@@ -2493,6 +2505,23 @@ body.sidebar-collapsed.sidebar-left .view-toggle-widget {
   left: 0;
   overflow: visible;
   pointer-events: none;
+}
+
+/* Floor panel divider handle — expanded touch target */
+.floor-panel-handle {
+  position: relative;
+  flex-shrink: 0;
+  z-index: 10;
+}
+.floor-panel-handle::before {
+  content: '';
+  position: absolute;
+  top: -10px; bottom: -10px;
+  left: -10px; right: -10px;
+}
+.floor-panels-container.fp-dir-v .floor-panel-handle::before {
+  left: 0; right: 0;
+  top: -10px; bottom: -10px;
 }
 
 .floor-panel-label {

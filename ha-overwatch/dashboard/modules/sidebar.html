@@ -53,6 +53,16 @@
   <!-- Spacer pushes zoom + HA badge to bottom -->
   <div style="flex:1;"></div>
 
+  <!-- Map Lock — prevents pan/zoom, only allows icon/sidebar interactions -->
+  <button class="icon-plate" id="mapLockBtn" title="Lock map (prevent pan/zoom)" aria-label="Lock map">
+    <svg class="icon" id="mapLockIcon" width="26" height="26" viewBox="0 0 24 24" fill="none">
+      <!-- Unlocked padlock (default) -->
+      <rect x="5" y="11" width="14" height="10" rx="2" stroke="rgba(255,255,255,0.9)" stroke-width="2"/>
+      <path d="M8 11V7a4 4 0 0 1 7.9-.9" stroke="rgba(255,255,255,0.9)" stroke-width="2" stroke-linecap="round"/>
+      <circle cx="12" cy="16" r="1.5" fill="rgba(255,255,255,0.9)"/>
+    </svg>
+  </button>
+
   <!-- Zoom In -->
   <button class="icon-plate" id="zoomIn" title="Zoom in" aria-label="Zoom in">
     <svg class="icon" width="26" height="26" viewBox="0 0 24 24" fill="none">

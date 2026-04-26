@@ -144,6 +144,7 @@ let haEverConnected = false;  // true after first successful auth_ok
 let haStates = {};        // entity_id -> state object
 let haMsgId = 1;
 let haPendingCmds = {};
+let mapLocked = localStorage.getItem('ow_map_locked') === 'true'; // prevent pan/zoom when true
 let haReconnectTimer = null;
 let haReconnectDelay = 1000;   // exponential backoff: 1s→2s→4s→8s→30s max
 let haSubscribedEntities = new Set();
@@ -457,6 +458,36 @@ function bindZoomControls() {
     }
     applyTransform(); saveZoom();
   };
+
+  // Map lock button
+  const lockBtn = document.getElementById('mapLockBtn');
+  function applyLockState() {
+    const icon = document.getElementById('mapLockIcon');
+    if (!icon) return;
+    if (mapLocked) {
+      // Locked padlock
+      icon.innerHTML = `
+        <rect x="5" y="11" width="14" height="10" rx="2" stroke="rgba(255,200,0,0.9)" stroke-width="2"/>
+        <path d="M8 11V7a4 4 0 0 1 8 0v4" stroke="rgba(255,200,0,0.9)" stroke-width="2" stroke-linecap="round"/>
+        <circle cx="12" cy="16" r="1.5" fill="rgba(255,200,0,0.9)"/>`;
+      lockBtn?.classList.add('active');
+    } else {
+      // Unlocked padlock
+      icon.innerHTML = `
+        <rect x="5" y="11" width="14" height="10" rx="2" stroke="rgba(255,255,255,0.9)" stroke-width="2"/>
+        <path d="M8 11V7a4 4 0 0 1 7.9-.9" stroke="rgba(255,255,255,0.9)" stroke-width="2" stroke-linecap="round"/>
+        <circle cx="12" cy="16" r="1.5" fill="rgba(255,255,255,0.9)"/>`;
+      lockBtn?.classList.remove('active');
+    }
+  }
+  if (lockBtn) {
+    applyLockState();
+    lockBtn.onclick = () => {
+      mapLocked = !mapLocked;
+      localStorage.setItem('ow_map_locked', mapLocked ? 'true' : 'false');
+      applyLockState();
+    };
+  }
 }
 
 function bindPan() {
@@ -468,6 +499,8 @@ function bindPan() {
     if (getNumPanels() > 1 && e.target.closest('.floor-panel')) return;
     // Don't pan when interacting with map pins
     if (e.target.closest('[data-pin]')) return;
+    // Don't pan when map is locked
+    if (mapLocked && !editorMode) return;
     if (editorMode) {
       const t = e.target;
       // Don't start pan if clicking zone handles, polygons, or the zones-editor panel
@@ -499,6 +532,7 @@ function bindPan() {
   // Issue 6: mouse wheel zoom around cursor
   outer.addEventListener("wheel", e => {
     if (e.target.closest(".zones-editor, .search-panel, .settings-panel, .log-panel, .sidebar, .zoom-controls")) return;
+    if (mapLocked && !editorMode) return; // locked
     e.preventDefault();
     const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
     const rect   = outer.getBoundingClientRect();
@@ -1085,6 +1119,7 @@ function bindPanelInteraction(idx) {
   panelEl.addEventListener('pointerdown', e => {
     if (e.button !== 0 && e.pointerType === 'mouse') return;
     if (e.target.closest('.zone-handle, .floor-panel-handle')) return;
+    if (mapLocked && !editorMode) return; // locked
     panning  = true;
     panStart = { x: e.clientX - PANEL_ZOOMS[idx].x, y: e.clientY - PANEL_ZOOMS[idx].y };
   });
@@ -1102,6 +1137,7 @@ function bindPanelInteraction(idx) {
   // Scroll zoom — always applies to hovered panel regardless of selection
   panelEl.addEventListener('wheel', e => {
     e.preventDefault();
+    if (mapLocked && !editorMode) return; // locked
     const factor   = e.deltaY < 0 ? 1.1 : 1 / 1.1;
     const rect     = panelEl.getBoundingClientRect();
     const cx       = e.clientX - rect.left;
@@ -3735,20 +3771,18 @@ function bindZonesSvgEvents() {
     }
 
     // 2) Inserting a point (Edit Points mode)
-    // Click near an edge → snap and insert on that edge
-    // Click outside the zone body → insert at closest edge point
-    // Click inside the zone → drag the zone (handled in step 3)
+    // Click outside zone → insert new point at exact click position on closest edge
+    // Click inside zone → drag the zone (handled in step 3)
     if (isEditingPoints && selectedZoneId && !isCreatingZone) {
       const zone = zones.find(z => z.id === selectedZoneId);
       if (zone && (zone.points || []).length >= 2) {
-        // Check if click is inside the zone polygon
         const insideZone = isPointInPolygon(fp.x, fp.y, zone.points);
         if (!insideZone) {
           const info = closestEdgeInfo(zone, fp.x, fp.y);
           if (info) {
             pushUndo();
-            // Insert snapped to edge
-            zone.points.splice(info.insertAfter + 1, 0, { x: Math.round(info.snap.x), y: Math.round(info.snap.y) });
+            // Insert at exact clicked position, not snapped to edge midpoint
+            zone.points.splice(info.insertAfter + 1, 0, { x: Math.round(fp.x), y: Math.round(fp.y) });
             saveZone(zone);
             renderZones();
             renderZonesEditor();
