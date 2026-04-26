@@ -1074,14 +1074,24 @@ function bindPanelInteraction(idx) {
   // Scroll zoom — always applies to hovered panel regardless of selection
   panelEl.addEventListener('wheel', e => {
     e.preventDefault();
-    const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
-    const rect   = panelEl.getBoundingClientRect();
-    const cx     = e.clientX - rect.left;
-    const cy     = e.clientY - rect.top;
-    const z      = PANEL_ZOOMS[idx];
-    z.x          = cx - (cx - z.x) * factor;
-    z.y          = cy - (cy - z.y) * factor;
-    z.scale      = Math.min(10, Math.max(0.1, z.scale * factor));
+    const factor   = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+    const rect     = panelEl.getBoundingClientRect();
+    const cx       = e.clientX - rect.left;
+    const cy       = e.clientY - rect.top;
+    const z        = PANEL_ZOOMS[idx];
+    const newScale = Math.min(10, Math.max(0.05, z.scale * factor));
+    z.x = cx - (cx - z.x) * (newScale / z.scale);
+    z.y = cy - (cy - z.y) * (newScale / z.scale);
+    z.scale = newScale;
+    // Clamp to prevent shooting off-screen
+    const img = getPanelImg(idx);
+    if (img && img.naturalWidth) {
+      const iw = img.naturalWidth * z.scale;
+      const ih = img.naturalHeight * z.scale;
+      const margin = 80;
+      z.x = Math.min(rect.width  - margin, Math.max(-(iw - margin), z.x));
+      z.y = Math.min(rect.height - margin, Math.max(-(ih - margin), z.y));
+    }
     applyPanelTransform(idx);
   }, { passive: false });
 
@@ -2486,15 +2496,16 @@ function makeSirenPin(pin, isOn, isEdit, scale) {
     s2.setAttribute('offset', '100%'); s2.setAttribute('stop-color', '#ff3b30'); s2.setAttribute('stop-opacity', '0');
     grad.appendChild(s1); grad.appendChild(s2); defs.appendChild(grad); g.appendChild(defs);
 
-    const flashGlow = document.createElementNS('http://www.w3.org/2000/svg', 'ellipse');
-    flashGlow.setAttribute('cx', cx); flashGlow.setAttribute('cy', cy);
-    flashGlow.setAttribute('rx', R * 6); flashGlow.setAttribute('ry', R * 6);
-    flashGlow.setAttribute('fill', `url(#sg-${pin.id})`);
-    g.appendChild(flashGlow);
-
     // 3 rings at different expansion stages driven by time
     const ringPhase = (Date.now() % 1600) / 1600;
     const maxRingR  = R * (2 + (pin.radius || 4)); // radius setting controls max expansion
+
+    // Red glow scaled to match ring max size
+    const flashGlow = document.createElementNS('http://www.w3.org/2000/svg', 'ellipse');
+    flashGlow.setAttribute('cx', cx); flashGlow.setAttribute('cy', cy);
+    flashGlow.setAttribute('rx', maxRingR); flashGlow.setAttribute('ry', maxRingR);
+    flashGlow.setAttribute('fill', `url(#sg-${pin.id})`);
+    g.appendChild(flashGlow);
     [0, 0.33, 0.66].forEach((offset) => {
       const phase = (ringPhase + offset) % 1;
       const ringR = R * 1.2 + (maxRingR - R * 1.2) * phase;
@@ -2550,11 +2561,15 @@ let placingZoneId   = null; // zone the entity belongs to
 let _activeZoneTab  = 'sensors'; // persists across renderZonesEditor re-renders
 
 function selectPin(type, id) {
-  activePinType   = type;
-  activePinId     = id;
-  // Clear zone/group selection so pin panel shows immediately
-  selectedZoneId  = null;
-  selectedGroupId = null;
+  // Toggle — clicking same pin deselects it
+  if (activePinType === type && activePinId === id) {
+    activePinId = null; activePinType = null;
+  } else {
+    activePinType   = type;
+    activePinId     = id;
+    selectedZoneId  = null;
+    selectedGroupId = null;
+  }
 }
 
 // Called when user clicks a map to place a pin (single or multi-panel)
@@ -2691,7 +2706,7 @@ function renderZonesEditor() {
 
   const needsPoints   = selectedZone && (selectedZone.points || []).length < 3;
   const editPtsLabel  = isCreatingZone ? "✏️ Adding Points" : isEditingPoints ? "✔ Done Editing" : needsPoints ? "Add Points" : "Edit Zone";
-  const hasSelection = !!(selectedZone || selectedGroup);
+  const hasSelection = !!(selectedZone || selectedGroup || activePinId);
   const editorW = hasSelection ? editorSize.w : 260;
   const editorH = editorSize.h;
 
@@ -2981,6 +2996,7 @@ function renderZonesEditor() {
     item.onclick = () => {
       selectedZoneId  = item.dataset.zoneId;
       selectedGroupId = null;
+      activePinId     = null; activePinType = null; // deselect any pin
       isCreatingZone = false; currentNewZone = null;
       renderZones(); renderZonesEditor();
     };
