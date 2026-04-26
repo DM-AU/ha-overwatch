@@ -2206,6 +2206,13 @@ let editorDrag = { active: false, startX: 0, startY: 0 };
 let editorSize = { w: 560, h: 420 };
 let editorPos  = { x: 20, y: 70 };
 
+// Restore saved editor size and position
+(function() {
+  const sw = localStorage.getItem('editorW'), sh = localStorage.getItem('editorH');
+  if (sw) editorSize.w = Math.max(240, parseInt(sw));
+  if (sh) editorSize.h = Math.max(300, parseInt(sh));
+})();
+
 function makeDraggableEditor(containerEl) {
   const container = containerEl || document.getElementById("zonesEditorContainer");
   if (!container) return;
@@ -3353,7 +3360,7 @@ function renderZonesEditor() {
       const panel = container.querySelector(".zones-editor");
       if (panel) { panel.style.width = editorSize.w + "px"; panel.style.height = editorSize.h + "px"; }
     });
-    resizeHandle.addEventListener("pointerup", () => { resizing = false; });
+    resizeHandle.addEventListener("pointerup", () => { resizing = false; localStorage.setItem("editorW", editorSize.w); localStorage.setItem("editorH", editorSize.h); });
   }
 
   // Restore draggable
@@ -3601,9 +3608,15 @@ function bindZonesSvgEvents() {
       if (isEditingPoints && selectedZoneId && zoneId !== selectedZoneId) {
         e.stopPropagation(); return;
       }
+      // Toggle — clicking same zone deselects it
+      if (selectedZoneId === zoneId && !isEditingPoints) {
+        selectedZoneId = null;
+        renderZones(); renderZonesEditor();
+        e.stopPropagation(); return;
+      }
       selectedZoneId  = zoneId;
       selectedGroupId = null;
-      activePinId = null; activePinType = null; // deselect pin when zone clicked
+      activePinId = null; activePinType = null;
       // In edit points mode: clicking inside zone starts a drag of the whole zone
       if (isEditingPoints && zone) {
         draggingZone = { zoneId, startPoints: zone.points.map(p => ({ ...p })) };
