@@ -786,34 +786,45 @@ async function deleteCameraPin(id) {
 
 function togglePinEntity(entityId, pinId) {
   if (!entityId) return;
-  // Check if this pin is set to toggle all zone lights
-  const pin = lights.find(p => p.id === pinId);
-  if (pin?.tapAll) {
+
+  // Light tap modes
+  const lightPin = lights.find(p => p.id === pinId);
+  if (lightPin?.tapAll) {
     const zone = zones.find(z => (z.lights || []).includes(entityId));
-    if (zone && zone.lights?.length) {
+    if (zone?.lights?.length) {
       const allOn = zone.lights.every(e => haStates[e]?.state === 'on');
       zone.lights.forEach(e => _callService(e, allOn ? 'turn_off' : 'turn_on'));
       return;
     }
   }
 
-  // For sirens with unknown state, track toggle locally
+  // Siren tap modes
   const sirenPin = sirens.find(p => p.id === pinId);
-  let service;
   if (sirenPin) {
-    const state = haStates[entityId]?.state;
-    if (state === 'on' || (state === 'unknown' && sirenPin._localOn)) {
-      service = 'turn_off';
-      sirenPin._localOn = false;
+    const state   = haStates[entityId]?.state;
+    const isOn    = state === 'on' || (state === 'unknown' && sirenPin._localOn);
+    const service = isOn ? 'turn_off' : 'turn_on';
+
+    if (sirenPin.tapAll) {
+      // All sirens across all zones
+      const allEntities = [...new Set(zones.flatMap(z => z.sirens || []).concat(sirens.map(p => p.entity_id).filter(Boolean)))];
+      allEntities.forEach(e => _callService(e, service));
+      sirens.forEach(p => { p._localOn = !isOn; });
+    } else if (sirenPin.tapZone) {
+      // All sirens in this zone
+      const zone = zones.find(z => (z.sirens || []).includes(entityId));
+      if (zone?.sirens?.length) zone.sirens.forEach(e => _callService(e, service));
+      // Also update _localOn for all siren pins with matching zone
     } else {
-      service = 'turn_on';
-      sirenPin._localOn = true;
+      _callService(entityId, service);
+      sirenPin._localOn = !isOn;
     }
-  } else {
-    service = haStates[entityId]?.state === 'on' ? 'turn_off' : 'turn_on';
+    renderZones();
+    return;
   }
-  _callService(entityId, service);
-  renderZones(); // update visual state immediately
+
+  // Default toggle
+  _callService(entityId, haStates[entityId]?.state === 'on' ? 'turn_off' : 'turn_on');
 }
 
 function _callService(entityId, service) {
@@ -2599,6 +2610,11 @@ function makeSirenPin(pin, isOn, isEdit, scale) {
   bell.setAttribute('stroke', isOn ? '#ff1a0e' : '#888');
   bell.setAttribute('stroke-width', isOn ? '0.5' : '1');
   iconG.appendChild(bell);
+  // Off-state: red diagonal slash like lights
+  if (!isOn) {
+    const mk = (tag, attrs) => { const el = document.createElementNS('http://www.w3.org/2000/svg', tag); Object.entries(attrs).forEach(([k,v]) => el.setAttribute(k,v)); return el; };
+    iconG.appendChild(mk('line', {x1:'-8',y1:'10',x2:'8',y2:'-8',stroke:'#ff5555','stroke-width':'1.8','stroke-linecap':'round'}));
+  }
   g.appendChild(iconG);
 
   if (editorMode) {
@@ -2948,14 +2964,22 @@ function renderZonesEditor() {
         <div style="margin-top:10px;border-top:1px solid rgba(255,255,255,0.06);padding-top:8px;">
           <label style="font-size:12px;color:#aaa;">Tap action</label>
           <div style="display:flex;gap:6px;margin-top:4px;">
-            <button id="pinTapThis" class="settings-toggle ${!pin.tapAll ? 'active' : ''}" style="flex:1;font-size:11px;">This light</button>
-            <button id="pinTapAll"  class="settings-toggle ${pin.tapAll  ? 'active' : ''}" style="flex:1;font-size:11px;">All zone lights</button>
+            <button id="pinTapThis" class="settings-toggle ${!pin.tapAll && !pin.tapAllSirens ? 'active' : ''}" style="flex:1;font-size:11px;">This light</button>
+            <button id="pinTapAll"  class="settings-toggle ${pin.tapAll ? 'active' : ''}" style="flex:1;font-size:11px;">All zone lights</button>
           </div>
         </div>` : isCamera ? `
         <div style="margin-top:10px;border-top:1px solid rgba(255,255,255,0.06);padding-top:8px;">
           <div style="font-size:11px;color:#666;">Tap opens full-screen camera view.</div>
         </div>` : `
         <div style="margin-top:10px;border-top:1px solid rgba(255,255,255,0.06);padding-top:8px;">
+          <label style="font-size:12px;color:#aaa;">Tap action</label>
+          <div style="display:flex;gap:6px;margin-top:4px;flex-wrap:wrap;">
+            <button id="pinTapThis"       class="settings-toggle ${!pin.tapZone && !pin.tapAll ? 'active' : ''}" style="flex:1;font-size:11px;min-width:80px;">This siren</button>
+            <button id="pinTapZone"       class="settings-toggle ${pin.tapZone ? 'active' : ''}"                 style="flex:1;font-size:11px;min-width:80px;">Zone sirens</button>
+            <button id="pinTapAllSirens"  class="settings-toggle ${pin.tapAll  ? 'active' : ''}"                 style="flex:1;font-size:11px;min-width:80px;">All sirens</button>
+          </div>
+        </div>
+        <div style="margin-top:10px;">
           <label style="font-size:12px;color:#aaa;">Aura radius <span id="pinRadiusVal" style="color:#ff6666;font-weight:600;">${pin.radius || 4}</span></label>
           <input id="pinRadiusInput" type="range" min="1" max="10" step="1" value="${pin.radius || 4}"
             style="width:100%;accent-color:#ff6666;margin-top:4px;display:block;">
@@ -3327,14 +3351,17 @@ function renderZonesEditor() {
 
       // Tap action buttons (lights only)
       document.getElementById('pinTapThis')?.addEventListener('click', () => {
-        pin.tapAll = false;
-        savePin();
-        renderZonesEditor();
+        pin.tapAll = false; pin.tapZone = false; savePin(); renderZonesEditor();
       });
       document.getElementById('pinTapAll')?.addEventListener('click', () => {
-        pin.tapAll = true;
-        savePin();
-        renderZonesEditor();
+        pin.tapAll = true; pin.tapZone = false; savePin(); renderZonesEditor();
+      });
+      // Siren-specific tap actions
+      document.getElementById('pinTapZone')?.addEventListener('click', () => {
+        pin.tapZone = true; pin.tapAll = false; savePin(); renderZonesEditor();
+      });
+      document.getElementById('pinTapAllSirens')?.addEventListener('click', () => {
+        pin.tapAll = true; pin.tapZone = false; savePin(); renderZonesEditor();
       });
 
       // Siren radius slider
