@@ -2224,8 +2224,10 @@ function _renderZonesInternal(targetSvg) {
         poly.style.stroke      = hexToRgba(hex, fillAlpha * 0.8);
         poly.style.strokeWidth = String(1 / zoom.scale);
       } else {
-        // Clear zone (armed or disarmed, no active sensor) — completely transparent
-        return;
+        // Clear zone (armed or disarmed, no active sensor) — invisible but clickable
+        poly.style.fill         = 'rgba(0,0,0,0)';
+        poly.style.stroke       = 'none';
+        poly.style.pointerEvents = 'all'; // must receive clicks to open zone popup
       }
     }
 
