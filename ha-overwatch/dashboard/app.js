@@ -644,6 +644,8 @@ async function saveZone(zone) {
       body: JSON.stringify({ filename, content: zoneToYaml(zone) })
     });
     if (!res.ok) throw new Error(res.statusText);
+    // Update dataVersion baseline so we don't self-sync
+    try { const h = await fetch(apiPath("ow/health"),{cache:"no-store"}); const d = await h.json(); if(d.dataVersion) _lastDataVersion = d.dataVersion; } catch{}
   } catch {
     localStorage.setItem("zones", JSON.stringify(zones));
   }
@@ -735,9 +737,12 @@ async function loadSirens() {
 }
 async function saveLight(pin) {
   await fetch(apiPath("ow/save-light"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(pin) });
+  // Update our dataVersion baseline so we don't re-sync our own change
+  try { const h = await fetch(apiPath("ow/health"),{cache:"no-store"}); const d = await h.json(); if(d.dataVersion) _lastDataVersion = d.dataVersion; } catch{}
 }
 async function saveSiren(pin) {
   await fetch(apiPath("ow/save-siren"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(pin) });
+  try { const h = await fetch(apiPath("ow/health"),{cache:"no-store"}); const d = await h.json(); if(d.dataVersion) _lastDataVersion = d.dataVersion; } catch{}
 }
 async function deleteLight(id) {
   lights = lights.filter(p => p.id !== id);
@@ -2267,15 +2272,13 @@ function makeLightPin(pin, isOn, isEdit, scale) {
   // Glow radius — each slider step = 1.5% of image width (finer control)
   const svgEl   = g.closest('svg') || document.getElementById('zonesSvg');
   const imgW    = svgEl ? Number(svgEl.getAttribute('width') || 2000) : 2000;
-  const glowRadius = (pin.radius || 3) * (imgW * 0.008); // 1→0.8%, 10→8% of image width
+  const glowRadius = (pin.radius || 3) * (imgW * 0.006); // smaller steps: 1→0.6%, 10→6%
 
-  // Show glow in editor even when light is off, so user can tune placement
   const showGlow = isOn || (editorMode && isEdit);
 
   if (showGlow) {
     const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
-    // Smooth sine-wave breathing — gentle 2.4s cycle. In editor show at fixed mid-opacity.
-    const breathe = isOn ? (0.55 + 0.45 * Math.sin(Date.now() / 1200 * Math.PI)) : 0.6;
+    const breathe = isOn ? (0.4 + 0.6 * Math.sin(Date.now() / 1000 * Math.PI)) : 0.65; // full 0.4→1.0 range, faster
 
     if (!hasDir) {
       // ── Omnidirectional radial glow ────────────────────────
@@ -2283,11 +2286,11 @@ function makeLightPin(pin, isOn, isEdit, scale) {
       grad.id = `lg-${pin.id}`;
       grad.setAttribute('cx', '50%'); grad.setAttribute('cy', '50%'); grad.setAttribute('r', '50%');
       const s1 = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
-      s1.setAttribute('offset', '0%');   s1.setAttribute('stop-color', '#ffdd00'); s1.setAttribute('stop-opacity', String(0.80 + 0.18 * breathe));
+      s1.setAttribute('offset', '0%');   s1.setAttribute('stop-color', '#ffff44'); s1.setAttribute('stop-opacity', String(0.75 + 0.25 * breathe));
       const s2 = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
-      s2.setAttribute('offset', '40%');  s2.setAttribute('stop-color', '#ffaa00'); s2.setAttribute('stop-opacity', String(0.50 + 0.25 * breathe));
+      s2.setAttribute('offset', '45%');  s2.setAttribute('stop-color', '#ffee00'); s2.setAttribute('stop-opacity', String(0.35 + 0.30 * breathe));
       const s3 = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
-      s3.setAttribute('offset', '100%'); s3.setAttribute('stop-color', '#ff7700'); s3.setAttribute('stop-opacity', String(0.18 + 0.12 * breathe));
+      s3.setAttribute('offset', '100%'); s3.setAttribute('stop-color', '#ffcc00'); s3.setAttribute('stop-opacity', String(0.05 + 0.10 * breathe));
       grad.appendChild(s1); grad.appendChild(s2); grad.appendChild(s3); defs.appendChild(grad); g.appendChild(defs);
 
       const glow = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
@@ -2346,43 +2349,27 @@ function makeLightPin(pin, isOn, isEdit, scale) {
     }
   }
 
-  // Off-state: subtle red radial glow so icon reads clearly on any background
-  if (!isOn) {
-    const offDefs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
-    const offGrad = document.createElementNS('http://www.w3.org/2000/svg', 'radialGradient');
-    offGrad.id = `off-${pin.id}`;
-    offGrad.setAttribute('cx', '50%'); offGrad.setAttribute('cy', '50%'); offGrad.setAttribute('r', '50%');
-    const og1 = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
-    og1.setAttribute('offset', '0%'); og1.setAttribute('stop-color', '#ff4444'); og1.setAttribute('stop-opacity', '0.35');
-    const og2 = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
-    og2.setAttribute('offset', '100%'); og2.setAttribute('stop-color', '#ff2200'); og2.setAttribute('stop-opacity', '0');
-    offGrad.appendChild(og1); offGrad.appendChild(og2); offDefs.appendChild(offGrad); g.appendChild(offDefs);
-    const offGlow = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-    offGlow.setAttribute('cx', cx); offGlow.setAttribute('cy', cy);
-    offGlow.setAttribute('r', ICON_R * 1.8);
-    offGlow.setAttribute('fill', `url(#off-${pin.id})`);
-    offGlow.setAttribute('pointer-events', 'none');
-    g.appendChild(offGlow);
-  }
-
-  // Icon badge — fixed screen size
-  const bg = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-  bg.setAttribute('cx', cx); bg.setAttribute('cy', cy); bg.setAttribute('r', ICON_R * 0.8);
-  bg.setAttribute('fill', isOn ? 'rgba(40,30,0,0.85)' : 'rgba(40,40,40,0.85)');
-  bg.setAttribute('stroke', isEdit ? '#0096ff' : (isOn ? '#ffcc44' : 'rgba(255,255,255,0.5)'));
-  bg.setAttribute('stroke-width', String((isEdit ? 2.5 : 1.5) / scale));
-  g.appendChild(bg);
-
+  // No heavy badge — just the MDI icon with a subtle shadow for readability
   // MDI lightbulb — centred on pin, scaled to badge size
-  const iconScale = (ICON_R * 0.8) / 12; // MDI viewBox is 24x24, so half=12
+  const iconScale = ICON_R / 12; // MDI viewBox is 24x24, so half=12
   const iconG = document.createElementNS('http://www.w3.org/2000/svg', 'g');
   iconG.setAttribute('transform', `translate(${cx - 12 * iconScale},${cy - 12 * iconScale}) scale(${iconScale})`);
+  // Drop shadow filter for readability on any background
+  const fDefs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+  const filt  = document.createElementNS('http://www.w3.org/2000/svg', 'filter');
+  filt.id = `sh-${pin.id}`;
+  filt.setAttribute('x', '-50%'); filt.setAttribute('y', '-50%');
+  filt.setAttribute('width', '200%'); filt.setAttribute('height', '200%');
+  const feGauss = document.createElementNS('http://www.w3.org/2000/svg', 'feDropShadow');
+  feGauss.setAttribute('dx', '0'); feGauss.setAttribute('dy', '0');
+  feGauss.setAttribute('stdDeviation', '1.5');
+  feGauss.setAttribute('flood-color', '#000'); feGauss.setAttribute('flood-opacity', '0.8');
+  filt.appendChild(feGauss); fDefs.appendChild(filt); g.appendChild(fDefs);
+
   const bulb = document.createElementNS('http://www.w3.org/2000/svg', 'path');
   bulb.setAttribute('d', 'M12,2A7,7 0 0,0 5,9C5,11.38 6.19,13.47 8,14.74V17A1,1 0 0,0 9,18H15A1,1 0 0,0 16,17V14.74C17.81,13.47 19,11.38 19,9A7,7 0 0,0 12,2M9,21A1,1 0 0,0 10,22H14A1,1 0 0,0 15,21V20H9V21Z');
-  bulb.setAttribute('fill', isOn ? '#ffcc44' : 'none');
-  bulb.setAttribute('stroke', isOn ? '#ffaa00' : '#ccc');
-  bulb.setAttribute('stroke-width', String(1.2 / iconScale));
-  bulb.setAttribute('stroke-linejoin', 'round');
+  bulb.setAttribute('fill', isOn ? '#ffdd00' : '#888');
+  bulb.setAttribute('filter', `url(#sh-${pin.id})`);
   iconG.appendChild(bulb);
   g.appendChild(iconG);
 
@@ -2518,7 +2505,7 @@ function placePinAtFloorplanCoord(x, y, floorId) {
 }
 
 function makePinDraggable(g, pin, type) {
-  let dragging = false, startClient = null, startPos = null, hasMoved = false, rafPending = false;
+  let dragging = false, startClient = null, startPos = null, hasMoved = false;
 
   g.addEventListener('pointerdown', e => {
     if (e.button !== 0 && e.pointerType === 'mouse') return;
@@ -2537,50 +2524,36 @@ function makePinDraggable(g, pin, type) {
     const dy = e.clientY - startClient.y;
     if (!hasMoved && Math.hypot(dx, dy) < 4) return;
     hasMoved = true;
-    // Compute new position
+    // Get zoom scale for this panel/single
     const panelSvg = g.closest('.fp-svg');
     let s = zoom.scale || 1;
     if (panelSvg) {
       const match = panelSvg.id?.match(/fp-svg-(\d+)/);
       if (match) s = PANEL_ZOOMS[Number(match[1])]?.scale || 1;
     }
-    pin.x = Math.round(startPos.x + dx / s);
-    pin.y = Math.round(startPos.y + dy / s);
-    // Move the g element directly instead of re-rendering — avoids losing pointer capture
-    const transform = `translate(${pin.x - startPos.x + (type === 'light' ? 0 : 0)},${pin.y - startPos.y})`;
-    // Update position visually by moving all children via a transform on g
-    // We can't use g.setAttribute('transform'...) since pin coords are absolute in children
-    // Instead, just track — re-render on pointerup
-    if (!rafPending) {
-      rafPending = true;
-      requestAnimationFrame(() => {
-        rafPending = false;
-        // Update just the position of this pin's g by rebuilding it in-place
-        const parent = g.parentNode;
-        if (!parent) return;
-        const newG = type === 'light'
-          ? makeLightPin(pin, haStates[pin.entity_id]?.state === 'on', true, zoom.scale || 1)
-          : makeSirenPin(pin, haStates[pin.entity_id]?.state === 'on', true, zoom.scale || 1);
-        parent.replaceChild(newG, g);
-        // NOTE: pointer capture is lost here — drag ends visually but position is saved
-      });
-    }
+    const newX = Math.round(startPos.x + dx / s);
+    const newY = Math.round(startPos.y + dy / s);
+    // Move g visually via SVG translate — no DOM recreation, pointer capture preserved
+    g.setAttribute('transform', `translate(${newX - startPos.x},${newY - startPos.y})`);
+    pin.x = newX;
+    pin.y = newY;
   });
 
-  g.addEventListener('pointerup', e => {
+  g.addEventListener('pointerup', () => {
     if (!dragging) return;
     dragging = false;
+    g.removeAttribute('transform'); // clear visual offset — renderZones will draw at new position
     if (hasMoved) {
       if (type === 'light') saveLight(pin);
       else saveSiren(pin);
-      renderZones(); // full re-render with final position
+      renderZones(); // re-render at final position
     } else {
       selectPin(type, pin.id);
       renderZonesEditor();
     }
   });
 
-  g.addEventListener('pointercancel', () => { dragging = false; });
+  g.addEventListener('pointercancel', () => { dragging = false; g.removeAttribute('transform'); });
 }
 
 // Dedicated animation loop for smooth pin glow/ring animation
@@ -2721,29 +2694,22 @@ function renderZonesEditor() {
         </div>
         ${isLight ? `
         <div style="margin-top:12px;border-top:1px solid rgba(255,255,255,0.06);padding-top:10px;">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
-            <label style="font-size:12px;color:#aaa;">Range</label>
-            <span id="pinRadiusVal" style="color:#ffcc44;font-weight:600;font-size:13px;">${pin.radius || 3}</span>
-          </div>
+          <label style="font-size:12px;color:#aaa;">Range <span id="pinRadiusVal" style="color:#ffcc44;font-weight:600;">${pin.radius || 3}</span></label>
           <input id="pinRadiusInput" type="range" min="1" max="10" step="1" value="${pin.radius || 3}"
-            style="width:100%;accent-color:#ffcc44;">
+            style="width:100%;accent-color:#ffcc44;margin-top:4px;display:block;">
+          <div style="font-size:10px;color:#555;margin-top:2px;">Distance glow extends from icon</div>
         </div>
         <div style="margin-top:12px;">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
-            <label style="font-size:12px;color:#aaa;">Direction</label>
-            <span id="pinDirVal" style="color:#ffcc44;font-weight:600;font-size:13px;">${pin.direction !== null && pin.direction !== undefined && pin.direction !== '' ? pin.direction + '°' : '— omnidirectional'}</span>
-          </div>
+          <label style="font-size:12px;color:#aaa;">Direction <span id="pinDirVal" style="color:#ffcc44;font-weight:600;">${pin.direction !== null && pin.direction !== undefined && pin.direction !== '' ? pin.direction + '°' : 'none'}</span></label>
           <input id="pinDirectionInput" type="range" min="-1" max="359" step="1" value="${pin.direction !== null && pin.direction !== undefined && pin.direction !== '' ? pin.direction : -1}"
-            style="width:100%;accent-color:#ffcc44;">
-          <div style="font-size:10px;color:#444;margin-top:3px;">Slide fully left for omnidirectional glow</div>
+            style="width:100%;accent-color:#ffcc44;margin-top:4px;display:block;">
+          <div style="font-size:10px;color:#555;margin-top:2px;">Slide fully left for omnidirectional glow</div>
         </div>
         <div id="pinSpreadRow" style="margin-top:12px;${(pin.direction !== null && pin.direction !== undefined && pin.direction !== '') ? '' : 'display:none;'}">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
-            <label style="font-size:12px;color:#aaa;">Spread</label>
-            <span id="pinSpreadVal" style="color:#ffcc44;font-weight:600;font-size:13px;">${pin.spread || 35}°</span>
-          </div>
+          <label style="font-size:12px;color:#aaa;">Spread <span id="pinSpreadVal" style="color:#ffcc44;font-weight:600;">${pin.spread || 35}°</span></label>
           <input id="pinSpreadInput" type="range" min="5" max="90" step="5" value="${pin.spread || 35}"
-            style="width:100%;accent-color:#ffcc44;">
+            style="width:100%;accent-color:#ffcc44;margin-top:4px;display:block;">
+          <div style="font-size:10px;color:#555;margin-top:2px;">Cone half-angle — narrow for spotlight, wide for flood</div>
         </div>
         ` : ''}
         <div class="zones-editor-row" style="margin-top:4px;">
@@ -3894,12 +3860,13 @@ async function checkServerHealth() {
       }
     }
 
-    // Live data sync — reload zones/lights/floors when another browser makes changes
+    // Live data sync — reload zones/lights when another browser makes changes
     if (data.dataVersion && _lastDataVersion !== null && data.dataVersion !== _lastDataVersion) {
       logEvent("ok", "Config changed externally — refreshing zones and lights.", "system");
       await loadZones();
       await loadGroups();
-      await loadFloors();
+      // Only reload floors if not in edit mode (floor reload resets zoom)
+      if (!editorMode) await loadFloors();
       await loadLights();
       await loadSirens();
       if (haConnected) subscribeHAEntities();
