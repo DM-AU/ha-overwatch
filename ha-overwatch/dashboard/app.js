@@ -2211,6 +2211,9 @@ let editorPos  = { x: 20, y: 70 };
   const sw = localStorage.getItem('editorW'), sh = localStorage.getItem('editorH');
   if (sw) editorSize.w = Math.max(240, parseInt(sw));
   if (sh) editorSize.h = Math.max(300, parseInt(sh));
+  const sx = localStorage.getItem('editorX'), sy = localStorage.getItem('editorY');
+  if (sx !== null) editorPos.x = Math.max(0, Math.min(window.innerWidth  - 50, parseInt(sx)));
+  if (sy !== null) editorPos.y = Math.max(0, Math.min(window.innerHeight - 50, parseInt(sy)));
 })();
 
 function makeDraggableEditor(containerEl) {
@@ -2714,7 +2717,9 @@ function renderZonesEditor() {
   const needsPoints   = selectedZone && (selectedZone.points || []).length < 3;
   const editPtsLabel  = isCreatingZone ? "✏️ Adding Points" : isEditingPoints ? "✔ Done Editing" : needsPoints ? "Add Points" : "Edit Zone";
   const hasSelection = !!(selectedZone || selectedGroup || activePinId);
-  const editorW = hasSelection ? editorSize.w : 260;
+  // Use saved size if user has customised it, otherwise default narrow when nothing selected
+  const hasSavedSize = localStorage.getItem('editorW') !== null;
+  const editorW = (hasSelection || hasSavedSize) ? editorSize.w : 260;
   const editorH = editorSize.h;
 
   // ── Build left panel zone list with group headers ──────────
