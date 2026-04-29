@@ -198,7 +198,7 @@ function getActiveCameras() {
     }
 
     const zoneOn   = camIsEnabled('zone', zone.id);
-    if (!zoneOn) return;
+    if (!zoneOn) return; // disarmed zone — always skip (cameras only show when zone is armed)
 
     const sensors   = zone.sensors || [];
     const triggered = sensors.some(OW.isEntityTriggered);
@@ -223,10 +223,16 @@ function getActiveCameras() {
   });
 
   // Pinned cameras
+  const hideDisarmedCams = localStorage.getItem('ow_hide_disarmed_cams') === 'true';
   camPinned.forEach(entityId => {
     const camOn = camIsEnabled('camera', entityId);
     if (!camOn) return;
     if (camHidden.has(entityId)) return;
+    // If hide-disarmed-cams is on, skip pinned cameras from disarmed zones
+    if (hideDisarmedCams) {
+      const ownerZone = zones.find(z => (z.cameras || []).includes(entityId));
+      if (ownerZone && !camIsEnabled('zone', ownerZone.id)) return;
+    }
     if (!cameraSet.has(entityId)) {
       cameraSet.set(entityId, { lastTrigger: 0, fromZone: null, pinned: true });
     }

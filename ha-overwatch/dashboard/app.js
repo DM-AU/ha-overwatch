@@ -353,15 +353,6 @@ function applyConfig() {
   applyStatusVisibility();
 }
 
-function applyHideCamPanel() {
-  const hide = localStorage.getItem('ow_hide_cam_panel') === 'true';
-  // Hide the entire camera section (grid + status bar) but keep map active
-  const camGrid = document.getElementById('cameraGrid');
-  const camStatus = document.getElementById('cameraStatusContainer');
-  if (camGrid)   camGrid.style.display   = hide ? 'none' : '';
-  if (camStatus) camStatus.style.display = hide ? 'none' : '';
-}
-
 function applyStatusVisibility() {
   // Zone status bar + dropdown
   const hideZone = localStorage.getItem("ow_hide_zone_status") === "true";
@@ -5770,9 +5761,9 @@ function renderSettingsPanel() {
           </div>
           <div class="settings-field" style="margin-top:6px;">
             <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
-              <input type="checkbox" id="cfgHideCamPanel" ${localStorage.getItem('ow_hide_cam_panel') === 'true' ? 'checked' : ''}
+              <input type="checkbox" id="cfgHideDisarmedCams" ${localStorage.getItem('ow_hide_disarmed_cams') === 'true' ? 'checked' : ''}
                 style="width:16px;height:16px;accent-color:#0096ff;cursor:pointer;">
-              <span>Hide cameras from camera panel (map view only)</span>
+              <span>Hide cameras from disarmed zones in camera panel</span>
             </label>
           </div>
         </div>
@@ -5946,9 +5937,9 @@ function renderSettingsPanel() {
     localStorage.setItem('ow_cam_always_high_res', this.checked ? 'true' : 'false');
     if (window.renderCameraStatusBar) { window.renderCameraStatusBar(); applyStatusVisibility(); }
   });
-  document.getElementById("cfgHideCamPanel")?.addEventListener("change", function() {
-    localStorage.setItem('ow_hide_cam_panel', this.checked ? 'true' : 'false');
-    applyHideCamPanel();
+  document.getElementById("cfgHideDisarmedCams")?.addEventListener("change", function() {
+    localStorage.setItem('ow_hide_disarmed_cams', this.checked ? 'true' : 'false');
+    if (window.renderCameraStatusBar) { window.renderCameraStatusBar(); applyStatusVisibility(); }
   });
 
   // ── Sidebar position ─────────────────────────────────────────
@@ -7100,7 +7091,7 @@ async function init() {
   // initFloorplan() called after loadFloors() so the saved floor image is used
   bindZonesButton();
   bindStatusBar();
-  applyStatusVisibility(); applyHideCamPanel(); // apply hide prefs after DOM is ready
+  applyStatusVisibility(); // apply hide prefs after DOM is ready
   bindSearchUI();
 
   bindSidebarToggle();
