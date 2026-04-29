@@ -460,8 +460,9 @@ function bindSidebarToggle() {
 function applyTransform() {
   const wrapper = document.getElementById("floorplanWrapper");
   if (wrapper) wrapper.style.transform = `translate(${zoom.x}px, ${zoom.y}px) scale(${zoom.scale})`;
-  // No renderZones() needed here — SVG moves with the wrapper automatically
-  // Only re-render handles (circles) if in editor mode, since they need to be screen-size-invariant
+  // Re-render pins so their counter-scale (1/zoom.scale) stays correct
+  if (!editorMode) renderPins();
+  // Only re-render handles (circles) if in editor mode
   if (editorMode) renderZones();
 }
 
@@ -2910,13 +2911,14 @@ function makeDoorPin(pin, isEdit, scale) {
   const isUnlocked   = controlState === 'unlocked' || controlState === 'on';
   const hasControl   = !!pin.control_entity;
 
-  // ── Colours from Settings > Zones > Door colours (issue 3) ─
-  const root = document.documentElement;
+  // ── Colours (issue 3) ──────────────────────────────────────
+  // Closed = always green. Open = settings door colour (armed or disarmed state).
+  // Use CSS vars set from settings: --color-door-open / --color-door-closed
+  const rootStyle    = getComputedStyle(document.documentElement);
   const strokeOpen   = noSensor ? '#888'
-    : getComputedStyle(root).getPropertyValue('--color-door-open').trim()   || '#ff6b35';
-  const strokeClosed = noSensor ? '#888'
-    : getComputedStyle(root).getPropertyValue('--color-door-closed').trim() || '#ffcc00';
-  const stroke = isOpen ? strokeOpen : strokeClosed;
+    : rootStyle.getPropertyValue('--color-door-open').trim()   || '#ff6b35';
+  const strokeClosed = '#34c759';  // always green when closed
+  const stroke       = noSensor ? '#888' : isOpen ? strokeOpen : strokeClosed;
 
   const mk = (tag, attrs) => {
     const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
@@ -2925,16 +2927,18 @@ function makeDoorPin(pin, isEdit, scale) {
   };
 
   // ── Fixed screen size (issue 4) ────────────────────────────
-  // All dimensions in SCREEN px then divided by scale → stays same size at any zoom
+  // scale = zoom.scale (CSS transform scale on floorplanWrapper).
+  // Dividing by scale converts screen-px to SVG-coord-px so icon stays
+  // the same screen size after the CSS scale is applied.
   const sz  = Math.max(1, Math.min(10, pin.size || 3));
-  const PX  = 16 + sz * 5;          // screen px for door opening width: 21..66
-  const W   = PX / scale;            // door opening in SVG coords
-  const T   = (sz * 0.5 + 1.2) / scale;   // panel/wall stroke width
-  const sw  = (sz * 0.3 + 0.8) / scale;   // arc stroke width
-  const dot = (sz * 0.4 + 0.8) / scale;   // hinge dot radius
+  const PX  = 16 + sz * 5;           // screen px for door width
+  const W   = PX / scale;             // SVG units (fixed screen size)
+  const T   = (sz * 0.5 + 1.2) / scale;
+  const sw  = (sz * 0.3 + 0.8) / scale;
+  const dot = (sz * 0.4 + 0.8) / scale;
 
-  const doorType  = pin.doorType  || 'single';
-  const doorHand  = pin.doorHand  || 'left';
+  const doorType  = pin.doorType || 'single';
+  const doorHand  = pin.doorHand || 'left';
   const isSliding = doorType === 'sliding';
   const isDouble  = doorType === 'double';
 
@@ -2943,10 +2947,10 @@ function makeDoorPin(pin, isEdit, scale) {
   // ── Aura when open (issue 9) ────────────────────────────────
   if (isOpen && !isEdit) {
     const auraCX = isDouble ? W : W * 0.5;
-    const auraCY = -W * 0.4;
-    [0, 0.6].forEach((delay, i) => {
-      const a = mk('circle', { cx: auraCX, cy: auraCY, r: 0,
-        fill: 'none', stroke: strokeOpen, 'stroke-width': (2.5/scale) });
+    const auraCY = -W * 0.5;
+    [0, 0.6].forEach(delay => {
+      const a = mk('circle', { cx:auraCX, cy:auraCY, r:0,
+        fill:'none', stroke:strokeOpen, 'stroke-width':T });
       a.classList.add('door-aura-ring');
       if (delay) a.style.animationDelay = delay + 's';
       iconG.appendChild(a);
@@ -2954,99 +2958,109 @@ function makeDoorPin(pin, isEdit, scale) {
   }
 
   if (isSliding) {
-    // ── Sliding door ─────────────────────────────────────────
-    // Two track rails (walls on each side of opening)
-    iconG.appendChild(mk('line', { x1:0,y1:0, x2:W,y2:0, stroke, 'stroke-width':T,'stroke-linecap':'butt' }));
-    // Vertical stop marks at each jamb
-    const jh = T * 2.5;
-    iconG.appendChild(mk('line', { x1:0,y1:-jh, x2:0,y2:jh, stroke,'stroke-width':T*1.5 }));
-    iconG.appendChild(mk('line', { x1:W,y1:-jh, x2:W,y2:jh, stroke,'stroke-width':T*1.5 }));
-    // Panel rect — fills opening when closed, pushed to one side when open
+    // ── Sliding door ──────────────────────────────────────────
+    // Jamb marks at each end
+    const jh = T * 3;
+    iconG.appendChild(mk('line', { x1:0,y1:-jh, x2:0,y2:jh, stroke,'stroke-width':T*1.8 }));
+    iconG.appendChild(mk('line', { x1:W,y1:-jh, x2:W,y2:jh, stroke,'stroke-width':T*1.8 }));
+    // Track line (threshold)
+    iconG.appendChild(mk('line', { x1:0,y1:0, x2:W,y2:0, stroke,'stroke-width':sw,'stroke-dasharray':`${2/scale},${1/scale}` }));
+    // Panel — shifted when open
     const panW  = W * 0.88;
-    const panX  = isOpen ? (W - panW) : 0;
+    const panX  = isOpen ? W - panW : 0;
     iconG.appendChild(mk('rect', {
       x:panX, y:-T*0.9, width:panW, height:T*1.8,
-      fill:stroke, 'fill-opacity':isOpen?'0.3':'0.2',
+      fill:stroke, 'fill-opacity':isOpen?'0.35':'0.2',
       stroke, 'stroke-width':sw*0.6
     }));
 
   } else if (isDouble) {
     // ── Double door ───────────────────────────────────────────
-    // Wall threshold across full opening
-    iconG.appendChild(mk('line', { x1:0,y1:0, x2:W*2,y2:0, stroke,'stroke-width':T,'stroke-linecap':'butt' }));
+    // Jamb marks at outer edges only
+    const jh = T * 3;
+    iconG.appendChild(mk('line', { x1:0,y1:-jh, x2:0,y2:jh, stroke,'stroke-width':T*1.8 }));
+    iconG.appendChild(mk('line', { x1:W*2,y1:-jh, x2:W*2,y2:jh, stroke,'stroke-width':T*1.8 }));
+    // Centre meeting point mark
+    iconG.appendChild(mk('line', { x1:W,y1:-T*2, x2:W,y2:T*2, stroke,'stroke-width':sw,'stroke-opacity':'0.4' }));
 
-    [['left',0], ['right',W*2]].forEach(([side,hx]) => {
-      const fx    = W;                           // both panels meet at centre
+    [[0,'left'],[W*2,'right']].forEach(([hx,side]) => {
+      const fx    = W;
       const sweep = side === 'left' ? 0 : 1;
-      const panelDX = side === 'left' ? W : -W;
+
+      // Hinge dot at jamb
+      iconG.appendChild(mk('circle', { cx:hx,cy:0,r:dot,fill:stroke }));
 
       if (isOpen) {
-        // Panel folded along wall (rotated 90° at hinge)
+        // Panel swung perpendicular to wall - NO horizontal line across opening
         const angle = side === 'left' ? -90 : 90;
         const pg = mk('g', { transform:`rotate(${angle},${hx},0)` });
+        const panelX = side === 'left' ? 0 : hx - W;
         pg.appendChild(mk('rect', {
-          x:hx+(side==='left'?0:-W), y:-T/2, width:W, height:T,
+          x:panelX, y:-T/2, width:W, height:T,
           fill:stroke,'fill-opacity':'0.35', stroke,'stroke-width':sw*0.5
         }));
         iconG.appendChild(pg);
-        // Dashed arc shows swing path
+        // Arc shows swing path (dashed)
         iconG.appendChild(mk('path', {
           d:`M ${hx} ${-W} A ${W} ${W} 0 0 ${sweep} ${fx} 0`,
-          fill:'none', stroke, 'stroke-width':sw*0.8, 'stroke-dasharray':`${3/scale},${2/scale}`
+          fill:'none', stroke,'stroke-width':sw*0.8,
+          'stroke-dasharray':`${3/scale},${2/scale}`
         }));
       } else {
-        // Panel across half the opening — solid rect
-        const px = side==='left' ? 0 : W;
-        iconG.appendChild(mk('rect', { x:px,y:-T/2, width:W,height:T,
-          fill:stroke,'fill-opacity':'0.22',stroke,'stroke-width':sw*0.5 }));
-        // NO arc on closed — just the solid panel is enough
+        // Panel closed — solid rect across its half, NO arc
+        const px = side === 'left' ? 0 : W;
+        iconG.appendChild(mk('rect', {
+          x:px, y:-T/2, width:W, height:T,
+          fill:stroke,'fill-opacity':'0.22',stroke,'stroke-width':sw*0.5
+        }));
       }
-      // Hinge dot at wall
-      iconG.appendChild(mk('circle', { cx:hx,cy:0,r:dot, fill:stroke }));
     });
 
   } else {
-    // ── Single door — true architectural standard ─────────────
-    // Hinge at origin corner, panel swings into negative-y space
+    // ── Single door — strict architectural standard ────────────
+    // Hinge at one corner, panel length = W, opens upward (negative y)
     const hx    = doorHand === 'left' ? 0 : W;
     const fx    = doorHand === 'left' ? W : 0;
     const sweep = doorHand === 'left' ? 0 : 1;
 
-    // Wall threshold (just the opening)
-    iconG.appendChild(mk('line', { x1:hx,y1:0, x2:fx,y2:0, stroke,'stroke-width':T,'stroke-linecap':'butt' }));
+    // Jamb marks (wall indicators at each side of opening)
+    const jh = T * 3;
+    iconG.appendChild(mk('line', { x1:0,y1:-jh, x2:0,y2:jh, stroke,'stroke-width':T*1.8 }));
+    iconG.appendChild(mk('line', { x1:W,y1:-jh, x2:W,y2:jh, stroke,'stroke-width':T*1.8 }));
+
+    // Hinge pivot dot
+    iconG.appendChild(mk('circle', { cx:hx,cy:0,r:dot,fill:stroke }));
 
     if (isOpen) {
-      // Panel perpendicular to wall — rotated 90° at hinge, NO line across threshold
+      // Panel perpendicular to wall — NO horizontal line across opening
       const angle = doorHand === 'left' ? -90 : 90;
       const pg = mk('g', { transform:`rotate(${angle},${hx},0)` });
-      // Panel rect going in the correct direction from hinge
+      // Panel goes from hinge outward in direction of W
+      const panX = doorHand === 'left' ? 0 : -W;
       pg.appendChild(mk('rect', {
-        x: doorHand==='left' ? hx : hx-W,
-        y: -T/2, width:W, height:T,
+        x:panX, y:-T/2, width:W, height:T,
         fill:stroke,'fill-opacity':'0.35',stroke,'stroke-width':sw*0.5
       }));
       iconG.appendChild(pg);
-      // Dashed arc — shows where door was
+      // Dashed arc showing swing path
       iconG.appendChild(mk('path', {
         d:`M ${hx} ${-W} A ${W} ${W} 0 0 ${sweep} ${fx} 0`,
-        fill:'none', stroke, 'stroke-width':sw*0.8,
+        fill:'none', stroke,'stroke-width':sw*0.8,
         'stroke-dasharray':`${3/scale},${2/scale}`
       }));
     } else {
-      // Panel closed — solid rect across opening, NO arc
+      // Panel closed — solid rect across opening
       iconG.appendChild(mk('rect', {
         x:Math.min(hx,fx), y:-T/2, width:W, height:T,
         fill:stroke,'fill-opacity':'0.22',stroke,'stroke-width':sw*0.5
       }));
-      // Quarter-circle arc — the defining architectural element for closed door
+      // Quarter-circle arc — THE defining element of a floor plan door symbol
       iconG.appendChild(mk('path', {
         d:`M ${hx} ${-W} A ${W} ${W} 0 0 ${sweep} ${fx} 0`,
         fill:stroke,'fill-opacity':'0.10', stroke,'stroke-width':sw,
         'stroke-dasharray':`${2/scale},${2/scale}`
       }));
     }
-    // Hinge pivot
-    iconG.appendChild(mk('circle', { cx:hx,cy:0,r:dot,fill:stroke }));
   }
 
   // ── Editor selection box ───────────────────────────────────
@@ -3561,9 +3575,9 @@ function renderZonesEditor() {
   const needsPoints   = selectedZone && (selectedZone.points || []).length < 3;
   const editPtsLabel  = isCreatingZone ? "✏️ Adding Points" : isEditingPoints ? "✔ Done Editing" : needsPoints ? "Add Points" : "Edit Zone";
   const hasSelection = !!(selectedZone || selectedGroup || activePinId);
-  // Narrow (260px) when nothing selected so it doesn't take up half the screen.
-  // Full saved width when something IS selected so the right panel has room.
-  const editorW = hasSelection ? Math.max(editorSize.w, 480) : 260;
+  // Editor is always editorSize.w wide. Left panel is fixed 200px.
+  // Right panel shows/hides — editor width stays constant.
+  const editorW = editorSize.w;
   const editorH = editorSize.h;
 
   // ── Build left panel zone list with group headers ──────────
@@ -6175,7 +6189,11 @@ function renderSettingsPanel() {
             <div class="settings-color-item"><label>Smoke</label><input type="color" id="cfgColOffSmoke" value="${eff('ow_color_off_smoke','color_off_smoke','#ff6b6b')}"></div>
             <div class="settings-color-item"><label>CO/Gas</label><input type="color" id="cfgColOffCo" value="${eff('ow_color_off_co','color_off_co','#cc73f8')}"></div>
           </div>
-          ${isAdmin ? `<div style="font-size:10px;color:#444;margin-top:4px;">Admin: <a href="#" id="settingsSaveColoursYamlLink" style="color:#666;">Save as server default</a></div>` : ''}
+          ${isAdmin ? `<div style="font-size:10px;color:#444;margin-top:4px;">Admin: <a href="#" id="settingsSaveColoursYamlLink" style="color:#666;">Save as server default</a></div>` : `
+          <div style="margin-top:8px;">
+            <button id="resetColoursBtn" style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.12);color:#888;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:11px;">Reset to server defaults</button>
+            <span id="resetColoursStatus" style="font-size:10px;color:#555;margin-left:6px;"></span>
+          </div>`}
           </div><!-- /zoneColourBody -->
         </div>
       </div>
@@ -6730,6 +6748,23 @@ function renderSettingsPanel() {
   document.getElementById("settingsSaveColoursYamlLink")?.addEventListener("click", e => {
     e.preventDefault();
     saveYaml("coloursSaveStatus");
+  });
+
+  document.getElementById("resetColoursBtn")?.addEventListener("click", () => {
+    // Clear all localStorage colour overrides — revert to server uiConfig values
+    const colourLsKeys = [
+      'ow_color_on_person','ow_color_on_motion','ow_color_on_door','ow_color_on_window',
+      'ow_color_on_smoke','ow_color_on_co','ow_color_on_default',
+      'ow_color_off_person','ow_color_off_motion','ow_color_off_door','ow_color_off_window',
+      'ow_color_off_smoke','ow_color_off_co','ow_color_off_default',
+      'ow_color_triggered_door','ow_color_zone_triggered','ow_color_zone_fault',
+      'ow_color_zone_bypassed','ow_color_zone_armed','ow_color_zone_normal'
+    ];
+    colourLsKeys.forEach(k => localStorage.removeItem(k));
+    applyConfig();
+    openSettings('zones');
+    const st = document.getElementById('resetColoursStatus');
+    if (st) { st.textContent = '✓ Reset'; setTimeout(() => st.textContent = '', 2000); }
   });
   document.getElementById("settingsSavePerfYamlLink")?.addEventListener("click", e => {
     e.preventDefault();
