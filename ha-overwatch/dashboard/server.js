@@ -408,6 +408,14 @@ const server = http.createServer(async (req, res) => {
     catch { json(res, { ips: [] }); }
     return;
   }
+
+  /* ── /ow/cam-pinned ──────────────────────────────────────── */
+  if (pathname === "/ow/cam-pinned" && req.method === "GET") {
+    const f = path.join(DATA_DIR, "config", "cam_pinned.json");
+    try { json(res, JSON.parse(fs.readFileSync(f, "utf8"))); }
+    catch { json(res, []); }
+    return;
+  }
   if (pathname === "/ow/arm-allowed-ips" && req.method === "POST") {
     try {
       const b = await readBody(req);

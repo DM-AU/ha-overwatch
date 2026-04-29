@@ -198,7 +198,16 @@ function getActiveCameras() {
     }
 
     const zoneOn   = camIsEnabled('zone', zone.id);
-    if (!zoneOn) return; // disarmed zone — always skip (cameras only show when zone is armed)
+    if (!zoneOn) return;
+
+    // Setting: hide cameras from zones that are alarm-disarmed
+    if (localStorage.getItem('ow_hide_disarmed_cams') === 'true') {
+      const haStates = OW.haStates || {};
+      const slug = zone.name ? zone.name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') : '';
+      const alarmSt = haStates[`switch.overwatch_zone_${slug}`];
+      // If entity exists and is off → zone is alarm-disarmed → skip cameras
+      if (alarmSt && alarmSt.state === 'off') return;
+    }
 
     const sensors   = zone.sensors || [];
     const triggered = sensors.some(OW.isEntityTriggered);
@@ -983,7 +992,7 @@ function bindModal() {
     if (img && modeBtn && camModalEntityId) updateModalMode(img, modeBtn, camModalEntityId);
   });
 
-  document.getElementById('camModalPinBtn')?.addEventListener('click', () => {
+  document.getElementById('camModalPinBtn')?.addEventListener('click', async () => {
     if (!camModalEntityId) return;
     const OW = window.OW;
     const pinBtn = document.getElementById('camModalPinBtn');
@@ -995,6 +1004,14 @@ function bindModal() {
       pinBtn.textContent = '📌 Unpin';
     }
     OW.uiConfig.cam_pinned = JSON.stringify([...camPinned]);
+    // Persist to server so pins survive browser refresh
+    try {
+      await fetch(OW.apiPath('ow/save-config'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename: 'config/cam_pinned.json', content: JSON.stringify([...camPinned], null, 2) })
+      });
+    } catch(e) { console.warn('[CAM] Failed to save pinned cameras:', e); }
     renderCameraStatusBar();
     renderCameraGrid();
   });
@@ -1105,6 +1122,15 @@ async function initCameraPage() {
   }
 
   try { camPinned = new Set(JSON.parse(OW.uiConfig.cam_pinned || '[]')); } catch {}
+
+  // Load pinned cameras from server file (survives browser refresh)
+  try {
+    const pr = await fetch(OW.apiPath('ow/cam-pinned') + '?v=' + Date.now());
+    if (pr.ok) {
+      const pins = await pr.json();
+      if (Array.isArray(pins)) camPinned = new Set(pins);
+    }
+  } catch {}
 
   // Expose for settings panel source toggle
   window.renderCameraStatusBar = renderCameraStatusBar;
