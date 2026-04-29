@@ -400,6 +400,25 @@ const server = http.createServer(async (req, res) => {
     catch { json(res, {}); }
     return;
   }
+
+  /* ── /ow/arm-allowed-ips ─────────────────────────────────── */
+  if (pathname === "/ow/arm-allowed-ips" && req.method === "GET") {
+    const f = path.join(DATA_DIR, "config", "arm_allowed_ips.json");
+    try { json(res, JSON.parse(fs.readFileSync(f, "utf8"))); }
+    catch { json(res, { ips: [] }); }
+    return;
+  }
+  if (pathname === "/ow/arm-allowed-ips" && req.method === "POST") {
+    try {
+      const b = await readBody(req);
+      const f = path.join(DATA_DIR, "config", "arm_allowed_ips.json");
+      fs.mkdirSync(path.dirname(f), { recursive: true });
+      fs.writeFileSync(f, JSON.stringify(b, null, 2), "utf8");
+      bumpDataVersion();
+      json(res, { ok: true });
+    } catch(e) { err(res, e.message); }
+    return;
+  }
   if (pathname === "/ow/save-camera-pin" && req.method === "POST") {
     try { const b = await readBody(req); savePin("camera_pins", b); json(res, { ok: true }); }
     catch (e) { err(res, e.message); } return;

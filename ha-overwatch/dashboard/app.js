@@ -171,12 +171,29 @@ let mapLocked = localStorage.getItem('ow_map_locked') === 'true'; // prevent pan
 // Client IP — injected by server.js into the HTML as a meta tag
 const CLIENT_IP = document.querySelector('meta[name="ow-client-ip"]')?.content || '';
 
+// Allowed IPs loaded from server (config/arm_allowed_ips.json)
+let _armAllowedIps = [];
+
+async function loadArmAllowedIps() {
+  try {
+    const r = await fetch(apiPath('ow/arm-allowed-ips') + '?v=' + Date.now());
+    if (r.ok) { const d = await r.json(); _armAllowedIps = d.ips || []; }
+  } catch { _armAllowedIps = []; }
+}
+
+async function saveArmAllowedIps(ipsArray) {
+  _armAllowedIps = ipsArray;
+  await fetch(apiPath('ow/arm-allowed-ips'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ips: ipsArray })
+  });
+}
+
 // Returns true if this device is allowed to arm/disarm zones
 function canArmDisarm() {
-  const allowedRaw = localStorage.getItem('ow_arm_allowed_ips') || '';
-  if (!allowedRaw.trim()) return false; // no IPs configured → no devices allowed
-  const allowed = allowedRaw.split(',').map(s => s.trim()).filter(Boolean);
-  return allowed.some(ip => CLIENT_IP === ip || CLIENT_IP.startsWith(ip));
+  if (!_armAllowedIps.length) return false; // no IPs configured → no devices allowed
+  return _armAllowedIps.some(ip => CLIENT_IP === ip || CLIENT_IP.startsWith(ip));
 }
 let haReconnectTimer = null;
 let haReconnectDelay = 1000;   // exponential backoff: 1s→2s→4s→8s→30s max
@@ -5375,7 +5392,7 @@ function renderSettingsPanel() {
             <label>Allowed IP addresses</label>
             <textarea id="cfgArmAllowedIps" rows="3" placeholder="192.168.1.10&#10;192.168.1.11&#10;10.0.0.5"
               style="width:100%;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:6px 8px;color:#e0e0e0;font-size:12px;resize:vertical;font-family:monospace;"
-            >${escapeHtml(localStorage.getItem('ow_arm_allowed_ips') || '')}</textarea>
+            >${escapeHtml(_armAllowedIps.join('\n'))}</textarea>
             <div style="font-size:11px;color:#555;margin-top:3px;">One IP per line. Only these devices can arm/disarm zones. Leave empty to disable arm/disarm for all devices.</div>
             <div style="font-size:11px;color:#888;margin-top:4px;">Your current IP: <strong style="color:#0096ff;">${CLIENT_IP || '(unknown)'}</strong></div>
           </div>
@@ -6160,9 +6177,10 @@ function renderSettingsPanel() {
   const connectStatus = document.getElementById("haConnectStatus");
 
   // Arm/Disarm IP allow list
-  document.getElementById("saveArmIpsBtn")?.addEventListener("click", () => {
+  document.getElementById("saveArmIpsBtn")?.addEventListener("click", async () => {
     const raw = document.getElementById("cfgArmAllowedIps")?.value || "";
-    localStorage.setItem("ow_arm_allowed_ips", raw.split("\n").map(s => s.trim()).filter(Boolean).join(","));
+    const ips = raw.split("\n").map(s => s.trim()).filter(Boolean);
+    await saveArmAllowedIps(ips);
     const btn = document.getElementById("saveArmIpsBtn");
     if (btn) { btn.textContent = "✓ Saved"; setTimeout(() => btn.textContent = "Save allowed IPs", 1500); }
   });
@@ -6669,7 +6687,7 @@ function renderStatusDropdown() {
         <button class="zone-eye-btn" id="masterEyeBtn"
           style="background:none;border:none;padding:0 2px;cursor:pointer;color:${allHidden ? 'rgba(255,255,255,0.25)' : 'rgba(255,255,255,0.65)'};line-height:0;flex-shrink:0;"
         >${allHidden ? eyeClosed : eyeOpen}</button>
-        <label class="zone-toggle-switch" style="flex-shrink:0;${zoneUseServerState() && IS_DIRECT_MODE ? 'opacity:0.4;' : ''}">
+        <label class="zone-toggle-switch" style="flex-shrink:0;${!canArmDisarm() ? 'display:none;' : zoneUseServerState() && IS_DIRECT_MODE ? 'opacity:0.4;' : ''}">
           <input type="checkbox" id="masterToggleChk" ${masterEnabled ? "checked" : ""} ${zoneUseServerState() && IS_DIRECT_MODE ? "disabled" : ""}>
           <span class="zone-toggle-track"></span>
         </label>
@@ -6682,7 +6700,9 @@ function renderStatusDropdown() {
   `;
 
   // Master toggle
-  document.getElementById("masterToggleChk")?.addEventListener("change", e => setMasterEnabled(e.target.checked));
+  if (canArmDisarm()) {
+    document.getElementById("masterToggleChk")?.addEventListener("change", e => setMasterEnabled(e.target.checked));
+  }
 
   // Master eye
   document.getElementById("masterEyeBtn")?.addEventListener("click", e => {
@@ -6739,6 +6759,7 @@ function renderStatusDropdown() {
 
   // Group arm toggles
   body.querySelectorAll(".group-armed-chk").forEach(chk => {
+    if (!canArmDisarm()) { chk.closest('label')?.style && (chk.closest('label').style.display = 'none'); return; }
     chk.addEventListener("change", e => setGroupArmed(e.target.dataset.groupId, e.target.checked));
   });
 
@@ -6752,11 +6773,16 @@ function renderStatusDropdown() {
   });
 
   // Ungrouped arm toggle
-  body.querySelector(".ungrouped-armed-chk")?.addEventListener("change", e => {
-    const groupedIds = new Set(groups.flatMap(g => g.zone_ids || []));
-    const ung = zones.filter(z => !groupedIds.has(z.id));
-    ung.forEach(z => setZoneEnabled(z.id, e.target.checked));
-  });
+  if (canArmDisarm()) {
+    body.querySelector(".ungrouped-armed-chk")?.addEventListener("change", e => {
+      const groupedIds = new Set(groups.flatMap(g => g.zone_ids || []));
+      const ung = zones.filter(z => !groupedIds.has(z.id));
+      ung.forEach(z => setZoneEnabled(z.id, e.target.checked));
+    });
+  } else {
+    const el = body.querySelector(".ungrouped-armed-chk");
+    if (el) el.closest('label')?.style && (el.closest('label').style.display = 'none');
+  }
 
   // Zone eye buttons
   body.querySelectorAll(".zone-eye-btn[data-zone-id]").forEach(btn => {
@@ -6769,6 +6795,7 @@ function renderStatusDropdown() {
 
   // Zone arm toggles
   body.querySelectorAll(".zone-enabled-chk").forEach(chk => {
+    if (!canArmDisarm()) { chk.closest('label')?.style && (chk.closest('label').style.display = 'none'); return; }
     chk.addEventListener("change", e => setZoneEnabled(e.target.dataset.zoneId, e.target.checked));
   });
 }
@@ -7057,15 +7084,15 @@ async function init() {
   await loadLights();
   await loadSirens();
   await loadCameraPins();
-  // Load low-res camera map from dedicated file (falls back to uiConfig legacy field)
+  // Load low-res camera map from dedicated file
   try {
     const r = await fetch(apiPath("ow/cam-low-res-map") + "?v=" + Date.now());
     camLowResMap = r.ok ? await r.json() : {};
-  } catch { 
-    try { camLowResMap = JSON.parse(uiConfig.cam_low_res_map || '{}'); } catch { camLowResMap = {}; }
-  }
+  } catch { try { camLowResMap = JSON.parse(uiConfig.cam_low_res_map || '{}'); } catch { camLowResMap = {}; } }
   if (window.setCamLowResMap) window.setCamLowResMap(camLowResMap);
   if (window.OW) window.OW.uiConfig = { ...uiConfig, cam_low_res_map: JSON.stringify(camLowResMap) };
+
+  await loadArmAllowedIps();
   window._updateFloorBtn?.(); // show/hide floor switcher based on floor count
   bindZonesSvgEvents();
   applyFloorPanels();   // build single or multi-panel layout based on saved settings
