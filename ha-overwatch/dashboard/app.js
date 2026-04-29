@@ -6452,7 +6452,7 @@ function updateStatusDropdownInPlace() {
   const masterChk = body.querySelector("#masterToggleChk");
   if (masterChk) {
     masterChk.checked  = masterEnabled;
-    const mLocked = zoneUseServerState() && IS_DIRECT_MODE;
+    const mLocked = !canArmDisarm();
     masterChk.disabled = mLocked;
     if (masterChk.closest('label')) masterChk.closest('label').style.opacity = mLocked ? '0.4' : '';
   }
@@ -6462,7 +6462,7 @@ function updateStatusDropdownInPlace() {
     const zone = zones.find(z => z.id === chk.dataset.zoneId);
     if (!zone) return;
     const _zst  = getZoneState(zone);
-    const zLocked = zoneUseServerState() && IS_DIRECT_MODE;
+    const zLocked = !canArmDisarm();
     chk.checked  = _zst !== "disabled";
     chk.disabled = zLocked;
     if (chk.closest('label')) chk.closest('label').style.opacity = zLocked ? '0.4' : '';
@@ -6506,7 +6506,7 @@ function updateStatusDropdownInPlace() {
     if (!group) return;
     const members = (group.zone_ids || []).map(id => zones.find(z => z.id === id)).filter(Boolean);
     const allArmed = members.length > 0 && members.every(z => getZoneState(z) !== 'disabled');
-    const gLocked = zoneUseServerState() && IS_DIRECT_MODE;
+    const gLocked = !canArmDisarm();
     chk.checked  = allArmed;
     chk.disabled = gLocked;
     if (chk.closest('label')) chk.closest('label').style.opacity = gLocked ? '0.4' : '';
@@ -6574,7 +6574,7 @@ function renderStatusDropdown() {
     const anyActive = haConnected && sensors.some(isEntityTriggered);
     const isDisarmedActive = isOff && anyActive;
     // Locked = server mode on a Direct Mode browser (no WS to call HA switches)
-    const zoneLocked = zoneUseServerState() && IS_DIRECT_MODE;
+    const zoneLocked = !canArmDisarm();
     const dotColour = isTriggeredZone ? "#ff3b30"
       : isDisarmedActive ? resolveColour(entityTypeColourOff(detectEntityType(sensors.find(isEntityTriggered) || "")))
       : state === "fault" ? "#ff9500"
@@ -6628,8 +6628,8 @@ function renderStatusDropdown() {
         <button class="zone-eye-btn group-eye-btn" data-group-id="${g.id}"
           style="background:none;border:none;padding:0 2px;cursor:pointer;color:${allMembHidden ? 'rgba(255,255,255,0.25)' : 'rgba(255,255,255,0.65)'};line-height:0;flex-shrink:0;"
         >${allMembHidden ? eyeClosed : eyeOpen}</button>
-        <label class="zone-toggle-switch" style="flex-shrink:0;${zoneUseServerState() && IS_DIRECT_MODE ? 'opacity:0.4;' : ''}">
-          <input type="checkbox" class="group-armed-chk" data-group-id="${g.id}" ${allArmed ? "checked" : ""} ${zoneUseServerState() && IS_DIRECT_MODE ? "disabled" : ""}>
+        <label class="zone-toggle-switch" style="flex-shrink:0;${!canArmDisarm() ? 'opacity:0.4;pointer-events:none;' : ''}">
+          <input type="checkbox" class="group-armed-chk" data-group-id="${g.id}" ${allArmed ? "checked" : ""} ${!canArmDisarm() ? "disabled" : ""}>
           <span class="zone-toggle-track"></span>
         </label>
       </div>
@@ -6661,8 +6661,8 @@ function renderStatusDropdown() {
         <button class="zone-eye-btn ungrouped-eye-btn"
           style="background:none;border:none;padding:0 2px;cursor:pointer;color:${allHidn ? 'rgba(255,255,255,0.25)' : 'rgba(255,255,255,0.65)'};line-height:0;flex-shrink:0;"
         >${allHidn ? eyeClosed : eyeOpen}</button>
-        <label class="zone-toggle-switch" style="flex-shrink:0;${zoneUseServerState() && IS_DIRECT_MODE ? 'opacity:0.4;' : ''}">
-          <input type="checkbox" class="ungrouped-armed-chk" ${allArmed ? "checked" : ""} ${zoneUseServerState() && IS_DIRECT_MODE ? "disabled" : ""}>
+        <label class="zone-toggle-switch" style="flex-shrink:0;${!canArmDisarm() ? 'opacity:0.4;pointer-events:none;' : ''}">
+          <input type="checkbox" class="ungrouped-armed-chk" ${allArmed ? "checked" : ""} ${!canArmDisarm() ? "disabled" : ""}>
           <span class="zone-toggle-track"></span>
         </label>
       </div>
@@ -6687,8 +6687,8 @@ function renderStatusDropdown() {
         <button class="zone-eye-btn" id="masterEyeBtn"
           style="background:none;border:none;padding:0 2px;cursor:pointer;color:${allHidden ? 'rgba(255,255,255,0.25)' : 'rgba(255,255,255,0.65)'};line-height:0;flex-shrink:0;"
         >${allHidden ? eyeClosed : eyeOpen}</button>
-        <label class="zone-toggle-switch" style="flex-shrink:0;${!canArmDisarm() ? 'display:none;' : zoneUseServerState() && IS_DIRECT_MODE ? 'opacity:0.4;' : ''}">
-          <input type="checkbox" id="masterToggleChk" ${masterEnabled ? "checked" : ""} ${zoneUseServerState() && IS_DIRECT_MODE ? "disabled" : ""}>
+        <label class="zone-toggle-switch" style="flex-shrink:0;${!canArmDisarm() ? 'opacity:0.4;pointer-events:none;' : ''}">
+          <input type="checkbox" id="masterToggleChk" ${masterEnabled ? "checked" : ""} ${!canArmDisarm() ? "disabled" : ""}>
           <span class="zone-toggle-track"></span>
         </label>
       </div>
@@ -6700,9 +6700,7 @@ function renderStatusDropdown() {
   `;
 
   // Master toggle
-  if (canArmDisarm()) {
-    document.getElementById("masterToggleChk")?.addEventListener("change", e => setMasterEnabled(e.target.checked));
-  }
+  document.getElementById("masterToggleChk")?.addEventListener("change", e => { if (canArmDisarm()) setMasterEnabled(e.target.checked); });
 
   // Master eye
   document.getElementById("masterEyeBtn")?.addEventListener("click", e => {
@@ -6759,8 +6757,7 @@ function renderStatusDropdown() {
 
   // Group arm toggles
   body.querySelectorAll(".group-armed-chk").forEach(chk => {
-    if (!canArmDisarm()) { chk.closest('label')?.style && (chk.closest('label').style.display = 'none'); return; }
-    chk.addEventListener("change", e => setGroupArmed(e.target.dataset.groupId, e.target.checked));
+    chk.addEventListener("change", e => { if (canArmDisarm()) setGroupArmed(e.target.dataset.groupId, e.target.checked); });
   });
 
   // Ungrouped eye toggle
@@ -6773,16 +6770,12 @@ function renderStatusDropdown() {
   });
 
   // Ungrouped arm toggle
-  if (canArmDisarm()) {
-    body.querySelector(".ungrouped-armed-chk")?.addEventListener("change", e => {
-      const groupedIds = new Set(groups.flatMap(g => g.zone_ids || []));
-      const ung = zones.filter(z => !groupedIds.has(z.id));
-      ung.forEach(z => setZoneEnabled(z.id, e.target.checked));
-    });
-  } else {
-    const el = body.querySelector(".ungrouped-armed-chk");
-    if (el) el.closest('label')?.style && (el.closest('label').style.display = 'none');
-  }
+  body.querySelector(".ungrouped-armed-chk")?.addEventListener("change", e => {
+    if (!canArmDisarm()) return;
+    const groupedIds = new Set(groups.flatMap(g => g.zone_ids || []));
+    const ung = zones.filter(z => !groupedIds.has(z.id));
+    ung.forEach(z => setZoneEnabled(z.id, e.target.checked));
+  });
 
   // Zone eye buttons
   body.querySelectorAll(".zone-eye-btn[data-zone-id]").forEach(btn => {
@@ -6795,8 +6788,7 @@ function renderStatusDropdown() {
 
   // Zone arm toggles
   body.querySelectorAll(".zone-enabled-chk").forEach(chk => {
-    if (!canArmDisarm()) { chk.closest('label')?.style && (chk.closest('label').style.display = 'none'); return; }
-    chk.addEventListener("change", e => setZoneEnabled(e.target.dataset.zoneId, e.target.checked));
+    chk.addEventListener("change", e => { if (canArmDisarm()) setZoneEnabled(e.target.dataset.zoneId, e.target.checked); });
   });
 }
 
