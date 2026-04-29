@@ -2890,82 +2890,138 @@ function makeDoorPin(pin, isEdit, scale) {
   g.style.cursor = 'pointer';
   g.style.pointerEvents = 'all';
 
-  const R  = 14 / scale;
-  const cx = pin.x, cy = pin.y;
-  const rotation = pin.rotation || 0;
+  const cx  = pin.x, cy = pin.y;
+  const rot = pin.rotation || 0;
 
   // Sensor state
-  const sensorState   = haStates[pin.sensor_entity]?.state;   // 'on'=open, 'off'=closed
+  const sensorState   = haStates[pin.sensor_entity]?.state;
   const isOpen        = sensorState === 'on';
   const sensorUnknown = !sensorState;
 
   // Control/lock state
-  const controlState  = pin.control_entity ? haStates[pin.control_entity]?.state : null;
-  const isLocked      = controlState === 'locked' || controlState === 'off';
-  const isUnlocked    = controlState === 'unlocked' || controlState === 'on';
-  const hasControl    = !!pin.control_entity;
+  const controlState = pin.control_entity ? haStates[pin.control_entity]?.state : null;
+  const isLocked     = controlState === 'locked' || controlState === 'off';
+  const isUnlocked   = controlState === 'unlocked' || controlState === 'on';
+  const hasControl   = !!pin.control_entity;
 
   // Colours
-  const doorColour = sensorUnknown ? '#888' : isOpen ? '#ff9500' : '#34c759';
+  const stroke = sensorUnknown ? '#888' : isOpen ? '#ff9500' : '#34c759';
+  const fill   = sensorUnknown ? 'rgba(136,136,136,0.15)' : isOpen ? 'rgba(255,149,0,0.12)' : 'rgba(52,199,89,0.12)';
 
-  // Background circle
-  const bg = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-  bg.setAttribute('cx', cx); bg.setAttribute('cy', cy); bg.setAttribute('r', R * 0.95);
-  bg.setAttribute('fill', 'rgba(0,0,0,0.5)');
-  bg.setAttribute('stroke', isEdit ? '#0096ff' : doorColour);
-  bg.setAttribute('stroke-width', String((isEdit ? 2.5 : 1.5) / scale));
-  g.appendChild(bg);
-
-  // Door icon — clean MDI-style, rotated to match orientation
-  const iconS = R / 11;
-  const iconG = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-  iconG.setAttribute('transform', `translate(${cx},${cy}) rotate(${rotation}) scale(${iconS})`);
-
-  const mk = (tag, attrs) => {
-    const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  const mk = (tag, attrs, ns) => {
+    const el = document.createElementNS(ns || 'http://www.w3.org/2000/svg', tag);
     Object.entries(attrs).forEach(([k,v]) => el.setAttribute(k,v));
     return el;
   };
 
-  if (isOpen) {
-    // Open: door frame (outline) + door panel swung 70° (rotated rect)
-    // Frame
-    iconG.appendChild(mk('rect', {x:'-8',y:'-10',width:'16',height:'20',rx:'1',fill:'none',stroke:doorColour,'stroke-width':'1.5','stroke-dasharray':'3,2'}));
-    // Swung door panel (rotated around left edge)
-    const panelG = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-    panelG.setAttribute('transform', 'rotate(-70, -8, -10)');
-    panelG.appendChild(mk('rect', {x:'-8',y:'-10',width:'14',height:'20',rx:'1',fill:doorColour,'fill-opacity':'0.3',stroke:doorColour,'stroke-width':'1.5'}));
-    panelG.appendChild(mk('circle', {cx:'3',cy:'0',r:'1.8',fill:doorColour}));
-    iconG.appendChild(panelG);
+  // ── Architectural floor plan door icon ─────────────────────
+  // Fixed screen size: W=36px H=36px, counter-scaled so zoom doesn't resize it.
+  // Origin is at the hinge corner (bottom-left of opening in local space).
+  // doorType: 'single' (default) | 'double'
+  // doorHand: 'left' (default) | 'right'  (which side the hinge is on)
+  const doorType = pin.doorType || 'single';
+  const doorHand = pin.doorHand || 'left';
+  const PX = 36;           // fixed screen pixel size
+  const s  = 1 / scale;   // counter-scale — keeps icon same screen size at all zoom levels
+  const W  = PX * s;       // door opening width in SVG coords
+  const T  = 2.5 * s;      // wall thickness / panel thickness
+  const sw = 1.5 * s;      // stroke width
+
+  // Group: translate to pin position, then rotate
+  const iconG = mk('g', { transform: `translate(${cx},${cy}) rotate(${rot})` });
+
+  // Wall line (the opening threshold) — horizontal line at y=0, door opens upward (negative y)
+  iconG.appendChild(mk('line', {
+    x1: '0', y1: '0', x2: String(doorType === 'double' ? W * 2 : W), y2: '0',
+    stroke, 'stroke-width': String(T), 'stroke-linecap': 'butt'
+  }));
+
+  if (doorType === 'single') {
+    const hx = doorHand === 'left' ? 0 : W;  // hinge x
+    const fx = doorHand === 'left' ? W : 0;  // free end x
+
+    if (isOpen) {
+      // Panel: rotated 90° from hinge — shown along the wall
+      const panelAngle = doorHand === 'left' ? -90 : 90;
+      const panelG = mk('g', { transform: `rotate(${panelAngle}, ${hx}, 0)` });
+      panelG.appendChild(mk('line', { x1: String(hx), y1: '0', x2: String(hx + (doorHand === 'left' ? W : -W)), y2: '0',
+        stroke, 'stroke-width': String(T) }));
+      iconG.appendChild(panelG);
+      // Swing arc — quarter circle dashed
+      const arcX = doorHand === 'left' ? W : 0;
+      const arcY = -W;
+      const arcSweep = doorHand === 'left' ? 0 : 1;
+      iconG.appendChild(mk('path', {
+        d: `M ${hx} ${-W} A ${W} ${W} 0 0 ${arcSweep} ${fx} 0`,
+        fill: 'none', stroke, 'stroke-width': String(sw), 'stroke-dasharray': String(3*s)+','+String(2*s)
+      }));
+    } else {
+      // Panel: closed — line from hinge straight across opening
+      iconG.appendChild(mk('line', { x1: String(hx), y1: '0', x2: String(fx), y2: '0',
+        stroke, 'stroke-width': String(T) }));
+      // Quarter-circle arc showing swing direction (faint)
+      const arcSweep = doorHand === 'left' ? 0 : 1;
+      iconG.appendChild(mk('path', {
+        d: `M ${hx} ${-W} A ${W} ${W} 0 0 ${arcSweep} ${fx} 0`,
+        fill, stroke, 'stroke-width': String(sw), 'stroke-dasharray': String(2*s)+','+String(2*s), 'fill-opacity': '1'
+      }));
+      // Hinge dot
+      iconG.appendChild(mk('circle', { cx: String(hx), cy: '0', r: String(2*s), fill: stroke }));
+    }
   } else {
-    // Closed: solid door with handle
-    iconG.appendChild(mk('rect', {x:'-8',y:'-10',width:'16',height:'20',rx:'1',fill:doorColour,'fill-opacity':'0.2',stroke:doorColour,'stroke-width':'1.8'}));
-    // Handle
-    iconG.appendChild(mk('circle', {cx:'5',cy:'1',r:'2',fill:doorColour}));
-    iconG.appendChild(mk('line', {x1:'5',y1:'1',x2:'5',y2:'4',stroke:doorColour,'stroke-width':'1.8','stroke-linecap':'round'}));
-    // Hinge
-    iconG.appendChild(mk('rect', {x:'-9',y:'-7',width:'2.5',height:'4',rx:'1',fill:doorColour}));
-    iconG.appendChild(mk('rect', {x:'-9',y:'4',width:'2.5',height:'4',rx:'1',fill:doorColour}));
+    // Double door — two single panels meeting in the middle
+    const midX = W;
+    for (const side of ['left','right']) {
+      const hx = side === 'left' ? 0 : W * 2;
+      const fx = midX;
+      const panelW = W;
+      const arcSweep = side === 'left' ? 0 : 1;
+      if (isOpen) {
+        const panelAngle = side === 'left' ? -90 : 90;
+        const pg = mk('g', { transform: `rotate(${panelAngle}, ${hx}, 0)` });
+        pg.appendChild(mk('line', { x1: String(hx), y1: '0',
+          x2: String(hx + (side === 'left' ? panelW : -panelW)), y2: '0',
+          stroke, 'stroke-width': String(T) }));
+        iconG.appendChild(pg);
+        iconG.appendChild(mk('path', {
+          d: `M ${hx} ${-panelW} A ${panelW} ${panelW} 0 0 ${arcSweep} ${fx} 0`,
+          fill: 'none', stroke, 'stroke-width': String(sw), 'stroke-dasharray': String(3*s)+','+String(2*s)
+        }));
+      } else {
+        iconG.appendChild(mk('line', { x1: String(hx), y1: '0', x2: String(fx), y2: '0',
+          stroke, 'stroke-width': String(T) }));
+        iconG.appendChild(mk('path', {
+          d: `M ${hx} ${-panelW} A ${panelW} ${panelW} 0 0 ${arcSweep} ${fx} 0`,
+          fill, stroke, 'stroke-width': String(sw), 'stroke-dasharray': String(2*s)+','+String(2*s)
+        }));
+        iconG.appendChild(mk('circle', { cx: String(hx), cy: '0', r: String(2*s), fill: stroke }));
+      }
+    }
   }
 
-  // Lock overlay — small badge bottom-right
+  // Editor selection highlight
+  if (isEdit) {
+    const hw = doorType === 'double' ? W : W / 2;
+    iconG.appendChild(mk('circle', {
+      cx: String(hw), cy: String(-hw * 0.5),
+      r: String((W * 0.8)),
+      fill: 'none', stroke: '#0096ff', 'stroke-width': String(1.5 * s), 'stroke-dasharray': String(3*s)+','+String(2*s)
+    }));
+  }
+
+  // Lock/unlock badge — fixed 14px circle, bottom-right of swing area
   if (hasControl && controlState) {
-    const badgeG = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-    badgeG.setAttribute('transform', 'translate(5, 7)');
+    const badgeR = 7 * s;
+    const bx = doorType === 'double' ? W * 2 : W;
+    const by = -badgeR * 1.5;
     const lockColour = isLocked ? '#ff3b30' : '#34c759';
-    // Badge background
-    badgeG.appendChild(mk('circle', {cx:'0',cy:'0',r:'4',fill:'rgba(14,14,14,0.9)',stroke:lockColour,'stroke-width':'1'}));
-    if (isLocked) {
-      // Lock body
-      badgeG.appendChild(mk('rect', {x:'-2.5',y:'-0.5',width:'5',height:'3.5',rx:'0.8',fill:lockColour}));
-      // Shackle
-      badgeG.appendChild(mk('path', {d:'M -1.5 -0.5 A 1.5 1.5 0 0 1 1.5 -0.5',fill:'none',stroke:lockColour,'stroke-width':'1.2'}));
-    } else {
-      // Unlocked body
-      badgeG.appendChild(mk('rect', {x:'-2.5',y:'-0.5',width:'5',height:'3.5',rx:'0.8',fill:lockColour}));
-      badgeG.appendChild(mk('path', {d:'M -1.5 -0.5 A 1.5 1.5 0 0 1 1.5 -0.5',fill:'none',stroke:lockColour,'stroke-width':'1.2','transform':'translate(3,-1)'}));
-    }
-    iconG.appendChild(badgeG);
+    iconG.appendChild(mk('circle', { cx: String(bx), cy: String(by), r: String(badgeR),
+      fill: 'rgba(10,10,10,0.88)', stroke: lockColour, 'stroke-width': String(s) }));
+    const lk = mk('text', { x: String(bx), y: String(by + badgeR * 0.38),
+      'text-anchor': 'middle', 'font-size': String(badgeR * 1.3), fill: lockColour,
+      'font-family': 'sans-serif', style: 'user-select:none' });
+    lk.textContent = isLocked ? '🔒' : '🔓';
+    iconG.appendChild(lk);
   }
 
   g.appendChild(iconG);
@@ -3571,10 +3627,24 @@ function renderZonesEditor() {
           </div>
         </div>
         <div style="margin-top:10px;">
+          <label style="font-size:12px;color:#aaa;">Door type</label>
+          <div style="display:flex;gap:6px;margin-top:4px;">
+            <button id="doorTypeSingle" class="settings-toggle ${(pin.doorType||'single')==='single'?'active':''}" style="flex:1;font-size:11px;">Single</button>
+            <button id="doorTypeDouble" class="settings-toggle ${pin.doorType==='double'?'active':''}" style="flex:1;font-size:11px;">Double</button>
+          </div>
+        </div>
+        <div style="margin-top:8px;" id="doorHandRow" ${pin.doorType==='double'?'style="display:none"':''}>
+          <label style="font-size:12px;color:#aaa;">Hinge side</label>
+          <div style="display:flex;gap:6px;margin-top:4px;">
+            <button id="doorHandLeft"  class="settings-toggle ${(pin.doorHand||'left')==='left' ?'active':''}" style="flex:1;font-size:11px;">Left</button>
+            <button id="doorHandRight" class="settings-toggle ${pin.doorHand==='right'?'active':''}" style="flex:1;font-size:11px;">Right</button>
+          </div>
+        </div>
+        <div style="margin-top:10px;">
           <label style="font-size:12px;color:#aaa;">Rotation <span id="pinRotationVal" style="color:#64b4ff;font-weight:600;">${pin.rotation || 0}°</span></label>
           <input id="pinRotationInput" type="range" min="0" max="359" step="1" value="${pin.rotation || 0}"
             style="width:100%;accent-color:#64b4ff;margin-top:4px;display:block;">
-          <div style="font-size:10px;color:#555;margin-top:2px;">Rotate icon to match door orientation</div>
+          <div style="font-size:10px;color:#555;margin-top:2px;">Rotate to align with wall</div>
         </div>` : `
         <div class="zones-editor-row">
           <label>Entity</label>
@@ -4018,6 +4088,25 @@ function renderZonesEditor() {
           });
           rotEl.addEventListener('change', () => savePin());
         }
+
+        // Door type — single / double
+        document.getElementById('doorTypeSingle')?.addEventListener('click', () => {
+          pin.doorType = 'single';
+          savePin(); renderZones(); renderZonesEditor();
+        });
+        document.getElementById('doorTypeDouble')?.addEventListener('click', () => {
+          pin.doorType = 'double';
+          savePin(); renderZones(); renderZonesEditor();
+        });
+        // Hinge side — left / right
+        document.getElementById('doorHandLeft')?.addEventListener('click', () => {
+          pin.doorHand = 'left';
+          savePin(); renderZones(); renderZonesEditor();
+        });
+        document.getElementById('doorHandRight')?.addEventListener('click', () => {
+          pin.doorHand = 'right';
+          savePin(); renderZones(); renderZonesEditor();
+        });
       }
       document.getElementById('pinEntityInput')?.addEventListener('keydown', e => e.stopPropagation());
       document.getElementById('pinEntityInput')?.addEventListener('input',   e => e.stopPropagation());
