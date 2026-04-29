@@ -742,14 +742,13 @@ const server = http.createServer(async (req, res) => {
     if (ext === ".html") {
       let html = fs.readFileSync(filePath, "utf8");
       const ingressPath = req.headers["x-ingress-path"] || "";
+      // Detect client IP — check x-forwarded-for first (ingress proxy), then socket
+      const clientIp = (req.headers["x-forwarded-for"] || req.socket.remoteAddress || "").split(",")[0].trim().replace(/^::ffff:/, "");
       if (ingressPath) {
-        // Ingress: inject base tag so relative URLs route through HA ingress proxy
         const base = ingressPath.replace(/\/?$/, "/");
-        html = html.replace("<head>", `<head>\n    <base href="${base}" />`);
+        html = html.replace("<head>", `<head>\n    <base href="${base}" />\n    <meta name="ow-client-ip" content="${clientIp}" />`);
       } else {
-        // Direct LAN access: no base tag — relative URLs resolve to ha-ip:8099 directly
-        // Mark the document so app.js knows it's in direct mode
-        html = html.replace("<head>", `<head>\n    <meta name="ow-direct" content="true" />`);
+        html = html.replace("<head>", `<head>\n    <meta name="ow-direct" content="true" />\n    <meta name="ow-client-ip" content="${clientIp}" />`);
       }
       res.writeHead(200, { "Content-Type": "text/html", "Cache-Control": "no-cache", "Access-Control-Allow-Origin": "*" });
       res.end(html);

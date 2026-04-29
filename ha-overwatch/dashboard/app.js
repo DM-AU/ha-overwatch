@@ -167,6 +167,17 @@ let haStates = {};        // entity_id -> state object
 let haMsgId = 1;
 let haPendingCmds = {};
 let mapLocked = localStorage.getItem('ow_map_locked') === 'true'; // prevent pan/zoom when true
+
+// Client IP — injected by server.js into the HTML as a meta tag
+const CLIENT_IP = document.querySelector('meta[name="ow-client-ip"]')?.content || '';
+
+// Returns true if this device is allowed to arm/disarm zones
+function canArmDisarm() {
+  const allowedRaw = localStorage.getItem('ow_arm_allowed_ips') || '';
+  if (!allowedRaw.trim()) return false; // no IPs configured → no devices allowed
+  const allowed = allowedRaw.split(',').map(s => s.trim()).filter(Boolean);
+  return allowed.some(ip => CLIENT_IP === ip || CLIENT_IP.startsWith(ip));
+}
 let haReconnectTimer = null;
 let haReconnectDelay = 1000;   // exponential backoff: 1s→2s→4s→8s→30s max
 let haSubscribedEntities = new Set();
@@ -2977,12 +2988,15 @@ function renderZonePopupContent() {
   const cameras_   = zone.cameras  || [];
 
   // ── Arm/Disarm row ────────────────────────────────────────
+  const showArmDisarm = canArmDisarm();
   const armHtml = `
     <div id="zpTitlebar" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;padding-bottom:10px;border-bottom:1px solid rgba(255,255,255,0.08);">
       <div style="font-weight:600;font-size:14px;color:#fff;flex:1;">🏠 ${escapeHtml(zone.name)}</div>
       <div style="display:flex;gap:5px;margin-left:8px;">
+        ${showArmDisarm ? `
         <button id="zpArm"    style="background:${isArmed   ? 'rgba(0,150,255,0.3)'  : 'rgba(255,255,255,0.06)'};border:1px solid ${isArmed   ? 'rgba(0,150,255,0.6)'  : 'rgba(255,255,255,0.12)'};color:${isArmed   ? '#4db8ff' : '#666'};border-radius:6px;padding:4px 10px;cursor:pointer;font-size:11px;font-weight:600;">Armed</button>
         <button id="zpDisarm" style="background:${!isArmed  ? 'rgba(255,59,48,0.3)'  : 'rgba(255,255,255,0.06)'};border:1px solid ${!isArmed  ? 'rgba(255,59,48,0.6)'  : 'rgba(255,255,255,0.12)'};color:${!isArmed  ? '#ff6b6b' : '#666'};border-radius:6px;padding:4px 10px;cursor:pointer;font-size:11px;font-weight:600;">Disarmed</button>
+        ` : `<span id="zpArmStatus" style="font-size:11px;color:#555;padding:4px 6px;">${isArmed ? '🔵 Armed' : '⚪ Disarmed'}</span>`}
         <button id="zpClose"  style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);color:#888;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:12px;line-height:1;">✕</button>
       </div>
     </div>`;
@@ -3071,19 +3085,22 @@ function renderZonePopupContent() {
   popup.querySelector('#zpClose')?.addEventListener('click', closeZonePopup);
 
   // Arm/Disarm — optimistic: flip the zone switch in haStates immediately
+  // Arm/Disarm — only for IPs in the allowed list
   const zSwitchId = `switch.overwatch_zone_${zoneSlug(zone)}`;
-  popup.querySelector('#zpArm')?.addEventListener('click', () => {
-    owCallSwitch(zSwitchId, true);
-    if (haStates[zSwitchId]) haStates[zSwitchId] = { ...haStates[zSwitchId], state: 'on' };
-    else haStates[zSwitchId] = { state: 'on' };
-    refreshZonePopupIfOpen(); // surgical — preserves camera img tags
-  });
-  popup.querySelector('#zpDisarm')?.addEventListener('click', () => {
-    owCallSwitch(zSwitchId, false);
-    if (haStates[zSwitchId]) haStates[zSwitchId] = { ...haStates[zSwitchId], state: 'off' };
-    else haStates[zSwitchId] = { state: 'off' };
-    refreshZonePopupIfOpen();
-  });
+  if (canArmDisarm()) {
+    popup.querySelector('#zpArm')?.addEventListener('click', () => {
+      owCallSwitch(zSwitchId, true);
+      if (haStates[zSwitchId]) haStates[zSwitchId] = { ...haStates[zSwitchId], state: 'on' };
+      else haStates[zSwitchId] = { state: 'on' };
+      refreshZonePopupIfOpen();
+    });
+    popup.querySelector('#zpDisarm')?.addEventListener('click', () => {
+      owCallSwitch(zSwitchId, false);
+      if (haStates[zSwitchId]) haStates[zSwitchId] = { ...haStates[zSwitchId], state: 'off' };
+      else haStates[zSwitchId] = { state: 'off' };
+      refreshZonePopupIfOpen();
+    });
+  }
 
   // Individual light toggles — optimistic
   popup.querySelectorAll('.zp-light-toggle').forEach(btn => {
@@ -3176,20 +3193,26 @@ function refreshZonePopupIfOpen() {
   const zone = zones.find(z => z.id === _zonePopupZoneId);
   if (!zone) { closeZonePopup(); return; }
 
-  // Arm/Disarm buttons
+  // Arm/Disarm buttons (only exist if canArmDisarm() was true when popup opened)
   const zState  = getZoneState(zone);
   const isArmed = zState !== 'disabled';
-  const btnArm    = popup.querySelector('#zpArm');
-  const btnDisarm = popup.querySelector('#zpDisarm');
-  if (btnArm) {
-    btnArm.style.background   = isArmed ? 'rgba(0,150,255,0.3)'  : 'rgba(255,255,255,0.06)';
-    btnArm.style.borderColor  = isArmed ? 'rgba(0,150,255,0.6)'  : 'rgba(255,255,255,0.12)';
-    btnArm.style.color        = isArmed ? '#4db8ff' : '#666';
-  }
-  if (btnDisarm) {
-    btnDisarm.style.background  = !isArmed ? 'rgba(255,59,48,0.3)'  : 'rgba(255,255,255,0.06)';
-    btnDisarm.style.borderColor = !isArmed ? 'rgba(255,59,48,0.6)'  : 'rgba(255,255,255,0.12)';
-    btnDisarm.style.color       = !isArmed ? '#ff6b6b' : '#666';
+  if (canArmDisarm()) {
+    const btnArm    = popup.querySelector('#zpArm');
+    const btnDisarm = popup.querySelector('#zpDisarm');
+    if (btnArm) {
+      btnArm.style.background   = isArmed ? 'rgba(0,150,255,0.3)'  : 'rgba(255,255,255,0.06)';
+      btnArm.style.borderColor  = isArmed ? 'rgba(0,150,255,0.6)'  : 'rgba(255,255,255,0.12)';
+      btnArm.style.color        = isArmed ? '#4db8ff' : '#666';
+    }
+    if (btnDisarm) {
+      btnDisarm.style.background  = !isArmed ? 'rgba(255,59,48,0.3)'  : 'rgba(255,255,255,0.06)';
+      btnDisarm.style.borderColor = !isArmed ? 'rgba(255,59,48,0.6)'  : 'rgba(255,255,255,0.12)';
+      btnDisarm.style.color       = !isArmed ? '#ff6b6b' : '#666';
+    }
+  } else {
+    // View-only — update the status text
+    const statusSpan = popup.querySelector('#zpArmStatus');
+    if (statusSpan) statusSpan.textContent = isArmed ? '🔵 Armed' : '⚪ Disarmed';
   }
 
   // Sensor dots + state text
@@ -5344,6 +5367,20 @@ function renderSettingsPanel() {
           <div id="haConnectStatus" style="font-size:11px;color:#888;margin-top:5px;min-height:14px;text-align:center;"></div>` : `
           <div class="settings-readonly" style="text-align:center;color:#555;font-size:11px;">To manage HA connection: open Overwatch in the HA Add-on panel as an admin.</div>`}
         </div>
+
+        ${isAdmin ? `
+        <div class="settings-section">
+          <div class="settings-section-title">Zone Arm/Disarm Access</div>
+          <div class="settings-field">
+            <label>Allowed IP addresses</label>
+            <textarea id="cfgArmAllowedIps" rows="3" placeholder="192.168.1.10&#10;192.168.1.11&#10;10.0.0.5"
+              style="width:100%;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:6px 8px;color:#e0e0e0;font-size:12px;resize:vertical;font-family:monospace;"
+            >${escapeHtml(localStorage.getItem('ow_arm_allowed_ips') || '')}</textarea>
+            <div style="font-size:11px;color:#555;margin-top:3px;">One IP per line. Only these devices can arm/disarm zones. Leave empty to disable arm/disarm for all devices.</div>
+            <div style="font-size:11px;color:#888;margin-top:4px;">Your current IP: <strong style="color:#0096ff;">${CLIENT_IP || '(unknown)'}</strong></div>
+          </div>
+          <button class="settings-btn" id="saveArmIpsBtn" style="margin-top:4px;">Save allowed IPs</button>
+        </div>` : ''}
       </div>
 
       <!-- ══ GENERAL TAB ═════════════════════════════════════════ -->
@@ -6121,6 +6158,14 @@ function renderSettingsPanel() {
   const connectBtn    = document.getElementById("settingsSaveHaBtn");
   const tokenField    = document.getElementById("cfgHaToken");
   const connectStatus = document.getElementById("haConnectStatus");
+
+  // Arm/Disarm IP allow list
+  document.getElementById("saveArmIpsBtn")?.addEventListener("click", () => {
+    const raw = document.getElementById("cfgArmAllowedIps")?.value || "";
+    localStorage.setItem("ow_arm_allowed_ips", raw.split("\n").map(s => s.trim()).filter(Boolean).join(","));
+    const btn = document.getElementById("saveArmIpsBtn");
+    if (btn) { btn.textContent = "✓ Saved"; setTimeout(() => btn.textContent = "Save allowed IPs", 1500); }
+  });
   if (tokenField && connectBtn) {
     tokenField.addEventListener("input", () => {
       connectBtn.style.opacity = "1";
