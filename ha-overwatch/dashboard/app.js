@@ -2538,6 +2538,7 @@ function renderPins(panelIdx) {
     const isEdit = editorMode && activePinType === 'door' && activePinId === pin.id;
     svg.appendChild(makeDoorPin(pin, isEdit, scale));
   });
+}
 
 function makeLightPin(pin, isOn, isEdit, scale) {
   const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
@@ -2980,6 +2981,8 @@ function makeDoorPin(pin, isEdit, scale) {
 
   return g;
 }
+
+function makePinDraggable(g, pin, type) {
   let dragging = false, startClient = null, startPos = null, hasMoved = false;
 
   g.addEventListener('pointerdown', e => {
