@@ -1185,6 +1185,25 @@ display: flex;
   border-color: rgba(255,204,0,0.5);
 }
 
+.zones-editor-input {
+  width: 100%;
+  box-sizing: border-box;
+  background: #0a0a0a;
+  border: 1px solid #2a2a2a;
+  border-radius: 6px;
+  color: #e0e0e0;
+  padding: 6px 10px;
+  font-size: 12px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.zones-editor-input:focus {
+  border-color: rgba(0,150,255,0.5);
+}
+.zones-editor-input::placeholder {
+  color: #444;
+}
+
 .entity-search-results {
   position: absolute;
   top: calc(100% + 4px);

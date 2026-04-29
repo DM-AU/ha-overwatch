@@ -3556,13 +3556,19 @@ function renderZonesEditor() {
         ${isDoor ? `
         <div class="zones-editor-row">
           <label>Sensor entity</label>
-          <input id="pinEntityInput" class="zones-editor-input" value="${escapeHtml(pin.sensor_entity || '')}"
-            placeholder="binary_sensor.*" autocomplete="off">
+          <div style="position:relative;flex:1;">
+            <input id="pinEntityInput" class="zones-editor-input" value="${escapeHtml(pin.sensor_entity || '')}"
+              placeholder="binary_sensor.door_contact" autocomplete="off" style="width:100%;">
+            <div id="pinEntityResults" style="display:none;position:absolute;top:100%;left:0;right:0;background:#1a1a1a;border:1px solid rgba(255,255,255,0.15);border-radius:6px;z-index:100;max-height:160px;overflow-y:auto;"></div>
+          </div>
         </div>
         <div class="zones-editor-row">
           <label>Control entity</label>
-          <input id="pinControlEntityInput" class="zones-editor-input" value="${escapeHtml(pin.control_entity || '')}"
-            placeholder="lock.* or switch.* (optional)" autocomplete="off">
+          <div style="position:relative;flex:1;">
+            <input id="pinControlEntityInput" class="zones-editor-input" value="${escapeHtml(pin.control_entity || '')}"
+              placeholder="lock.* or switch.* (optional)" autocomplete="off" style="width:100%;">
+            <div id="pinCtrlResults" style="display:none;position:absolute;top:100%;left:0;right:0;background:#1a1a1a;border:1px solid rgba(255,255,255,0.15);border-radius:6px;z-index:100;max-height:160px;overflow-y:auto;"></div>
+          </div>
         </div>
         <div style="margin-top:10px;">
           <label style="font-size:12px;color:#aaa;">Rotation <span id="pinRotationVal" style="color:#64b4ff;font-weight:600;">${pin.rotation || 0}°</span></label>
@@ -3937,11 +3943,10 @@ function renderZonesEditor() {
 
   // ── Pin config wiring ─────────────────────────────────────
   if (activePinId) {
-    const pin = activePinType === 'light'
-      ? lights.find(p => p.id === activePinId)
-      : activePinType === 'siren'
-      ? sirens.find(p => p.id === activePinId)
-      : cameraPins.find(p => p.id === activePinId);
+    const pin = activePinType === 'light'  ? lights.find(p => p.id === activePinId)
+              : activePinType === 'siren'  ? sirens.find(p => p.id === activePinId)
+              : activePinType === 'door'   ? doorPins.find(p => p.id === activePinId)
+              : cameraPins.find(p => p.id === activePinId);
 
     const savePin = () => {
       if (activePinType === 'light')  saveLight(pin);
@@ -3955,18 +3960,58 @@ function renderZonesEditor() {
         pin.name = e.target.value; savePin();
       });
 
-      // Door-specific: sensor + control entity + rotation
+      // Door-specific: sensor + control entity autocomplete + rotation
       if (activePinType === 'door') {
-        const sensorInp = document.getElementById('pinEntityInput');
-        sensorInp?.addEventListener('keydown', e => e.stopPropagation());
-        sensorInp?.addEventListener('blur', e => { pin.sensor_entity = e.target.value.trim(); savePin(); renderZones(); });
-        const ctrlInp = document.getElementById('pinControlEntityInput');
-        ctrlInp?.addEventListener('keydown', e => e.stopPropagation());
-        ctrlInp?.addEventListener('blur', e => { pin.control_entity = e.target.value.trim() || null; savePin(); renderZones(); });
+        const wireEntitySearch = (inputId, resultsId, prefixes, onSelect) => {
+          const inp = document.getElementById(inputId);
+          const res = document.getElementById(resultsId);
+          if (!inp || !res) return;
+          inp.addEventListener('keydown', e => e.stopPropagation());
+          inp.addEventListener('input', e => {
+            e.stopPropagation();
+            const q = inp.value.trim().toLowerCase();
+            if (!q) { res.style.display = 'none'; return; }
+            const matches = Object.keys(haStates).filter(id =>
+              prefixes.some(p => id.startsWith(p)) && id.toLowerCase().includes(q)
+            ).slice(0, 10);
+            res.innerHTML = matches.map(id =>
+              `<div class="entity-search-result" data-id="${escapeHtml(id)}" style="padding:5px 8px;cursor:pointer;font-size:11px;color:#ccc;border-bottom:1px solid rgba(255,255,255,0.05);">${escapeHtml(id)}</div>`
+            ).join('') || `<div style="padding:6px 8px;color:#555;font-size:11px;">No matches</div>`;
+            res.style.display = 'block';
+            res.querySelectorAll('[data-id]').forEach(row => {
+              row.addEventListener('mousedown', e => {
+                e.preventDefault();
+                inp.value = row.dataset.id;
+                res.style.display = 'none';
+                onSelect(row.dataset.id);
+              });
+            });
+          });
+          inp.addEventListener('blur', () => setTimeout(() => res.style.display = 'none', 150));
+        };
+
+        wireEntitySearch('pinEntityInput', 'pinEntityResults',
+          ['binary_sensor.', 'sensor.'],
+          val => { pin.sensor_entity = val; savePin(); renderZones(); }
+        );
+        // Also save on blur
+        document.getElementById('pinEntityInput')?.addEventListener('blur', e => {
+          pin.sensor_entity = e.target.value.trim(); savePin(); renderZones();
+        });
+
+        wireEntitySearch('pinControlEntityInput', 'pinCtrlResults',
+          ['lock.', 'switch.', 'button.'],
+          val => { pin.control_entity = val; savePin(); renderZones(); }
+        );
+        document.getElementById('pinControlEntityInput')?.addEventListener('blur', e => {
+          pin.control_entity = e.target.value.trim() || null; savePin(); renderZones();
+        });
+
         const rotEl  = document.getElementById('pinRotationInput');
         const rotVal = document.getElementById('pinRotationVal');
         if (rotEl) {
           rotEl.addEventListener('input', e => {
+            e.stopPropagation();
             pin.rotation = Number(e.target.value);
             if (rotVal) rotVal.textContent = pin.rotation + '°';
             renderZones();
@@ -4055,6 +4100,7 @@ function renderZonesEditor() {
         if (!confirm(`Delete this ${activePinType}?`)) return;
         if (activePinType === 'light') deleteLight(activePinId);
         else if (activePinType === 'siren') deleteSiren(activePinId);
+        else if (activePinType === 'door') deleteDoorPin(activePinId);
         else deleteCameraPin(activePinId);
         activePinId = null; activePinType = null;
         renderZones(); renderZonesEditor();
