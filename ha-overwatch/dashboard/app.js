@@ -2864,16 +2864,21 @@ function placePinAtFloorplanCoord(x, y, floorId) {
   const pinFloor = zone?.floor_id || floorId || activeFloorId || null;
 
   const pin = {
-    id:        (type === 'light' ? 'light_' : type === 'siren' ? 'siren_' : 'campin_') + Date.now(),
-    name:      entityId.split('.').pop() || (type === 'light' ? 'New Light' : type === 'siren' ? 'New Siren' : 'New Camera'),
-    entity_id: entityId,
+    id:        (type === 'light' ? 'light_' : type === 'siren' ? 'siren_' : type === 'door' ? 'door_' : 'campin_') + Date.now(),
+    name:      entityId.split('.').pop() || (type === 'light' ? 'New Light' : type === 'siren' ? 'New Siren' : type === 'door' ? 'New Door' : 'New Camera'),
+    entity_id: type === 'door' ? undefined : entityId,
+    sensor_entity: type === 'door' ? '' : undefined,
+    control_entity: type === 'door' ? null : undefined,
+    zone_id:   type === 'door' ? zoneId : undefined,
     floor_id:  pinFloor,
     x:         Math.round(x),
     y:         Math.round(y),
-    direction: null,
+    rotation:  0,
+    direction: type !== 'door' ? null : undefined,
   };
   if (type === 'light')  { lights.push(pin);      saveLight(pin);      selectPin('light',  pin.id); }
   else if (type === 'siren') { sirens.push(pin);  saveSiren(pin);      selectPin('siren',  pin.id); }
+  else if (type === 'door') { doorPins.push(pin); saveDoorPin(pin);    selectPin('door',   pin.id); }
   else                   { cameraPins.push(pin);  saveCameraPin(pin);  selectPin('camera', pin.id); }
   renderZones(); renderZonesEditor();
 }
@@ -2911,8 +2916,8 @@ function makeDoorPin(pin, isEdit, scale) {
   bg.setAttribute('stroke-width', String((isEdit ? 2.5 : 1.5) / scale));
   g.appendChild(bg);
 
-  // Door icon — geometric door shape, rotated to match wall orientation
-  const iconS = R / 10;
+  // Door icon — clean MDI-style, rotated to match orientation
+  const iconS = R / 11;
   const iconG = document.createElementNS('http://www.w3.org/2000/svg', 'g');
   iconG.setAttribute('transform', `translate(${cx},${cy}) rotate(${rotation}) scale(${iconS})`);
 
@@ -2923,36 +2928,44 @@ function makeDoorPin(pin, isEdit, scale) {
   };
 
   if (isOpen) {
-    // Open door: frame + door panel swung open (arc to show swing)
-    iconG.appendChild(mk('rect', {x:'-7',y:'-9',width:'14',height:'18',rx:'1',fill:'none',stroke:doorColour,'stroke-width':'1.5'}));
-    iconG.appendChild(mk('line', {x1:'-7',y1:'-9',x2:'7',y2:'-9',stroke:doorColour,'stroke-width':'1.5'})); // top
-    // Door swung open - shown as line from hinge
-    iconG.appendChild(mk('line', {x1:'-7',y1:'-9',x2:'-7',y2:'9',stroke:doorColour,'stroke-width':'1.8'})); // hinge side
-    iconG.appendChild(mk('path', {d:'M -7 9 A 16 16 0 0 0 9 -7',fill:'none',stroke:doorColour,'stroke-width':'1.5','stroke-dasharray':'2,2'}));
+    // Open: door frame (outline) + door panel swung 70° (rotated rect)
+    // Frame
+    iconG.appendChild(mk('rect', {x:'-8',y:'-10',width:'16',height:'20',rx:'1',fill:'none',stroke:doorColour,'stroke-width':'1.5','stroke-dasharray':'3,2'}));
+    // Swung door panel (rotated around left edge)
+    const panelG = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+    panelG.setAttribute('transform', 'rotate(-70, -8, -10)');
+    panelG.appendChild(mk('rect', {x:'-8',y:'-10',width:'14',height:'20',rx:'1',fill:doorColour,'fill-opacity':'0.3',stroke:doorColour,'stroke-width':'1.5'}));
+    panelG.appendChild(mk('circle', {cx:'3',cy:'0',r:'1.8',fill:doorColour}));
+    iconG.appendChild(panelG);
   } else {
-    // Closed door: solid rectangle
-    iconG.appendChild(mk('rect', {x:'-7',y:'-9',width:'14',height:'18',rx:'1',fill:doorColour,'fill-opacity':'0.25',stroke:doorColour,'stroke-width':'1.5'}));
-    // Door handle
-    iconG.appendChild(mk('circle', {cx:'4',cy:'1',r:'1.5',fill:doorColour}));
-    // Hinge marks
-    iconG.appendChild(mk('rect', {x:'-8',y:'-7',width:'2.5','height':'3',rx:'0.5',fill:doorColour}));
-    iconG.appendChild(mk('rect', {x:'-8',y:'4',width:'2.5','height':'3',rx:'0.5',fill:doorColour}));
+    // Closed: solid door with handle
+    iconG.appendChild(mk('rect', {x:'-8',y:'-10',width:'16',height:'20',rx:'1',fill:doorColour,'fill-opacity':'0.2',stroke:doorColour,'stroke-width':'1.8'}));
+    // Handle
+    iconG.appendChild(mk('circle', {cx:'5',cy:'1',r:'2',fill:doorColour}));
+    iconG.appendChild(mk('line', {x1:'5',y1:'1',x2:'5',y2:'4',stroke:doorColour,'stroke-width':'1.8','stroke-linecap':'round'}));
+    // Hinge
+    iconG.appendChild(mk('rect', {x:'-9',y:'-7',width:'2.5',height:'4',rx:'1',fill:doorColour}));
+    iconG.appendChild(mk('rect', {x:'-9',y:'4',width:'2.5',height:'4',rx:'1',fill:doorColour}));
   }
 
-  // Lock/unlock overlay (bottom-right of icon)
+  // Lock overlay — small badge bottom-right
   if (hasControl && controlState) {
-    const lockG = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-    lockG.setAttribute('transform', `translate(6,7) scale(0.6)`);
+    const badgeG = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+    badgeG.setAttribute('transform', 'translate(5, 7)');
+    const lockColour = isLocked ? '#ff3b30' : '#34c759';
+    // Badge background
+    badgeG.appendChild(mk('circle', {cx:'0',cy:'0',r:'4',fill:'rgba(14,14,14,0.9)',stroke:lockColour,'stroke-width':'1'}));
     if (isLocked) {
-      // Locked padlock
-      lockG.appendChild(mk('rect', {x:'-4',y:'-2',width:'8',height:'6',rx:'1',fill:'#ff3b30'}));
-      lockG.appendChild(mk('path', {d:'M -2.5 -2 A 2.5 2.5 0 0 1 2.5 -2',fill:'none',stroke:'#ff3b30','stroke-width':'1.5'}));
-    } else if (isUnlocked) {
-      // Unlocked padlock
-      lockG.appendChild(mk('rect', {x:'-4',y:'-2',width:'8',height:'6',rx:'1',fill:'#34c759'}));
-      lockG.appendChild(mk('path', {d:'M -2.5 -4 A 2.5 2.5 0 0 1 2.5 -4',fill:'none',stroke:'#34c759','stroke-width':'1.5'}));
+      // Lock body
+      badgeG.appendChild(mk('rect', {x:'-2.5',y:'-0.5',width:'5',height:'3.5',rx:'0.8',fill:lockColour}));
+      // Shackle
+      badgeG.appendChild(mk('path', {d:'M -1.5 -0.5 A 1.5 1.5 0 0 1 1.5 -0.5',fill:'none',stroke:lockColour,'stroke-width':'1.2'}));
+    } else {
+      // Unlocked body
+      badgeG.appendChild(mk('rect', {x:'-2.5',y:'-0.5',width:'5',height:'3.5',rx:'0.8',fill:lockColour}));
+      badgeG.appendChild(mk('path', {d:'M -1.5 -0.5 A 1.5 1.5 0 0 1 1.5 -0.5',fill:'none',stroke:lockColour,'stroke-width':'1.2','transform':'translate(3,-1)'}));
     }
-    iconG.appendChild(lockG);
+    iconG.appendChild(badgeG);
   }
 
   g.appendChild(iconG);
@@ -3596,6 +3609,9 @@ function renderZonesEditor() {
         </div>` : isCamera ? `
         <div style="margin-top:10px;border-top:1px solid rgba(255,255,255,0.06);padding-top:8px;">
           <div style="font-size:11px;color:#666;">Tap opens full-screen camera view.</div>
+        </div>` : isDoor ? `
+        <div style="margin-top:10px;border-top:1px solid rgba(255,255,255,0.06);padding-top:8px;">
+          <div style="font-size:11px;color:#666;">Tap will show a confirmation before toggling the control entity.</div>
         </div>` : `
         <div style="margin-top:10px;border-top:1px solid rgba(255,255,255,0.06);padding-top:8px;">
           <label style="font-size:12px;color:#aaa;">Tap action</label>
@@ -3727,6 +3743,8 @@ function renderZonesEditor() {
             </div>
             <div class="ha-tab-panel" id="tabPanel_doors" style="${_activeZoneTab==='doors'?'flex:1;overflow-y:auto;':'display:none;'}">
               <div style="font-size:11px;color:#555;padding:6px 0 8px;">Place door sensors on the map. Each door has a sensor (open/closed) and an optional control entity (lock/switch).</div>
+              <div class="entity-search-wrap"><input type="text" id="doorSearchInput" class="entity-search-input" placeholder="Search sensor entities…" autocomplete="off">
+              <div class="entity-search-results" id="doorSearchResults" style="display:none;"></div></div>
               <div class="ha-entity-list" id="zoneDoorList">${doorPins.filter(p=>p.zone_id===selectedZone.id).map(p=>doorPinRow(p)).join("")}</div>
               <button id="addDoorPinBtn" style="margin-top:8px;width:100%;background:rgba(0,150,255,0.1);border:1px solid rgba(0,150,255,0.3);color:#0096ff;border-radius:6px;padding:6px;cursor:pointer;font-size:12px;">+ Place Door on Map</button>
             </div>
@@ -4117,23 +4135,45 @@ function renderZonesEditor() {
     bindDeviceSearch(selectedZone, "sirenSearchInput",  "sirenSearchResults",  "sirens",   "zoneSirenList");
 
     // Doors tab — Place, Edit, Delete
+    // Door search — selecting entity pre-fills sensor and enters place mode
+    const doorSearchEl = document.getElementById('doorSearchInput');
+    if (doorSearchEl) {
+      doorSearchEl.addEventListener('keydown', e => e.stopPropagation());
+      doorSearchEl.addEventListener('input', e => {
+        e.stopPropagation();
+        const q = e.target.value.trim().toLowerCase();
+        const resultsEl = document.getElementById('doorSearchResults');
+        if (!resultsEl) return;
+        if (!q) { resultsEl.style.display = 'none'; return; }
+        const matches = Object.keys(haStates).filter(id =>
+          (id.startsWith('binary_sensor.') || id.startsWith('sensor.')) && id.toLowerCase().includes(q)
+        ).slice(0, 12);
+        resultsEl.innerHTML = matches.map(id =>
+          `<div class="entity-search-result" data-entity-id="${escapeHtml(id)}">${escapeHtml(id.split('.').pop())} <span style="color:#555;font-size:10px;">${escapeHtml(id)}</span></div>`
+        ).join('') || '<div style="padding:6px;color:#555;font-size:12px;">No matches</div>';
+        resultsEl.style.display = 'block';
+        resultsEl.querySelectorAll('.entity-search-result').forEach(row => {
+          row.addEventListener('click', () => {
+            placingPinType  = 'door';
+            placingEntityId = row.dataset.entityId;
+            placingZoneId   = selectedZone.id;
+            document.querySelectorAll('#zonesSvg, .fp-svg').forEach(s => s.style.cursor = 'crosshair');
+            doorSearchEl.value = '';
+            resultsEl.style.display = 'none';
+            logEvent('info', `Click the map to place ${row.dataset.entityId}`, 'system');
+          });
+        });
+      });
+    }
+
     document.getElementById("addDoorPinBtn")?.addEventListener("click", () => {
-      // Create a new door pin linked to this zone, enter crosshair place mode
-      const newPin = {
-        id: 'door_' + Date.now(),
-        name: '',
-        sensor_entity: '',
-        control_entity: null,
-        floor_id: activeFloorId || null,
-        zone_id:  selectedZone.id,
-        x: 0, y: 0,
-        rotation: 0,
-      };
-      doorPins.push(newPin);
-      saveDoorPin(newPin);
-      selectPin('door', newPin.id);
-      renderZones();
-      renderZonesEditor();
+      // Enter crosshair mode — user clicks the map to place the door
+      placingPinType  = 'door';
+      placingEntityId = '';
+      placingZoneId   = selectedZone.id;
+      document.querySelectorAll('#zonesSvg, .fp-svg').forEach(s => s.style.cursor = 'crosshair');
+      // Show hint
+      logEvent('info', 'Click the map to place the door icon.', 'system');
     });
 
     document.querySelectorAll(".door-pin-edit-btn").forEach(btn => {
@@ -5116,7 +5156,7 @@ function connectHA() {
       checkOfflineZoneEntities();
       checkZoneStateChanges();   // log any zones already triggered at connect time
       renderZones();
-      if (editorMode) renderZonesEditor();
+        if (editorMode && !document.activeElement?.closest('.zed-right')) renderZonesEditor();
       // Notify camera page if loaded
       if (window.OW && window.camUpdate) window.camUpdate();
     }
