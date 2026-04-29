@@ -353,6 +353,15 @@ function applyConfig() {
   applyStatusVisibility();
 }
 
+function applyHideCamPanel() {
+  const hide = localStorage.getItem('ow_hide_cam_panel') === 'true';
+  // Hide the entire camera section (grid + status bar) but keep map active
+  const camGrid = document.getElementById('cameraGrid');
+  const camStatus = document.getElementById('cameraStatusContainer');
+  if (camGrid)   camGrid.style.display   = hide ? 'none' : '';
+  if (camStatus) camStatus.style.display = hide ? 'none' : '';
+}
+
 function applyStatusVisibility() {
   // Zone status bar + dropdown
   const hideZone = localStorage.getItem("ow_hide_zone_status") === "true";
@@ -2279,7 +2288,8 @@ function _renderZonesInternal(targetSvg) {
       // Live mode — transparent unless a sensor is active
       const sensors = zone.sensors || [];
       const anyActive = sensors.some(isEntityTriggered);
-      if (anyActive && isDisabled) {
+      const hideDisarmedFlash = localStorage.getItem('ow_hide_disarmed_flash') === 'true';
+      if (anyActive && isDisabled && !hideDisarmedFlash) {
         // Disarmed zone with active sensor — flash in off-colour
         const type = detectEntityType(sensors.find(isEntityTriggered) || "");
         const hex  = resolveColour(entityTypeColourOff(type));
@@ -5357,7 +5367,18 @@ function renderSettingsPanel() {
 
         ${!isAdmin ? `
         <div class="settings-section-title">HOME ASSISTANT <span class="settings-admin-badge">ADMIN ONLY</span></div>
-        ${adminBox}` : ''}
+        ${adminBox}
+        <div class="settings-section" style="margin-top:10px;">
+          <div class="settings-section-title">This Device</div>
+          <div class="settings-field">
+            <label>IP Address</label>
+            <div style="display:flex;align-items:center;gap:8px;">
+              <code style="background:rgba(0,150,255,0.12);border:1px solid rgba(0,150,255,0.3);border-radius:6px;padding:4px 10px;color:#4db8ff;font-size:13px;letter-spacing:0.05em;">${CLIENT_IP || '(unknown)'}</code>
+              <button onclick="navigator.clipboard?.writeText('${CLIENT_IP || ''}')" style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);color:#888;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:11px;">Copy</button>
+            </div>
+            <div style="font-size:11px;color:#555;margin-top:4px;">Share with your admin to get arm/disarm access.</div>
+          </div>
+        </div>` : ''}
 
         <div id="haConnectionStatus" class="settings-connection-box ${haConnected ? 'connected' : 'disconnected'}">
           <div class="settings-connection-label">${haConnected ? '✓ Connected to Home Assistant' : '✗ Not connected'}</div>
@@ -5640,6 +5661,13 @@ function renderSettingsPanel() {
             </div>
             <div style="font-size:11px;color:#777;margin-top:4px;"><b>Zone only:</b> just the triggered zone flashes.<br><b>Whole group:</b> all zones in the group flash.</div>
           </div>
+          <div class="settings-field" style="margin-top:10px;">
+            <label>Disarmed zone behaviour</label>
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:6px;">
+              <input type="checkbox" id="hideDisarmedFlashChk" ${localStorage.getItem('ow_hide_disarmed_flash') === 'true' ? 'checked' : ''}>
+              Hide flashing on disarmed zones with active sensors
+            </label>
+          </div>
           <div class="settings-field">
             <label>Map icons</label>
             <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:6px;">
@@ -5738,6 +5766,13 @@ function renderSettingsPanel() {
               <input type="checkbox" id="cfgAlwaysHighRes" ${localStorage.getItem('ow_cam_always_high_res') === 'true' ? 'checked' : ''}
                 style="width:16px;height:16px;accent-color:#0096ff;cursor:pointer;">
               <span>Always use high resolution (ignore low-res assignments)</span>
+            </label>
+          </div>
+          <div class="settings-field" style="margin-top:6px;">
+            <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
+              <input type="checkbox" id="cfgHideCamPanel" ${localStorage.getItem('ow_hide_cam_panel') === 'true' ? 'checked' : ''}
+                style="width:16px;height:16px;accent-color:#0096ff;cursor:pointer;">
+              <span>Hide cameras from camera panel (map view only)</span>
             </label>
           </div>
         </div>
@@ -5909,8 +5944,11 @@ function renderSettingsPanel() {
 
   document.getElementById("cfgAlwaysHighRes")?.addEventListener("change", function() {
     localStorage.setItem('ow_cam_always_high_res', this.checked ? 'true' : 'false');
-    // Update cameras.js so grid refreshes with correct res
     if (window.renderCameraStatusBar) { window.renderCameraStatusBar(); applyStatusVisibility(); }
+  });
+  document.getElementById("cfgHideCamPanel")?.addEventListener("change", function() {
+    localStorage.setItem('ow_hide_cam_panel', this.checked ? 'true' : 'false');
+    applyHideCamPanel();
   });
 
   // ── Sidebar position ─────────────────────────────────────────
@@ -5938,6 +5976,11 @@ function renderSettingsPanel() {
   };
 
   // ── Map icon visibility ───────────────────────────────────────
+  document.getElementById("hideDisarmedFlashChk")?.addEventListener("change", function() {
+    localStorage.setItem('ow_hide_disarmed_flash', this.checked ? 'true' : 'false');
+    renderZones();
+  });
+
   const hideLightsChk  = document.getElementById('hideLightsChk');
   const hideSirensChk  = document.getElementById('hideSirensChk');
   const hideCamPinsChk = document.getElementById('hideCamPinsChk');
@@ -7057,7 +7100,7 @@ async function init() {
   // initFloorplan() called after loadFloors() so the saved floor image is used
   bindZonesButton();
   bindStatusBar();
-  applyStatusVisibility(); // apply hide prefs after DOM is ready
+  applyStatusVisibility(); applyHideCamPanel(); // apply hide prefs after DOM is ready
   bindSearchUI();
 
   bindSidebarToggle();
