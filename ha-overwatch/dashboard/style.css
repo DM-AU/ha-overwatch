@@ -779,6 +779,17 @@ display: flex;
 }
 
 /* ── Siren ring pulse ───────────────────────────────────────── */
+/* Door open aura animation */
+@keyframes door-aura-pulse {
+  0%   { r: 0px;  opacity: 0.6; }
+  100% { r: 40px; opacity: 0; }
+}
+.door-aura-ring {
+  animation: door-aura-pulse 1.2s ease-out infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
 @keyframes siren-ring {
   0%   { r: var(--ring-start, 14px); opacity: 0.8; }
   100% { r: var(--ring-end,   80px); opacity: 0; }
@@ -1202,15 +1213,6 @@ display: flex;
 }
 .zones-editor-input::placeholder {
   color: #444;
-}
-
-/* Open door pulse animation */
-@keyframes door-open-pulse {
-  0%, 100% { opacity: 1; }
-  50%       { opacity: 0.45; }
-}
-.door-pin-open {
-  animation: door-open-pulse 1.4s ease-in-out infinite;
 }
 
 .entity-search-results {
