@@ -436,6 +436,17 @@ const server = http.createServer(async (req, res) => {
     catch (e) { err(res, e.message); } return;
   }
 
+  /* ── /ow/door-pins ───────────────────────────────────────── */
+  if (pathname === "/ow/door-pins" && req.method === "GET") { json(res, loadPins("door_pins")); return; }
+  if (pathname === "/ow/save-door-pin" && req.method === "POST") {
+    try { const b = await readBody(req); savePin("door_pins", b); json(res, { ok: true }); }
+    catch (e) { err(res, e.message); } return;
+  }
+  if (pathname === "/ow/delete-door-pin" && req.method === "POST") {
+    try { const b = await readBody(req); deletePin("door_pins", b.id); json(res, { ok: true }); }
+    catch (e) { err(res, e.message); } return;
+  }
+
   /* ── /api/upload-floorplan ───────────────────────────────── */
   if (pathname === "/ow/upload-floorplan" && req.method === "POST") {
     const imgDir = safeDataPath("img");

@@ -100,6 +100,7 @@ let activeFloorId = null; // Currently displayed floor id
 let lights     = [];      // Map light pins [{id, name, entity_id, floor_id, x, y, direction}]
 let sirens     = [];      // Map siren pins [{id, name, entity_id, floor_id, x, y}]
 let cameraPins = [];      // Map camera pins [{id, name, entity_id, floor_id, x, y}]
+let doorPins   = [];      // Map door pins [{id, name, sensor_entity, control_entity, floor_id, x, y, rotation}]
 let camLowResMap = {};    // { "camera.high": "camera.low" } — persisted to ui.yaml
 
 function getCamLowRes(highResId) {
@@ -873,6 +874,22 @@ async function saveCameraPin(pin) {
 async function deleteCameraPin(id) {
   cameraPins = cameraPins.filter(p => p.id !== id);
   await fetch(apiPath("ow/delete-camera-pin"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id }) });
+}
+
+/* ─── DOOR PINS ───────────────────────────────────────────── */
+async function loadDoorPins() {
+  try {
+    const res = await fetch(apiPath("ow/door-pins") + "?v=" + Date.now());
+    doorPins = res.ok ? await res.json() : [];
+  } catch { doorPins = []; }
+}
+async function saveDoorPin(pin) {
+  await fetch(apiPath("ow/save-door-pin"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(pin) });
+  try { const h = await fetch(apiPath("ow/health"),{cache:"no-store"}); const d = await h.json(); if(d.dataVersion) _lastDataVersion = d.dataVersion; } catch{}
+}
+async function deleteDoorPin(id) {
+  doorPins = doorPins.filter(p => p.id !== id);
+  await fetch(apiPath("ow/delete-door-pin"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id }) });
 }
 
 
@@ -2514,7 +2531,13 @@ function renderPins(panelIdx) {
       svg.appendChild(makeCameraPin(pin, isEdit, scale));
     });
   }
-}
+
+  // Render door pins (always visible — doors are structural)
+  doorPins.forEach(pin => {
+    if (!pinOnFloor(pin)) return;
+    const isEdit = editorMode && activePinType === 'door' && activePinId === pin.id;
+    svg.appendChild(makeDoorPin(pin, isEdit, scale));
+  });
 
 function makeLightPin(pin, isOn, isEdit, scale) {
   const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
@@ -2805,7 +2828,7 @@ function makeCameraPin(pin, isEdit, scale) {
   return g;
 }
 
-let activePinType = null; // 'light' | 'siren' | 'camera' | null
+let activePinType = null; // 'light' | 'siren' | 'camera' | 'door' | null
 let activePinId   = null;
 let placingPinType  = null; // 'light' | 'siren' | 'camera' — click-to-place mode
 let placingEntityId = null;
@@ -2854,7 +2877,109 @@ function placePinAtFloorplanCoord(x, y, floorId) {
   renderZones(); renderZonesEditor();
 }
 
-function makePinDraggable(g, pin, type) {
+function makeDoorPin(pin, isEdit, scale) {
+  const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  g.setAttribute('data-pin', 'door');
+  g.setAttribute('data-pin-id', pin.id);
+  g.style.cursor = 'pointer';
+  g.style.pointerEvents = 'all';
+
+  const R  = 14 / scale;
+  const cx = pin.x, cy = pin.y;
+  const rotation = pin.rotation || 0;
+
+  // Sensor state
+  const sensorState   = haStates[pin.sensor_entity]?.state;   // 'on'=open, 'off'=closed
+  const isOpen        = sensorState === 'on';
+  const sensorUnknown = !sensorState;
+
+  // Control/lock state
+  const controlState  = pin.control_entity ? haStates[pin.control_entity]?.state : null;
+  const isLocked      = controlState === 'locked' || controlState === 'off';
+  const isUnlocked    = controlState === 'unlocked' || controlState === 'on';
+  const hasControl    = !!pin.control_entity;
+
+  // Colours
+  const doorColour = sensorUnknown ? '#888' : isOpen ? '#ff9500' : '#34c759';
+
+  // Background circle
+  const bg = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+  bg.setAttribute('cx', cx); bg.setAttribute('cy', cy); bg.setAttribute('r', R * 0.95);
+  bg.setAttribute('fill', 'rgba(0,0,0,0.5)');
+  bg.setAttribute('stroke', isEdit ? '#0096ff' : doorColour);
+  bg.setAttribute('stroke-width', String((isEdit ? 2.5 : 1.5) / scale));
+  g.appendChild(bg);
+
+  // Door icon — geometric door shape, rotated to match wall orientation
+  const iconS = R / 10;
+  const iconG = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  iconG.setAttribute('transform', `translate(${cx},${cy}) rotate(${rotation}) scale(${iconS})`);
+
+  const mk = (tag, attrs) => {
+    const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    Object.entries(attrs).forEach(([k,v]) => el.setAttribute(k,v));
+    return el;
+  };
+
+  if (isOpen) {
+    // Open door: frame + door panel swung open (arc to show swing)
+    iconG.appendChild(mk('rect', {x:'-7',y:'-9',width:'14',height:'18',rx:'1',fill:'none',stroke:doorColour,'stroke-width':'1.5'}));
+    iconG.appendChild(mk('line', {x1:'-7',y1:'-9',x2:'7',y2:'-9',stroke:doorColour,'stroke-width':'1.5'})); // top
+    // Door swung open - shown as line from hinge
+    iconG.appendChild(mk('line', {x1:'-7',y1:'-9',x2:'-7',y2:'9',stroke:doorColour,'stroke-width':'1.8'})); // hinge side
+    iconG.appendChild(mk('path', {d:'M -7 9 A 16 16 0 0 0 9 -7',fill:'none',stroke:doorColour,'stroke-width':'1.5','stroke-dasharray':'2,2'}));
+  } else {
+    // Closed door: solid rectangle
+    iconG.appendChild(mk('rect', {x:'-7',y:'-9',width:'14',height:'18',rx:'1',fill:doorColour,'fill-opacity':'0.25',stroke:doorColour,'stroke-width':'1.5'}));
+    // Door handle
+    iconG.appendChild(mk('circle', {cx:'4',cy:'1',r:'1.5',fill:doorColour}));
+    // Hinge marks
+    iconG.appendChild(mk('rect', {x:'-8',y:'-7',width:'2.5','height':'3',rx:'0.5',fill:doorColour}));
+    iconG.appendChild(mk('rect', {x:'-8',y:'4',width:'2.5','height':'3',rx:'0.5',fill:doorColour}));
+  }
+
+  // Lock/unlock overlay (bottom-right of icon)
+  if (hasControl && controlState) {
+    const lockG = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+    lockG.setAttribute('transform', `translate(6,7) scale(0.6)`);
+    if (isLocked) {
+      // Locked padlock
+      lockG.appendChild(mk('rect', {x:'-4',y:'-2',width:'8',height:'6',rx:'1',fill:'#ff3b30'}));
+      lockG.appendChild(mk('path', {d:'M -2.5 -2 A 2.5 2.5 0 0 1 2.5 -2',fill:'none',stroke:'#ff3b30','stroke-width':'1.5'}));
+    } else if (isUnlocked) {
+      // Unlocked padlock
+      lockG.appendChild(mk('rect', {x:'-4',y:'-2',width:'8',height:'6',rx:'1',fill:'#34c759'}));
+      lockG.appendChild(mk('path', {d:'M -2.5 -4 A 2.5 2.5 0 0 1 2.5 -4',fill:'none',stroke:'#34c759','stroke-width':'1.5'}));
+    }
+    iconG.appendChild(lockG);
+  }
+
+  g.appendChild(iconG);
+
+  // Interaction
+  if (editorMode) {
+    makePinDraggable(g, pin, 'door');
+  } else {
+    let _moved = false;
+    g.addEventListener('pointerdown', e => { _moved = false; e.stopPropagation(); });
+    g.addEventListener('pointermove', e => { if (Math.hypot(e.movementX, e.movementY) > 2) _moved = true; });
+    g.addEventListener('pointerup', e => {
+      e.stopPropagation();
+      if (_moved) return;
+      if (!hasControl || !pin.control_entity) return; // no control — tap does nothing extra
+      const action = isLocked ? 'unlock' : isUnlocked ? 'lock' : (isOpen ? 'close' : 'open');
+      const label  = pin.name || pin.sensor_entity?.split('.').pop() || 'door';
+      const msg    = `${isLocked ? 'Unlock' : isUnlocked ? 'Lock' : isOpen ? 'Close' : 'Open'} ${label}?`;
+      if (confirm(msg)) {
+        const domain = pin.control_entity.startsWith('lock.') ? 'lock' : 'switch';
+        const svc    = domain === 'lock' ? (isLocked ? 'unlock' : 'lock') : (isLocked ? 'turn_on' : 'turn_off');
+        _callService(pin.control_entity, svc);
+      }
+    });
+  }
+
+  return g;
+}
   let dragging = false, startClient = null, startPos = null, hasMoved = false;
 
   g.addEventListener('pointerdown', e => {
@@ -2898,9 +3023,10 @@ function makePinDraggable(g, pin, type) {
     _draggingPinId = null;
     g.removeAttribute('transform');
     if (hasMoved) {
-      if (type === 'light') saveLight(pin);
+      if (type === 'light')  saveLight(pin);
       else if (type === 'siren') saveSiren(pin);
-      else saveCameraPin(pin);
+      else if (type === 'camera') saveCameraPin(pin);
+      else saveDoorPin(pin);
       renderZones();
     } else {
       e.stopPropagation(); // prevent SVG empty-canvas handler from clearing activePinId
@@ -3389,19 +3515,20 @@ function renderZonesEditor() {
     </div>`;
   }
 
-  // ── Build pin right panel (light, siren or camera) ──────────
+  // ── Build pin right panel (light, siren, camera or door) ─────
   function buildPinRightPanel() {
-    const pin = activePinType === 'light'
-      ? lights.find(p => p.id === activePinId)
-      : activePinType === 'siren'
-      ? sirens.find(p => p.id === activePinId)
-      : cameraPins.find(p => p.id === activePinId);
+    const pin = activePinType === 'light'   ? lights.find(p => p.id === activePinId)
+              : activePinType === 'siren'   ? sirens.find(p => p.id === activePinId)
+              : activePinType === 'camera'  ? cameraPins.find(p => p.id === activePinId)
+              : activePinType === 'door'    ? doorPins.find(p => p.id === activePinId)
+              : null;
     if (!pin) return '';
 
     const isLight  = activePinType === 'light';
     const isCamera = activePinType === 'camera';
-    const label    = isLight ? 'Light' : isCamera ? 'Camera' : 'Siren';
-    const icon     = isLight ? '💡'   : isCamera ? '📷'     : '🔊';
+    const isDoor   = activePinType === 'door';
+    const label    = isLight ? 'Light' : isCamera ? 'Camera' : isDoor ? 'Door' : 'Siren';
+    const icon     = isLight ? '💡'   : isCamera ? '📷'     : isDoor ? '🚪'   : '🔊';
 
     return `
       <div class="zed-right-content">
@@ -3410,11 +3537,28 @@ function renderZonesEditor() {
           <label>Name</label>
           <input id="pinNameInput" class="zones-editor-input" value="${escapeHtml(pin.name || '')}" placeholder="Name">
         </div>
+        ${isDoor ? `
+        <div class="zones-editor-row">
+          <label>Sensor entity</label>
+          <input id="pinEntityInput" class="zones-editor-input" value="${escapeHtml(pin.sensor_entity || '')}"
+            placeholder="binary_sensor.*" autocomplete="off">
+        </div>
+        <div class="zones-editor-row">
+          <label>Control entity</label>
+          <input id="pinControlEntityInput" class="zones-editor-input" value="${escapeHtml(pin.control_entity || '')}"
+            placeholder="lock.* or switch.* (optional)" autocomplete="off">
+        </div>
+        <div style="margin-top:10px;">
+          <label style="font-size:12px;color:#aaa;">Rotation <span id="pinRotationVal" style="color:#64b4ff;font-weight:600;">${pin.rotation || 0}°</span></label>
+          <input id="pinRotationInput" type="range" min="0" max="359" step="1" value="${pin.rotation || 0}"
+            style="width:100%;accent-color:#64b4ff;margin-top:4px;display:block;">
+          <div style="font-size:10px;color:#555;margin-top:2px;">Rotate icon to match door orientation</div>
+        </div>` : `
         <div class="zones-editor-row">
           <label>Entity</label>
           <input id="pinEntityInput" class="zones-editor-input" value="${escapeHtml(pin.entity_id || '')}"
             placeholder="${isLight ? 'light.* or switch.*' : isCamera ? 'camera.*' : 'switch.* or siren.*'}" autocomplete="off">
-        </div>
+        </div>`}
         ${isLight ? `
         <div style="margin-top:12px;border-top:1px solid rgba(255,255,255,0.06);padding-top:10px;">
           <label style="font-size:12px;color:#aaa;">Range <span id="pinRadiusVal" style="color:#ffcc44;font-weight:600;">${pin.radius || 3}</span></label>
@@ -3556,6 +3700,7 @@ function renderZonesEditor() {
               <button class="ha-device-tab ${_activeZoneTab==='cameras'?'active':''}" data-tab="cameras">Cameras</button>
               <button class="ha-device-tab ${_activeZoneTab==='lights'?'active':''}" data-tab="lights">Lights</button>
               <button class="ha-device-tab ${_activeZoneTab==='sirens'?'active':''}" data-tab="sirens">Sirens</button>
+              <button class="ha-device-tab ${_activeZoneTab==='doors'?'active':''}" data-tab="doors">Doors</button>
             </div>
             <div class="ha-tab-panel" id="tabPanel_sensors" style="${_activeZoneTab==='sensors'?'flex:1;overflow-y:auto;':'display:none;'}">
               <div class="entity-search-wrap"><input type="text" id="entitySearchInput" class="entity-search-input" placeholder="Search HA entities…" autocomplete="off">
@@ -3576,6 +3721,11 @@ function renderZonesEditor() {
               <div class="entity-search-wrap"><input type="text" id="sirenSearchInput" class="entity-search-input" placeholder="Search siren entities…" autocomplete="off">
               <div class="entity-search-results" id="sirenSearchResults" style="display:none;"></div></div>
               <div class="ha-entity-list" id="zoneSirenList">${(selectedZone.sirens||[]).map(e=>deviceRow(e,"sirens")).join("")}</div>
+            </div>
+            <div class="ha-tab-panel" id="tabPanel_doors" style="${_activeZoneTab==='doors'?'flex:1;overflow-y:auto;':'display:none;'}">
+              <div style="font-size:11px;color:#555;padding:6px 0 8px;">Place door sensors on the map. Each door has a sensor (open/closed) and an optional control entity (lock/switch).</div>
+              <div class="ha-entity-list" id="zoneDoorList">${doorPins.filter(p=>p.zone_id===selectedZone.id).map(p=>doorPinRow(p)).join("")}</div>
+              <button id="addDoorPinBtn" style="margin-top:8px;width:100%;background:rgba(0,150,255,0.1);border:1px solid rgba(0,150,255,0.3);color:#0096ff;border-radius:6px;padding:6px;cursor:pointer;font-size:12px;">+ Place Door on Map</button>
             </div>
           </div>
         </div>`;
@@ -3775,6 +3925,7 @@ function renderZonesEditor() {
     const savePin = () => {
       if (activePinType === 'light')  saveLight(pin);
       else if (activePinType === 'siren') saveSiren(pin);
+      else if (activePinType === 'door') saveDoorPin(pin);
       else saveCameraPin(pin);
     };
 
@@ -3782,6 +3933,26 @@ function renderZonesEditor() {
       document.getElementById('pinNameInput')?.addEventListener('input', e => {
         pin.name = e.target.value; savePin();
       });
+
+      // Door-specific: sensor + control entity + rotation
+      if (activePinType === 'door') {
+        const sensorInp = document.getElementById('pinEntityInput');
+        sensorInp?.addEventListener('keydown', e => e.stopPropagation());
+        sensorInp?.addEventListener('blur', e => { pin.sensor_entity = e.target.value.trim(); savePin(); renderZones(); });
+        const ctrlInp = document.getElementById('pinControlEntityInput');
+        ctrlInp?.addEventListener('keydown', e => e.stopPropagation());
+        ctrlInp?.addEventListener('blur', e => { pin.control_entity = e.target.value.trim() || null; savePin(); renderZones(); });
+        const rotEl  = document.getElementById('pinRotationInput');
+        const rotVal = document.getElementById('pinRotationVal');
+        if (rotEl) {
+          rotEl.addEventListener('input', e => {
+            pin.rotation = Number(e.target.value);
+            if (rotVal) rotVal.textContent = pin.rotation + '°';
+            renderZones();
+          });
+          rotEl.addEventListener('change', () => savePin());
+        }
+      }
       document.getElementById('pinEntityInput')?.addEventListener('keydown', e => e.stopPropagation());
       document.getElementById('pinEntityInput')?.addEventListener('input',   e => e.stopPropagation());
       document.getElementById('pinEntityInput')?.addEventListener('blur', e => {
@@ -3941,7 +4112,42 @@ function renderZonesEditor() {
     bindDeviceSearch(selectedZone, "cameraSearchInput", "cameraSearchResults", "cameras",  "zoneCameraList");
     bindDeviceSearch(selectedZone, "lightSearchInput",  "lightSearchResults",  "lights",   "zoneLightList");
     bindDeviceSearch(selectedZone, "sirenSearchInput",  "sirenSearchResults",  "sirens",   "zoneSirenList");
-  }
+
+    // Doors tab — Place, Edit, Delete
+    document.getElementById("addDoorPinBtn")?.addEventListener("click", () => {
+      // Create a new door pin linked to this zone, enter crosshair place mode
+      const newPin = {
+        id: 'door_' + Date.now(),
+        name: '',
+        sensor_entity: '',
+        control_entity: null,
+        floor_id: activeFloorId || null,
+        zone_id:  selectedZone.id,
+        x: 0, y: 0,
+        rotation: 0,
+      };
+      doorPins.push(newPin);
+      saveDoorPin(newPin);
+      selectPin('door', newPin.id);
+      renderZones();
+      renderZonesEditor();
+    });
+
+    document.querySelectorAll(".door-pin-edit-btn").forEach(btn => {
+      btn.addEventListener("click", () => {
+        selectPin('door', btn.dataset.id);
+        renderZones(); renderZonesEditor();
+      });
+    });
+
+    document.querySelectorAll(".door-pin-delete-btn").forEach(btn => {
+      btn.addEventListener("click", () => {
+        if (!confirm("Delete this door pin?")) return;
+        deleteDoorPin(btn.dataset.id);
+        renderZones(); renderZonesEditor();
+      });
+    });
+  } // end if (selectedZone && editorMode)
 
   // ── Undo / Export ────────────────────────────────────────
   document.getElementById("undoZonesBtn")?.addEventListener("click", undoZones);
@@ -4002,6 +4208,20 @@ function renderZonesEditor() {
 
 
 /* ─── DEVICE ROW HELPER ───────────────────────────────────── */
+// Door pin summary row in zone editor Doors tab
+function doorPinRow(pin) {
+  const sState = haStates[pin.sensor_entity]?.state;
+  const isOpen = sState === 'on';
+  const colour = sState === undefined ? '#555' : isOpen ? '#ff9500' : '#34c759';
+  return `<div class="ha-entity-row" data-door-pin-id="${escapeHtml(pin.id)}" style="flex-wrap:wrap;gap:4px;">
+    <div class="ha-entity-state" style="background:${colour};flex-shrink:0;"></div>
+    <span class="ha-entity-id" title="${escapeHtml(pin.sensor_entity||'')}">${escapeHtml(pin.name || pin.sensor_entity?.split('.').pop() || 'Door')}</span>
+    <span class="ha-entity-type" style="font-size:10px;color:#555;">${sState ? (isOpen?'OPEN':'CLOSED') : '—'}</span>
+    <button class="door-pin-edit-btn" data-id="${escapeHtml(pin.id)}" style="background:none;border:1px solid rgba(255,255,255,0.15);border-radius:4px;padding:2px 6px;cursor:pointer;font-size:10px;color:#888;flex-shrink:0;">Edit</button>
+    <button class="door-pin-delete-btn" data-id="${escapeHtml(pin.id)}" style="background:none;border:none;color:#ff3b30;cursor:pointer;font-size:12px;flex-shrink:0;">✕</button>
+  </div>`;
+}
+
 function deviceRow(entityId, devType) {
   const st = haStates[entityId];
   const stateStr  = st ? st.state : (haConnected ? "unavailable" : "—");
@@ -4703,6 +4923,7 @@ async function checkServerHealth() {
       await loadLights();
       await loadSirens();
       await loadCameraPins();
+      await loadDoorPins();
       if (haConnected) subscribeHAEntities();
       renderZones();
       if (editorMode) renderZonesEditor();
@@ -5050,8 +5271,9 @@ function connectHA() {
         }
 
         // Start pin animation loop when a light or siren entity changes state
-        const isPinEntity = [...lights, ...sirens].some(p => p.entity_id === data.entity_id);
-        if (isPinEntity) startPinAnimLoop();
+        const isPinEntity = [...lights, ...sirens].some(p => p.entity_id === data.entity_id)
+          || doorPins.some(p => p.sensor_entity === data.entity_id || p.control_entity === data.entity_id);
+        if (isPinEntity) { startPinAnimLoop(); renderZones(); }
       }
     }
   };
@@ -7110,6 +7332,7 @@ async function init() {
   await loadLights();
   await loadSirens();
   await loadCameraPins();
+  await loadDoorPins();
   // Load low-res camera map from dedicated file
   try {
     const r = await fetch(apiPath("ow/cam-low-res-map") + "?v=" + Date.now());
