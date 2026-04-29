@@ -170,9 +170,8 @@ function getActiveCameras() {
   const cfg   = OW.uiConfig;
 
   camMaxVisible = parseInt(cfg.cam_max_visible) || 0;
-  // Do NOT reset camLowResMap here — it's loaded once at init from cam_low_res.json
-  // and updated via setCamLowResMap. Resetting from uiConfig would overwrite saved values.
-  try { camPinned = new Set(JSON.parse(cfg.cam_pinned || '[]')); } catch {}
+  // Do NOT reset camLowResMap or camPinned here — both are loaded once at init
+  // and updated by their own handlers. Resetting from uiConfig overwrites saved values.
 
   const cooldownMs = (parseInt(localStorage.getItem("ow_cam_cooldown") || cfg.cam_cooldown) || 30) * 1000;
   const failHideMs = (parseInt(cfg.cam_fail_hide_seconds) || 5) * 1000;
