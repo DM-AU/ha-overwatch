@@ -992,7 +992,7 @@ function bindModal() {
     if (img && modeBtn && camModalEntityId) updateModalMode(img, modeBtn, camModalEntityId);
   });
 
-  document.getElementById('camModalPinBtn')?.addEventListener('click', async () => {
+  document.getElementById('camModalPinBtn')?.addEventListener('click', () => {
     if (!camModalEntityId) return;
     const OW = window.OW;
     const pinBtn = document.getElementById('camModalPinBtn');
@@ -1003,15 +1003,9 @@ function bindModal() {
       camPinned.add(camModalEntityId);
       pinBtn.textContent = '📌 Unpin';
     }
+    // Save to localStorage so pins survive browser refresh
+    localStorage.setItem('ow_cam_pinned', JSON.stringify([...camPinned]));
     OW.uiConfig.cam_pinned = JSON.stringify([...camPinned]);
-    // Persist to server so pins survive browser refresh
-    try {
-      await fetch(OW.apiPath('ow/save-config'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ filename: 'config/cam_pinned.json', content: JSON.stringify([...camPinned], null, 2) })
-      });
-    } catch(e) { console.warn('[CAM] Failed to save pinned cameras:', e); }
     renderCameraStatusBar();
     renderCameraGrid();
   });
@@ -1121,16 +1115,11 @@ async function initCameraPage() {
     try { camLowResMap = JSON.parse(OW.uiConfig.cam_low_res_map || '{}'); } catch { camLowResMap = {}; }
   }
 
-  try { camPinned = new Set(JSON.parse(OW.uiConfig.cam_pinned || '[]')); } catch {}
-
-  // Load pinned cameras from server file (survives browser refresh)
+  // Load pinned cameras — localStorage first (per-device, persists refresh), fall back to uiConfig
   try {
-    const pr = await fetch(OW.apiPath('ow/cam-pinned') + '?v=' + Date.now());
-    if (pr.ok) {
-      const pins = await pr.json();
-      if (Array.isArray(pins)) camPinned = new Set(pins);
-    }
-  } catch {}
+    const stored = localStorage.getItem('ow_cam_pinned');
+    camPinned = new Set(JSON.parse(stored || OW.uiConfig.cam_pinned || '[]'));
+  } catch { camPinned = new Set(); }
 
   // Expose for settings panel source toggle
   window.renderCameraStatusBar = renderCameraStatusBar;
