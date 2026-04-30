@@ -2896,7 +2896,6 @@ function makeDoorPin(pin, isEdit, scale) {
   g.style.cursor = 'pointer';
   g.style.pointerEvents = 'all';
 
-  // States
   const sensorState  = haStates[pin.sensor_entity]?.state;
   const isOpen       = sensorState === 'on';
   const noSensor     = !pin.sensor_entity;
@@ -2905,7 +2904,6 @@ function makeDoorPin(pin, isEdit, scale) {
   const isUnlocked   = controlState === 'unlocked' || controlState === 'on';
   const hasControl   = !!pin.control_entity;
 
-  // Colours: green=closed, settings colour=open
   const rootCS  = getComputedStyle(document.documentElement);
   const colOpen = noSensor ? '#888' : (rootCS.getPropertyValue('--color-door-open').trim() || '#ff6b35');
   const col     = noSensor ? '#888' : isOpen ? colOpen : '#34c759';
@@ -2916,35 +2914,31 @@ function makeDoorPin(pin, isEdit, scale) {
     return el;
   };
 
-  // Dimensions in SVG/image coordinates — scales WITH zoom like zones do.
-  // User sets size 1-10 to control how large the door is on the floorplan.
-  const sz  = Math.max(1, Math.min(10, pin.size || 3));
-  const W   = 10 + sz * 4;   // door opening width in image px: 14..50
-  const T   = sz * 0.5 + 1;  // panel stroke width
-  const sw  = sz * 0.3 + 0.5;// arc/detail stroke
-  const jT  = sz * 0.4 + 0.5;// jamb stroke
-  const jH  = sz * 1.2 + 2;  // jamb half-height
-  const dot = jT;             // hinge dot radius
+  // W = opening width (X), D = swing depth (Y). Independent controls.
+  const W   = Math.max(4, pin.sizeW || 20);  // opening width in image coords
+  const D   = Math.max(4, pin.sizeD || W);   // swing/depth in image coords
+  const T   = Math.max(0.8, W * 0.07);       // panel stroke proportional to width
+  const jT  = T * 0.8;                        // jamb stroke
+  const jH  = T * 2.5;                        // jamb half-height
+  const sw  = T * 0.5;                        // arc/detail stroke
 
-  const doorType = pin.doorType || 'single';
-  const doorHand = pin.doorHand || 'left';
+  const doorType  = pin.doorType || 'single';
+  const doorHand  = pin.doorHand || 'left';
   const isSliding = doorType === 'sliding';
   const isDouble  = doorType === 'double';
 
-  // Pin at centre of door opening
   const cx = pin.x, cy = pin.y;
   const rot = pin.rotation || 0;
-
   const iconG = mk('g', { transform: `translate(${cx},${cy}) rotate(${rot})` });
 
-  // Aura when open — centred at the swing midpoint
+  // Aura when open — centred on mid-point of swing area
   if (isOpen && !isEdit) {
     const auraCX = 0;
-    const auraCY = isDouble ? 0 : -W / 2;
+    const auraCY = isDouble ? 0 : -D / 2;
     [0, 0.55].forEach(delay => {
-      const a = mk('circle', { cx:auraCX, cy:auraCY, r: W * 0.3,
-        fill:'none', stroke:colOpen, 'stroke-width': T * 1.2,
-        'stroke-opacity': '0.7' });
+      const a = mk('circle', { cx:auraCX, cy:auraCY, r: W * 0.1,
+        fill:'none', stroke:colOpen, 'stroke-width': Math.max(0.5, T * 0.4),
+        'stroke-opacity': '0.8' });
       a.classList.add('door-aura-ring');
       if (delay) a.style.animationDelay = delay + 's';
       iconG.appendChild(a);
@@ -2955,89 +2949,81 @@ function makeDoorPin(pin, isEdit, scale) {
     // Jambs at each end
     iconG.appendChild(mk('line', { x1:-W/2, y1:-jH, x2:-W/2, y2:jH, stroke:col, 'stroke-width':jT*1.5 }));
     iconG.appendChild(mk('line', { x1: W/2, y1:-jH, x2: W/2, y2:jH, stroke:col, 'stroke-width':jT*1.5 }));
-    // Dashed track
-    iconG.appendChild(mk('line', { x1:-W/2, y1:0, x2:W/2, y2:0, stroke:col, 'stroke-width':jT*0.4, 'stroke-dasharray':`${sz},${sz*0.7}` }));
+    // Track line
+    iconG.appendChild(mk('line', { x1:-W/2, y1:0, x2:W/2, y2:0, stroke:col, 'stroke-width':jT*0.3, 'stroke-dasharray':`${T*1.5},${T}` }));
     if (isOpen) {
-      // Panel pushed to one side — clear gap visible
+      // Panel at one end, gap visible
       const panW = W * 0.45;
-      iconG.appendChild(mk('rect', { x:-W/2, y:-T, width:panW, height:T*2, fill:col, 'fill-opacity':'0.4', stroke:col, 'stroke-width':sw*0.6 }));
-      // Dashed gap showing open space
-      iconG.appendChild(mk('line', { x1:-W/2+panW+sz, y1:0, x2:W/2, y2:0, stroke:col, 'stroke-width':sw*1.5, 'stroke-dasharray':`${sz},${sz}` }));
+      iconG.appendChild(mk('rect', { x:-W/2, y:-T, width:panW, height:T*2, fill:col, 'fill-opacity':'0.45', stroke:col, 'stroke-width':sw }));
+      iconG.appendChild(mk('line', { x1:-W/2+panW+T, y1:0, x2:W/2, y2:0, stroke:col, 'stroke-width':sw*1.5, 'stroke-dasharray':`${T},${T}` }));
     } else {
       // Panel spans full opening
-      iconG.appendChild(mk('rect', { x:-W/2, y:-T, width:W, height:T*2, fill:col, 'fill-opacity':'0.2', stroke:col, 'stroke-width':sw*0.6 }));
+      iconG.appendChild(mk('rect', { x:-W/2, y:-T, width:W, height:T*2, fill:col, 'fill-opacity':'0.2', stroke:col, 'stroke-width':sw }));
     }
 
   } else if (isDouble) {
-    // Jambs at outer edges
-    iconG.appendChild(mk('line', { x1:-W, y1:-jH, x2:-W, y2:jH, stroke:col, 'stroke-width':jT*1.5 }));
-    iconG.appendChild(mk('line', { x1: W, y1:-jH, x2: W, y2:jH, stroke:col, 'stroke-width':jT*1.5 }));
+    // Two panels — total width = W, each half = W/2, depth = D
+    const hw = W / 2;  // half width = each panel length
+    iconG.appendChild(mk('line', { x1:-W/2, y1:-jH, x2:-W/2, y2:jH, stroke:col, 'stroke-width':jT*1.5 }));
+    iconG.appendChild(mk('line', { x1: W/2, y1:-jH, x2: W/2, y2:jH, stroke:col, 'stroke-width':jT*1.5 }));
 
-    [[-W,'left'],[W,'right']].forEach(([hx,side]) => {
+    [[-W/2,'left'],[W/2,'right']].forEach(([hx, side]) => {
       const fx    = 0;
       const sweep = side === 'left' ? 0 : 1;
-      iconG.appendChild(mk('circle', { cx:hx, cy:0, r:dot, fill:col }));
+      const panelDX = side === 'left' ? hw : -hw;
+      iconG.appendChild(mk('circle', { cx:hx, cy:0, r:jT, fill:col }));
       if (isOpen) {
-        const angle   = side === 'left' ? -90 : 90;
-        const panelDX = side === 'left' ? W : -W;
+        const angle = side === 'left' ? -90 : 90;
         const pg = mk('g', { transform:`rotate(${angle},${hx},0)` });
         pg.appendChild(mk('line', { x1:hx, y1:0, x2:hx+panelDX, y2:0, stroke:col, 'stroke-width':T*1.5 }));
         iconG.appendChild(pg);
         iconG.appendChild(mk('path', {
-          d:`M ${hx} ${-W} A ${W} ${W} 0 0 ${sweep} ${fx} 0`,
-          fill:'none', stroke:col, 'stroke-width':sw, 'stroke-dasharray':`${sz*1.5},${sz}`
+          d:`M ${hx} ${-D} A ${D} ${D} 0 0 ${sweep} ${fx} 0`,
+          fill:'none', stroke:col, 'stroke-width':sw, 'stroke-dasharray':`${T*1.5},${T}`
         }));
       } else {
-        // Closed — solid panel line, no arc
         iconG.appendChild(mk('line', { x1:hx, y1:0, x2:fx, y2:0, stroke:col, 'stroke-width':T*1.5 }));
       }
     });
 
   } else {
-    // Single door — hinge at left or right of centre
+    // Single — hinge at left or right of centre, panel length = D
     const hx    = doorHand === 'left' ? -W/2 : W/2;
     const fx    = doorHand === 'left' ?  W/2 : -W/2;
     const sweep = doorHand === 'left' ? 0 : 1;
-    const panelDX = doorHand === 'left' ? W : -W;
+    const panelDX = doorHand === 'left' ? D : -D;
 
-    // Jambs
     iconG.appendChild(mk('line', { x1:-W/2, y1:-jH, x2:-W/2, y2:jH, stroke:col, 'stroke-width':jT*1.5 }));
     iconG.appendChild(mk('line', { x1: W/2, y1:-jH, x2: W/2, y2:jH, stroke:col, 'stroke-width':jT*1.5 }));
-    // Hinge
-    iconG.appendChild(mk('circle', { cx:hx, cy:0, r:dot, fill:col }));
+    iconG.appendChild(mk('circle', { cx:hx, cy:0, r:jT, fill:col }));
 
     if (isOpen) {
-      // Panel rotated 90° — perpendicular to wall, no line across opening
       const angle = doorHand === 'left' ? -90 : 90;
       const pg = mk('g', { transform:`rotate(${angle},${hx},0)` });
       pg.appendChild(mk('line', { x1:hx, y1:0, x2:hx+panelDX, y2:0, stroke:col, 'stroke-width':T*1.5 }));
       iconG.appendChild(pg);
-      // Dashed arc showing swing path
       iconG.appendChild(mk('path', {
-        d:`M ${hx} ${-W} A ${W} ${W} 0 0 ${sweep} ${fx} 0`,
-        fill:'none', stroke:col, 'stroke-width':sw, 'stroke-dasharray':`${sz*1.5},${sz}`
+        d:`M ${hx} ${-D} A ${D} ${D} 0 0 ${sweep} ${fx} 0`,
+        fill:'none', stroke:col, 'stroke-width':sw, 'stroke-dasharray':`${T*1.5},${T}`
       }));
     } else {
-      // Closed — solid panel line across opening, NO arc
+      // Closed — panel line only, no arc
       iconG.appendChild(mk('line', { x1:hx, y1:0, x2:fx, y2:0, stroke:col, 'stroke-width':T*1.5 }));
     }
   }
 
-  // Editor selection box
   if (isEdit) {
-    const bw = isDouble ? W*2 : W;
-    const bx = isDouble ? -W : -W/2;
+    const bw = isDouble ? W : W;
     iconG.appendChild(mk('rect', {
-      x:bx-dot*2, y:-W-dot*2, width:bw+dot*4, height:W+dot*4,
+      x:-W/2-jT, y:-D-jT, width:W+jT*2, height:D+jT*2,
       fill:'none', stroke:'#0096ff', 'stroke-width':1.5/scale,
-      rx:2, 'stroke-dasharray':`4,3`
+      rx:1.5/scale, 'stroke-dasharray':`${3/scale},${2/scale}`
     }));
   }
 
-  // Lock badge
   if (hasControl && controlState) {
-    const br = sz * 0.6 + 2.5;
-    const bx = isDouble ? W+br*1.5 : W/2+br*1.5;
+    const br = Math.max(3, W * 0.12);
+    const bx = W/2 + br*1.5;
     const by = -br;
     const lc = isLocked ? '#ff3b30' : '#34c759';
     iconG.appendChild(mk('circle', { cx:bx, cy:by, r:br, fill:'rgba(10,10,10,0.9)', stroke:lc, 'stroke-width':0.8 }));
@@ -3048,7 +3034,6 @@ function makeDoorPin(pin, isEdit, scale) {
 
   g.appendChild(iconG);
 
-  // Interaction
   if (editorMode) {
     makePinDraggable(g, pin, 'door');
   } else {
@@ -3068,7 +3053,6 @@ function makeDoorPin(pin, isEdit, scale) {
       }
     });
   }
-
   return g;
 }
 
@@ -3538,7 +3522,9 @@ function renderZonesEditor() {
   const hasSelection = !!(selectedZone || selectedGroup || activePinId);
   // Use saved size if user has customised it, otherwise default narrow when nothing selected
   const hasSavedSize = localStorage.getItem('editorW') !== null;
-  const editorW = (hasSelection || hasSavedSize) ? editorSize.w : 260;
+  const rawW    = (hasSelection || hasSavedSize) ? editorSize.w : 260;
+  // When something is selected, guarantee both panels fit
+  const editorW  = (hasSelection && rawW < 420) ? 420 : rawW;
   const editorH = editorSize.h;
 
   // ── Build left panel zone list with group headers ──────────
@@ -3663,8 +3649,13 @@ function renderZonesEditor() {
           </div>
         </div>
         <div style="margin-top:8px;">
-          <label style="font-size:12px;color:#aaa;">Size <span id="pinSizeVal" style="color:#64b4ff;font-weight:600;">${pin.size||2}</span></label>
-          <input id="pinSizeInput" type="range" min="1" max="10" step="1" value="${pin.size||3}"
+          <label style="font-size:12px;color:#aaa;">Width (opening) <span id="pinSizeWVal" style="color:#64b4ff;font-weight:600;">${pin.sizeW||20}</span></label>
+          <input id="pinSizeWInput" type="range" min="4" max="100" step="1" value="${pin.sizeW||20}"
+            style="width:100%;accent-color:#64b4ff;margin-top:4px;display:block;">
+        </div>
+        <div style="margin-top:6px;">
+          <label style="font-size:12px;color:#aaa;">Depth (swing) <span id="pinSizeDVal" style="color:#64b4ff;font-weight:600;">${pin.sizeD||(pin.sizeW||20)}</span></label>
+          <input id="pinSizeDInput" type="range" min="4" max="100" step="1" value="${pin.sizeD||(pin.sizeW||20)}"
             style="width:100%;accent-color:#64b4ff;margin-top:4px;display:block;">
         </div>
         <div style="margin-top:8px;">
@@ -4133,17 +4124,29 @@ function renderZonesEditor() {
         document.getElementById('doorHandRight')?.addEventListener('click', () => {
           pin.doorHand = 'right'; savePin(); renderZones(); renderZonesEditor();
         });
-        // Size slider
-        const sizeEl  = document.getElementById('pinSizeInput');
-        const sizeVal = document.getElementById('pinSizeVal');
-        if (sizeEl) {
-          sizeEl.addEventListener('input', e => {
+        // Width slider
+        const sizeWEl = document.getElementById('pinSizeWInput');
+        const sizeWVal = document.getElementById('pinSizeWVal');
+        if (sizeWEl) {
+          sizeWEl.addEventListener('input', e => {
             e.stopPropagation();
-            pin.size = Number(e.target.value);
-            if (sizeVal) sizeVal.textContent = pin.size;
+            pin.sizeW = Number(e.target.value);
+            if (sizeWVal) sizeWVal.textContent = pin.sizeW;
             renderZones();
           });
-          sizeEl.addEventListener('change', () => savePin());
+          sizeWEl.addEventListener('change', () => savePin());
+        }
+        // Depth slider
+        const sizeDEl = document.getElementById('pinSizeDInput');
+        const sizeDVal = document.getElementById('pinSizeDVal');
+        if (sizeDEl) {
+          sizeDEl.addEventListener('input', e => {
+            e.stopPropagation();
+            pin.sizeD = Number(e.target.value);
+            if (sizeDVal) sizeDVal.textContent = pin.sizeD;
+            renderZones();
+          });
+          sizeDEl.addEventListener('change', () => savePin());
         }
       }
       document.getElementById('pinEntityInput')?.addEventListener('keydown', e => e.stopPropagation());
@@ -6690,20 +6693,23 @@ function renderSettingsPanel() {
 
   document.getElementById("settingsSaveAlarmBtn")?.addEventListener("click",   () => saveYaml("alarmSaveStatus"));
 
-  // ── Zone Colours collapsible — use delegation so it always fires ──
-  panel.addEventListener('click', e => {
-    const toggle = e.target.closest('#zoneColourToggle');
-    if (!toggle) return;
-    const body    = document.getElementById('zoneColourBody');
-    const chevron = document.getElementById('zoneColourChevron');
-    if (!body) return;
-    const open = body.style.display === 'none' || body.style.display === '';
-    body.style.display    = open ? 'block' : 'none';
-    if (chevron) chevron.style.transform = open ? 'rotate(180deg)' : '';
-    localStorage.setItem('ow_zone_colour_open', open);
-  }, true); // capture phase so it fires before any child stopPropagation
-
-  // Set initial state
+  // ── Zone Colours collapsible ─────────────────────────────────
+  // Use document-level delegation so it works regardless of tab state
+  if (!window._zoneColourDelegationBound) {
+    window._zoneColourDelegationBound = true;
+    document.addEventListener('click', e => {
+      const toggle = e.target.closest('#zoneColourToggle');
+      if (!toggle) return;
+      const body    = document.getElementById('zoneColourBody');
+      const chevron = document.getElementById('zoneColourChevron');
+      if (!body) return;
+      const open = body.style.display === 'none' || body.style.display === '';
+      body.style.display    = open ? 'block' : 'none';
+      if (chevron) chevron.style.transform = open ? 'rotate(180deg)' : '';
+      localStorage.setItem('ow_zone_colour_open', String(open));
+    });
+  }
+  // Set initial open state
   const _zcb = document.getElementById('zoneColourBody');
   const _zcc = document.getElementById('zoneColourChevron');
   const _zcOpen = localStorage.getItem('ow_zone_colour_open') !== 'false';
