@@ -2017,6 +2017,25 @@ function openWSProxy(socket, haToken) {
 
     // Browser → HA: intercept auth message and replace token
     function processBrowserData(chunk) {
+      // Always inspect browser data for auth messages first — even after authState=done.
+      // The browser sends its auth token AFTER receiving auth_ok (because it processed
+      // auth_required → sends auth token). By then authState is already "done" and without
+      // this guard the browser's auth message gets forwarded to HA, which closes the
+      // connection with code 1000 since it already authenticated successfully.
+      const parsed = tryParseWsFrame(chunk);
+      if (parsed !== null) {
+        try {
+          const msg = JSON.parse(parsed);
+          if (msg.type === "auth") {
+            // Silently discard — proxy already authenticated via SUPERVISOR_TOKEN.
+            // Never forward browser auth messages to HA regardless of authState.
+            if (authState !== "done") broBuf = Buffer.alloc(0);
+            console.log("[HA-Overwatch] WS proxy: suppressed browser auth message (authState=" + authState + ")");
+            return;
+          }
+        } catch {}
+      }
+
       if (authState === "done") { try { haSocket.write(chunk); } catch {} return; }
 
       // Buffer browser data during auth exchange
@@ -2057,6 +2076,35 @@ function openWSProxy(socket, haToken) {
 }
 
 // Extract payload string from a WebSocket frame (text frames only, unmasked)
+// Try to parse the FIRST WebSocket text frame from buf (handles masked browser frames).
+// Returns the payload string if a complete frame is found, null otherwise.
+// Unlike extractWsPayload, this handles masked frames from the browser side.
+function tryParseWsFrame(buf) {
+  if (buf.length < 2) return null;
+  const opcode = buf[0] & 0x0f;
+  if (opcode !== 1) return null; // only text frames
+  const masked = (buf[1] & 0x80) !== 0;
+  let len = buf[1] & 0x7f;
+  let offset = 2;
+  if (len === 126) {
+    if (buf.length < 4) return null;
+    len = buf.readUInt16BE(2); offset = 4;
+  } else if (len === 127) {
+    if (buf.length < 10) return null;
+    const hi = buf.readUInt32BE(2); const lo = buf.readUInt32BE(6);
+    if (hi > 0) return null;
+    len = lo; offset = 10;
+  }
+  if (masked) offset += 4;
+  if (buf.length < offset + len) return null;
+  const payload = Buffer.from(buf.slice(offset, offset + len));
+  if (masked) {
+    const mask = buf.slice(offset - 4, offset);
+    for (let i = 0; i < payload.length; i++) payload[i] ^= mask[i % 4];
+  }
+  return payload.toString("utf8");
+}
+
 function extractWsPayload(buf) {
   if (buf.length < 2) return null;
   const firstByte  = buf[0];

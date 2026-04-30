@@ -14,6 +14,7 @@ let _draft        = null;   // working copy
 let _haEntities   = [];
 let _listSearch   = '';     // list-view filter
 let _collapsed    = { triggers:false, conditions:false, actions:false };
+let _collapsedSteps = {}; // stepId -> bool
 
 /* ── Admin guard ──────────────────────────────────────────── */
 function isAdmin() { return !document.querySelector('meta[name="ow-direct"]'); }
@@ -263,7 +264,7 @@ function renderList() {
       ${filtered.length===0 ? (_listSearch ? '<div style="color:#444;padding:20px;text-align:center;font-size:13px;">No automations match your search.</div>' : emptyState()) : filtered.map(autoCard).join('')}
     </div>`;
 
-  _panelEl.querySelector('#owAutoNewBtn').onclick = ()=>{ _editing='new';_draft=newDraft();renderEditor(); };
+  _panelEl.querySelector('#owAutoNewBtn').onclick = ()=>{ _editing='new';_draft=newDraft();_collapsedSteps={};renderEditor(); };
   _panelEl.querySelector('#owAutoCloseBtn').onclick = close;
   const searchEl = _panelEl.querySelector('#owAutoListSearch');
   searchEl.oninput = ()=>{ _listSearch=searchEl.value; renderList(); };
@@ -271,7 +272,7 @@ function renderList() {
 
   filtered.forEach(a=>{
     _panelEl.querySelector(`[data-auto-edit="${a.id}"]`)?.addEventListener('click',()=>{
-      _editing=a.id;_draft=JSON.parse(JSON.stringify(a));renderEditor();
+      _editing=a.id;_draft=JSON.parse(JSON.stringify(a));_collapsedSteps={};renderEditor();
     });
     _panelEl.querySelector(`[data-auto-del="${a.id}"]`)?.addEventListener('click',async e=>{
       e.stopPropagation();
@@ -376,6 +377,11 @@ function renderEditor() {
   // Section collapse toggles
   _panelEl.querySelectorAll('[data-section-toggle]').forEach(btn=>{
     btn.onclick=()=>{ const s=btn.dataset.sectionToggle; _collapsed[s]=!_collapsed[s]; renderEditorKeepScroll(); };
+  });
+
+  // Step-level collapse toggles
+  _panelEl.querySelectorAll('[data-step-collapse]').forEach(btn=>{
+    btn.onclick=()=>{ const id=btn.dataset.stepCollapse; _collapsedSteps[id]=!_collapsedSteps[id]; renderEditorKeepScroll(); };
   });
 
   // Add/remove step buttons (don't scroll to top)
@@ -938,12 +944,15 @@ function stepCard(stepId,label,inner,removeType){
   const colors={trigger:'#0064d2',cond:'#9b59b6',action:'#27ae60'};
   const color=colors[removeType]||'#555';
   const ra={trigger:`data-remove-trigger="${escH(stepId)}"`,cond:`data-remove-cond="${escH(stepId)}"`,action:`data-remove-action="${escH(stepId)}"`}[removeType]||'';
-  return `<div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.07);border-left:3px solid ${color};border-radius:8px;padding:11px 13px;margin-bottom:7px;">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
-      <span style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:${color};">${escH(label)}</span>
-      <button ${ra} style="background:none;border:none;color:#444;cursor:pointer;font-size:14px;padding:0 2px;line-height:1;" title="Remove">✕</button>
+  const collapsed = !!_collapsedSteps[stepId];
+  return `<div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.07);border-left:3px solid ${color};border-radius:8px;padding:10px 12px;margin-bottom:7px;">
+    <div style="display:flex;align-items:center;justify-content:space-between;${collapsed?'':'margin-bottom:10px;'}">
+      <button data-step-collapse="${escH(stepId)}" style="background:none;border:none;color:${color};cursor:pointer;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;padding:0;text-align:left;flex:1;" title="${collapsed?'Expand':'Collapse'}">
+        ${collapsed?'▶':'▼'} ${escH(label)}
+      </button>
+      <button ${ra} style="background:none;border:none;color:#3a3a3a;cursor:pointer;font-size:14px;padding:0 2px;line-height:1;margin-left:8px;" title="Remove" onmouseenter="this.style.color='#ff453a'" onmouseleave="this.style.color='#3a3a3a'">✕</button>
     </div>
-    ${inner}
+    ${collapsed?'':`<div>${inner}</div>`}
   </div>`;
 }
 
