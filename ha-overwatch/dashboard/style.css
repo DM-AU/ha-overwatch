@@ -779,16 +779,7 @@ display: flex;
 }
 
 /* ── Siren ring pulse ───────────────────────────────────────── */
-/* Door open aura animation — uses scale transform, not r attribute */
-@keyframes door-aura-pulse {
-  0%   { transform: scale(0.2); opacity: 0.7; }
-  100% { transform: scale(4);   opacity: 0; }
-}
-.door-aura-ring {
-  animation: door-aura-pulse 1.2s ease-out infinite;
-  transform-box: fill-box;
-  transform-origin: center;
-}
+/* Door open aura uses time-based rendering like sirens (see startPinAnimLoop) */
 
 @keyframes siren-ring {
   0%   { r: var(--ring-start, 14px); opacity: 0.8; }

@@ -2914,13 +2914,12 @@ function makeDoorPin(pin, isEdit, scale) {
     return el;
   };
 
-  // W = opening width (X), D = swing depth (Y). Independent controls.
-  const W   = Math.max(4, pin.sizeW || 20);  // opening width in image coords
-  const D   = Math.max(4, pin.sizeD || W);   // swing/depth in image coords
-  const T   = Math.max(0.8, W * 0.07);       // panel stroke proportional to width
-  const jT  = T * 0.8;                        // jamb stroke
-  const jH  = T * 2.5;                        // jamb half-height
-  const sw  = T * 0.5;                        // arc/detail stroke
+  // W = opening width (horizontal), H = frame height (vertical thickness on map)
+  // Both in image coordinates — scale WITH zoom like zones
+  const W   = Math.max(4, pin.sizeW || 20);   // door opening width
+  const H   = Math.max(2, pin.sizeH || 4);    // frame/jamb height (thickness of wall)
+  const T   = Math.max(0.6, W * 0.06);        // stroke width proportional
+  const jT  = T * 1.2;                         // jamb stroke
 
   const doorType  = pin.doorType || 'single';
   const doorHand  = pin.doorHand || 'left';
@@ -2931,100 +2930,144 @@ function makeDoorPin(pin, isEdit, scale) {
   const rot = pin.rotation || 0;
   const iconG = mk('g', { transform: `translate(${cx},${cy}) rotate(${rot})` });
 
-  // Aura when open — centred on mid-point of swing area
+  // Aura when open — same as siren: 3 expanding rings driven by time
   if (isOpen && !isEdit) {
-    const auraCX = 0;
-    const auraCY = isDouble ? 0 : -D / 2;
-    [0, 0.55].forEach(delay => {
-      const a = mk('circle', { cx:auraCX, cy:auraCY, r: W * 0.1,
-        fill:'none', stroke:colOpen, 'stroke-width': Math.max(0.5, T * 0.4),
-        'stroke-opacity': '0.8' });
-      a.classList.add('door-aura-ring');
-      if (delay) a.style.animationDelay = delay + 's';
-      iconG.appendChild(a);
+    const auraRadius = pin.auraRadius || 3;
+    const maxRingR   = W * (0.5 + auraRadius * 0.3);
+    const minRingR   = W * 0.15;
+    const ringPhase  = (Date.now() % 1600) / 1600;
+    const auraCX     = 0;
+    const auraCY     = isDouble ? 0 : -W / 2;
+    // Radial glow
+    const glowId = `dg-${pin.id}`;
+    const defs = mk('defs', {});
+    const grad = mk('radialGradient', { id: glowId, cx:'50%', cy:'50%', r:'50%' });
+    const s1 = mk('stop', { offset:'0%', 'stop-color':colOpen, 'stop-opacity':'0.25' });
+    const s2 = mk('stop', { offset:'100%', 'stop-color':colOpen, 'stop-opacity':'0' });
+    grad.appendChild(s1); grad.appendChild(s2); defs.appendChild(grad); iconG.appendChild(defs);
+    const glow = mk('ellipse', { cx:auraCX, cy:auraCY, rx:maxRingR, ry:maxRingR, fill:`url(#${glowId})` });
+    iconG.appendChild(glow);
+    [0, 0.33, 0.66].forEach(offset => {
+      const phase = (ringPhase + offset) % 1;
+      const r     = minRingR + (maxRingR - minRingR) * phase;
+      const op    = Math.max(0, 0.7 * (1 - phase));
+      const ring  = mk('circle', { cx:auraCX, cy:auraCY, r, fill:'none', stroke:colOpen,
+        'stroke-width': T * 0.6, opacity: op });
+      iconG.appendChild(ring);
     });
   }
 
+  // Helper: draw wall rect (horizontal bar = door frame in top-down view)
+  // Wall spans from -W/2 to W/2 on X, and -H/2 to H/2 on Y
+  function drawWall(x1, x2) {
+    iconG.appendChild(mk('rect', {
+      x: x1, y: -H/2, width: x2-x1, height: H,
+      fill: col, 'fill-opacity': '0.35', stroke: col, 'stroke-width': T*0.4
+    }));
+  }
+
   if (isSliding) {
-    // Jambs at each end
-    iconG.appendChild(mk('line', { x1:-W/2, y1:-jH, x2:-W/2, y2:jH, stroke:col, 'stroke-width':jT*1.5 }));
-    iconG.appendChild(mk('line', { x1: W/2, y1:-jH, x2: W/2, y2:jH, stroke:col, 'stroke-width':jT*1.5 }));
-    // Track line
-    iconG.appendChild(mk('line', { x1:-W/2, y1:0, x2:W/2, y2:0, stroke:col, 'stroke-width':jT*0.3, 'stroke-dasharray':`${T*1.5},${T}` }));
+    // Full frame rect (door in wall)
+    drawWall(-W/2, W/2);
     if (isOpen) {
-      // Panel at one end, gap visible
-      const panW = W * 0.45;
-      iconG.appendChild(mk('rect', { x:-W/2, y:-T, width:panW, height:T*2, fill:col, 'fill-opacity':'0.45', stroke:col, 'stroke-width':sw }));
-      iconG.appendChild(mk('line', { x1:-W/2+panW+T, y1:0, x2:W/2, y2:0, stroke:col, 'stroke-width':sw*1.5, 'stroke-dasharray':`${T},${T}` }));
+      // Panel shifted — show as rect at one end, lighter
+      iconG.appendChild(mk('rect', {
+        x: -W/2, y: -H/2, width: W*0.45, height: H,
+        fill: col, 'fill-opacity': '0.7', stroke: col, 'stroke-width': T*0.5
+      }));
+      // Gap indication
+      iconG.appendChild(mk('line', { x1: -W/2+W*0.45+T, y1:0, x2:W/2, y2:0,
+        stroke: col, 'stroke-width': T*0.5, 'stroke-dasharray':`${T*1.5},${T}` }));
     } else {
-      // Panel spans full opening
-      iconG.appendChild(mk('rect', { x:-W/2, y:-T, width:W, height:T*2, fill:col, 'fill-opacity':'0.2', stroke:col, 'stroke-width':sw }));
+      // Panel fills full opening — darker overlay
+      iconG.appendChild(mk('rect', {
+        x: -W/2+T, y: -H/2+T, width: W-T*2, height: H-T*2,
+        fill: col, 'fill-opacity': '0.5', stroke: 'none'
+      }));
     }
 
   } else if (isDouble) {
-    // Two panels — total width = W, each half = W/2, depth = D
-    const hw = W / 2;  // half width = each panel length
-    iconG.appendChild(mk('line', { x1:-W/2, y1:-jH, x2:-W/2, y2:jH, stroke:col, 'stroke-width':jT*1.5 }));
-    iconG.appendChild(mk('line', { x1: W/2, y1:-jH, x2: W/2, y2:jH, stroke:col, 'stroke-width':jT*1.5 }));
+    // Frame rect at each side (jambs), gap in middle
+    drawWall(-W/2, -W/2+H);   // left jamb
+    drawWall( W/2-H,  W/2);   // right jamb
 
     [[-W/2,'left'],[W/2,'right']].forEach(([hx, side]) => {
       const fx    = 0;
       const sweep = side === 'left' ? 0 : 1;
-      const panelDX = side === 'left' ? hw : -hw;
-      iconG.appendChild(mk('circle', { cx:hx, cy:0, r:jT, fill:col }));
+      const panelL = W/2 - H; // panel length = half opening minus jamb
+
       if (isOpen) {
-        const angle = side === 'left' ? -90 : 90;
-        const pg = mk('g', { transform:`rotate(${angle},${hx},0)` });
-        pg.appendChild(mk('line', { x1:hx, y1:0, x2:hx+panelDX, y2:0, stroke:col, 'stroke-width':T*1.5 }));
+        // Panel swung perpendicular at hinge corner
+        const angle   = side === 'left' ? -90 : 90;
+        const panelDX = side === 'left' ? panelL : -panelL;
+        const hingeX  = side === 'left' ? -W/2+H : W/2-H;
+        const pg = mk('g', { transform:`rotate(${angle},${hingeX},0)` });
+        pg.appendChild(mk('line', { x1:hingeX, y1:0, x2:hingeX+panelDX, y2:0,
+          stroke:col, 'stroke-width':T*1.5 }));
         iconG.appendChild(pg);
+        // Arc
         iconG.appendChild(mk('path', {
-          d:`M ${hx} ${-D} A ${D} ${D} 0 0 ${sweep} ${fx} 0`,
-          fill:'none', stroke:col, 'stroke-width':sw, 'stroke-dasharray':`${T*1.5},${T}`
+          d:`M ${hingeX} ${-panelL} A ${panelL} ${panelL} 0 0 ${sweep} ${fx} 0`,
+          fill:'none', stroke:col, 'stroke-width':T*0.5, 'stroke-dasharray':`${T*1.5},${T}`
         }));
       } else {
-        iconG.appendChild(mk('line', { x1:hx, y1:0, x2:fx, y2:0, stroke:col, 'stroke-width':T*1.5 }));
+        // Panel line across half opening
+        const hingeX = side === 'left' ? -W/2+H : W/2-H;
+        iconG.appendChild(mk('line', { x1:hingeX, y1:0, x2:fx, y2:0,
+          stroke:col, 'stroke-width':T*1.5 }));
       }
     });
 
   } else {
-    // Single — hinge at left or right of centre, panel length = D
-    const hx    = doorHand === 'left' ? -W/2 : W/2;
-    const fx    = doorHand === 'left' ?  W/2 : -W/2;
-    const sweep = doorHand === 'left' ? 0 : 1;
-    const panelDX = doorHand === 'left' ? D : -D;
+    // Single door — frame rect on hinge side
+    const hingeX = doorHand === 'left' ? -W/2 : W/2-H;
+    const freeX  = doorHand === 'left' ?  W/2 : -W/2;
+    const sweep  = doorHand === 'left' ? 0 : 1;
+    const panelL = W - H;    // panel length = opening minus jamb thickness
+    const panelDX = doorHand === 'left' ? panelL : -panelL;
 
-    iconG.appendChild(mk('line', { x1:-W/2, y1:-jH, x2:-W/2, y2:jH, stroke:col, 'stroke-width':jT*1.5 }));
-    iconG.appendChild(mk('line', { x1: W/2, y1:-jH, x2: W/2, y2:jH, stroke:col, 'stroke-width':jT*1.5 }));
-    iconG.appendChild(mk('circle', { cx:hx, cy:0, r:jT, fill:col }));
+    // Jamb rect (wall portion with door frame)
+    drawWall(-W/2, W/2);
+
+    // Hinge point
+    iconG.appendChild(mk('circle', { cx: doorHand==='left' ? -W/2+H/2 : W/2-H/2, cy:0,
+      r: T*0.8, fill: col }));
 
     if (isOpen) {
-      const angle = doorHand === 'left' ? -90 : 90;
-      const pg = mk('g', { transform:`rotate(${angle},${hx},0)` });
-      pg.appendChild(mk('line', { x1:hx, y1:0, x2:hx+panelDX, y2:0, stroke:col, 'stroke-width':T*1.5 }));
+      // Panel rotated 90° from hinge face
+      const hFaceX = doorHand === 'left' ? -W/2+H : W/2-H;
+      const angle  = doorHand === 'left' ? -90 : 90;
+      const pg = mk('g', { transform:`rotate(${angle},${hFaceX},0)` });
+      pg.appendChild(mk('line', { x1:hFaceX, y1:0, x2:hFaceX+panelDX, y2:0,
+        stroke:col, 'stroke-width':T*1.5 }));
       iconG.appendChild(pg);
+      // Dashed arc
       iconG.appendChild(mk('path', {
-        d:`M ${hx} ${-D} A ${D} ${D} 0 0 ${sweep} ${fx} 0`,
-        fill:'none', stroke:col, 'stroke-width':sw, 'stroke-dasharray':`${T*1.5},${T}`
+        d:`M ${hFaceX} ${-panelL} A ${panelL} ${panelL} 0 0 ${sweep} ${freeX} 0`,
+        fill:'none', stroke:col, 'stroke-width':T*0.5, 'stroke-dasharray':`${T*1.5},${T}`
       }));
     } else {
-      // Closed — panel line only, no arc
-      iconG.appendChild(mk('line', { x1:hx, y1:0, x2:fx, y2:0, stroke:col, 'stroke-width':T*1.5 }));
+      // Panel line only across opening, no arc
+      const hFaceX = doorHand === 'left' ? -W/2+H : W/2-H;
+      iconG.appendChild(mk('line', { x1:hFaceX, y1:0, x2:freeX, y2:0,
+        stroke:col, 'stroke-width':T*1.5 }));
     }
   }
 
+  // Editor box
   if (isEdit) {
-    const bw = isDouble ? W : W;
     iconG.appendChild(mk('rect', {
-      x:-W/2-jT, y:-D-jT, width:W+jT*2, height:D+jT*2,
+      x:-W/2-T, y:-W/2-T, width:W+T*2, height:W/2+H/2+T*2,
       fill:'none', stroke:'#0096ff', 'stroke-width':1.5/scale,
       rx:1.5/scale, 'stroke-dasharray':`${3/scale},${2/scale}`
     }));
   }
 
+  // Lock badge
   if (hasControl && controlState) {
-    const br = Math.max(3, W * 0.12);
-    const bx = W/2 + br*1.5;
-    const by = -br;
+    const br = Math.max(2.5, W*0.1);
+    const bx = W/2+br*1.5;
+    const by = -H/2;
     const lc = isLocked ? '#ff3b30' : '#34c759';
     iconG.appendChild(mk('circle', { cx:bx, cy:by, r:br, fill:'rgba(10,10,10,0.9)', stroke:lc, 'stroke-width':0.8 }));
     const sym = mk('text', { x:bx, y:by+br*0.38, 'text-anchor':'middle', 'font-size':br*1.3, fill:lc, 'font-family':'sans-serif', style:'pointer-events:none;user-select:none' });
@@ -3485,7 +3528,8 @@ function startPinAnimLoop() {
     if (editorMode || _pinDragging) { _pinAnimRunning = false; return; }
     const hasActiveSirens = sirens.some(p => haStates[p.entity_id]?.state === 'on');
     const hasActiveLights = lights.some(p => haStates[p.entity_id]?.state === 'on');
-    if (hasActiveSirens || hasActiveLights) {
+    const hasOpenDoors    = doorPins.some(p => p.sensor_entity && haStates[p.sensor_entity]?.state === 'on');
+    if (hasActiveSirens || hasActiveLights || hasOpenDoors) {
       renderPins();
       if (getNumPanels() > 1) {
         const n = getNumPanels();
@@ -3649,14 +3693,22 @@ function renderZonesEditor() {
           </div>
         </div>
         <div style="margin-top:8px;">
-          <label style="font-size:12px;color:#aaa;">Width (opening) <span id="pinSizeWVal" style="color:#64b4ff;font-weight:600;">${pin.sizeW||20}</span></label>
+          <label style="font-size:12px;color:#aaa;">Width <span id="pinSizeWVal" style="color:#64b4ff;font-weight:600;">${pin.sizeW||20}</span></label>
           <input id="pinSizeWInput" type="range" min="4" max="100" step="1" value="${pin.sizeW||20}"
             style="width:100%;accent-color:#64b4ff;margin-top:4px;display:block;">
+          <div style="font-size:10px;color:#555;margin-top:1px;">Door opening width on map</div>
         </div>
         <div style="margin-top:6px;">
-          <label style="font-size:12px;color:#aaa;">Depth (swing) <span id="pinSizeDVal" style="color:#64b4ff;font-weight:600;">${pin.sizeD||(pin.sizeW||20)}</span></label>
-          <input id="pinSizeDInput" type="range" min="4" max="100" step="1" value="${pin.sizeD||(pin.sizeW||20)}"
+          <label style="font-size:12px;color:#aaa;">Height <span id="pinSizeDVal" style="color:#64b4ff;font-weight:600;">${pin.sizeH||4}</span></label>
+          <input id="pinSizeDInput" type="range" min="1" max="30" step="1" value="${pin.sizeH||4}"
             style="width:100%;accent-color:#64b4ff;margin-top:4px;display:block;">
+          <div style="font-size:10px;color:#555;margin-top:1px;">Frame/wall thickness on map</div>
+        </div>
+        <div style="margin-top:6px;">
+          <label style="font-size:12px;color:#aaa;">Aura radius <span id="pinAuraRadVal" style="color:#ff6b6b;font-weight:600;">${pin.auraRadius||3}</span></label>
+          <input id="pinAuraRadInput" type="range" min="1" max="10" step="1" value="${pin.auraRadius||3}"
+            style="width:100%;accent-color:#ff6b6b;margin-top:4px;display:block;">
+          <div style="font-size:10px;color:#555;margin-top:1px;">Open door aura size</div>
         </div>
         <div style="margin-top:8px;">
           <label style="font-size:12px;color:#aaa;">Rotation <span id="pinRotationVal" style="color:#64b4ff;font-weight:600;">${pin.rotation || 0}°</span></label>
@@ -4142,11 +4194,22 @@ function renderZonesEditor() {
         if (sizeDEl) {
           sizeDEl.addEventListener('input', e => {
             e.stopPropagation();
-            pin.sizeD = Number(e.target.value);
-            if (sizeDVal) sizeDVal.textContent = pin.sizeD;
+            pin.sizeH = Number(e.target.value);
+            if (sizeDVal) sizeDVal.textContent = pin.sizeH;
             renderZones();
           });
           sizeDEl.addEventListener('change', () => savePin());
+        }
+        const auraEl  = document.getElementById('pinAuraRadInput');
+        const auraVal = document.getElementById('pinAuraRadVal');
+        if (auraEl) {
+          auraEl.addEventListener('input', e => {
+            e.stopPropagation();
+            pin.auraRadius = Number(e.target.value);
+            if (auraVal) auraVal.textContent = pin.auraRadius;
+            renderZones();
+          });
+          auraEl.addEventListener('change', () => savePin());
         }
       }
       document.getElementById('pinEntityInput')?.addEventListener('keydown', e => e.stopPropagation());
