@@ -1618,11 +1618,16 @@ function isAlarmArmed() {
 
 function entityTypeColour(type) {
   const armed  = isAlarmArmed();
-  const prefix = armed ? "color_on_" : "color_off_";
+  // If alarm is disarmed but smoke/CO always-armed is enabled, treat smoke & CO as armed
+  const treatAsArmed = armed || (
+    (type === 'smoke' || type === 'co') &&
+    localStorage.getItem('ow_smoke_co_always_armed') === 'true'
+  );
+  const prefix = treatAsArmed ? "color_on_" : "color_off_";
   const newKey = prefix + type;
   // localStorage override → uiConfig value → hard-coded default
   const lsKey  = 'ow_' + newKey;
-  return localStorage.getItem(lsKey) || uiConfig[newKey] || (armed ? "#ff3b30" : "#4cd964");
+  return localStorage.getItem(lsKey) || uiConfig[newKey] || (treatAsArmed ? "#ff3b30" : "#4cd964");
 }
 
 // Always returns the disarmed (off) colour regardless of alarm state
@@ -3201,6 +3206,20 @@ function openZonePopup(zoneId, clientX, clientY) {
   // ── Make draggable via title bar ─────────────────────────
   renderZonePopupContent();
 
+  // ── Click-outside to close ────────────────────────────────
+  // Defer by one frame so the opening click doesn't immediately close it
+  requestAnimationFrame(() => {
+    function _outsideClose(e) {
+      if (_zonePopupEl && !_zonePopupEl.contains(e.target)) {
+        closeZonePopup();
+        document.removeEventListener('pointerdown', _outsideClose, true);
+      }
+    }
+    document.addEventListener('pointerdown', _outsideClose, true);
+    // Store ref so closeZonePopup can remove it if called programmatically
+    popup._outsideClose = _outsideClose;
+  });
+
   // Attach drag after content is rendered (need the titlebar)
   requestAnimationFrame(() => {
     const titlebar = popup.querySelector('#zpTitlebar');
@@ -3232,7 +3251,13 @@ function openZonePopup(zoneId, clientX, clientY) {
 
 function closeZonePopup() {
   if (_zonePopupTimer) { clearInterval(_zonePopupTimer); _zonePopupTimer = null; }
-  if (_zonePopupEl) { _zonePopupEl.remove(); _zonePopupEl = null; }
+  if (_zonePopupEl) {
+    if (_zonePopupEl._outsideClose) {
+      document.removeEventListener('pointerdown', _zonePopupEl._outsideClose, true);
+    }
+    _zonePopupEl.remove();
+    _zonePopupEl = null;
+  }
   _zonePopupZoneId = null;
 }
 
@@ -6159,6 +6184,11 @@ function renderSettingsPanel() {
               <input type="checkbox" id="hideDisarmedFlashChk" ${localStorage.getItem('ow_hide_disarmed_flash') === 'true' ? 'checked' : ''}>
               Hide flashing on disarmed zones with active sensors
             </label>
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:6px;">
+              <input type="checkbox" id="smokeCoAlwaysArmedChk" ${localStorage.getItem('ow_smoke_co_always_armed') === 'true' ? 'checked' : ''}>
+              Treat Smoke &amp; CO as always armed
+              <span style="font-size:11px;color:#777;margin-left:2px;">(use armed colours even when disarmed)</span>
+            </label>
           </div>
           <div class="settings-field">
             <label>Map icons</label>
@@ -6476,6 +6506,11 @@ function renderSettingsPanel() {
   // ── Map icon visibility ───────────────────────────────────────
   document.getElementById("hideDisarmedFlashChk")?.addEventListener("change", function() {
     localStorage.setItem('ow_hide_disarmed_flash', this.checked ? 'true' : 'false');
+    renderZones();
+  });
+
+  document.getElementById("smokeCoAlwaysArmedChk")?.addEventListener("change", function() {
+    localStorage.setItem('ow_smoke_co_always_armed', this.checked ? 'true' : 'false');
     renderZones();
   });
 
@@ -6955,6 +6990,26 @@ function runSearch(q) {
   resultsEl.querySelectorAll(".search-result").forEach(el => {
     el.onclick = () => focusZone(el.getAttribute("data-zone-id"));
   });
+
+  // Append automation results from automations.js if registered
+  if (window.OW?.automationSearch) {
+    const autoHits = window.OW.automationSearch(query);
+    if (autoHits.length) {
+      const autoFrag = document.createDocumentFragment();
+      const sep = document.createElement('div');
+      sep.style.cssText = 'font-size:10px;text-transform:uppercase;letter-spacing:0.1em;color:#444;padding:6px 10px 2px;';
+      sep.textContent = 'Automations';
+      autoFrag.appendChild(sep);
+      autoHits.slice(0, 10).forEach(h => {
+        const el = document.createElement('div');
+        el.className = 'search-result';
+        el.innerHTML = `<div class="search-result-title">${escapeHtml(h.label)}</div><div class="search-result-sub">${escapeHtml(h.sublabel||'')}</div>`;
+        el.onclick = () => { setSearchOpen(false); h.action?.(); };
+        autoFrag.appendChild(el);
+      });
+      resultsEl.appendChild(autoFrag);
+    }
+  }
 }
 
 function focusZone(zoneId) {
@@ -7653,6 +7708,16 @@ async function init() {
   if (IS_DIRECT_MODE) {
     const zonesBtn = document.getElementById("zonesBtn");
     if (zonesBtn) zonesBtn.style.display = "none";
+  }
+
+  // Automations button
+  const automationsBtn = document.getElementById("automationsBtn");
+  if (automationsBtn) {
+    automationsBtn.onclick = () => {
+      if (window.OW_Automations?.toggle) {
+        window.OW_Automations.toggle();
+      }
+    };
   }
 
   await loadZones();
