@@ -555,6 +555,125 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  /* ── /ow/automations — automation list r/w ─────────────────── */
+  if (pathname === "/ow/automations" && req.method === "GET") {
+    const p = path.join(CONFIG_DIR, "automations.json");
+    try {
+      json(res, JSON.parse(fs.readFileSync(p, "utf8")));
+    } catch {
+      json(res, []);
+    }
+    return;
+  }
+
+  if (pathname === "/ow/automations" && req.method === "POST") {
+    try {
+      const body = await readBody(req);
+      const list = Array.isArray(body) ? body : [];
+      const p = path.join(CONFIG_DIR, "automations.json");
+      fs.writeFileSync(p, JSON.stringify(list, null, 2), "utf8");
+      json(res, { ok: true });
+    } catch(e) {
+      console.error("[OW-Auto] Failed to save automations:", e.message);
+      err(res, "Failed to save automations", 500);
+    }
+    return;
+  }
+
+  /* ── /ow/push-automation — push one automation to HA REST API ── */
+  if (pathname === "/ow/push-automation" && req.method === "POST") {
+    try {
+      const auto = await readBody(req);
+      const cfg  = getHAConfig(loadConfig());
+      if (!cfg.ha_url && !process.env.SUPERVISOR_TOKEN) {
+        err(res, "HA not configured", 503); return;
+      }
+
+      // Build a valid HA automation config object from our draft format
+      const haAuto = buildHAAutomation(auto);
+      const haJson = JSON.stringify(haAuto);
+      const autoId = String(auto.id); // use our stable uid as HA automation id
+
+      // Determine host/port/token
+      let hostname, port, basePath, token;
+      if (process.env.SUPERVISOR_TOKEN) {
+        hostname = "supervisor"; port = 80; basePath = "/core"; token = process.env.SUPERVISOR_TOKEN;
+      } else {
+        const u = new URL(cfg.ha_url.replace(/\/$/, ""));
+        hostname = u.hostname; port = parseInt(u.port) || (u.protocol === "https:" ? 443 : 80);
+        basePath = ""; token = cfg.ha_token;
+      }
+
+      const apiPath_ = `${basePath}/api/config/automation/config/${autoId}`;
+      const haReq = (process.env.SUPERVISOR_TOKEN ? http : https).request({
+        hostname, port, method: "POST", path: apiPath_,
+        headers: {
+          "Authorization": `Bearer ${token}`,
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(haJson),
+        },
+      }, haRes => {
+        let d = "";
+        haRes.on("data", c => d += c);
+        haRes.on("end", () => {
+          console.log(`[OW-Auto] Push automation "${auto.name}" → HA ${haRes.statusCode}`);
+          if (haRes.statusCode >= 200 && haRes.statusCode < 300) {
+            // Also reload HA automations so it picks up the new one immediately
+            const reloadReq = (process.env.SUPERVISOR_TOKEN ? http : https).request({
+              hostname, port, method: "POST",
+              path: `${basePath}/api/services/automation/reload`,
+              headers: { "Authorization": `Bearer ${token}`, "Content-Length": "0" },
+            }, r => r.resume());
+            reloadReq.on("error", () => {});
+            reloadReq.end();
+            json(res, { ok: true, ha_status: haRes.statusCode });
+          } else {
+            console.warn(`[OW-Auto] HA rejected automation: ${haRes.statusCode} — ${d}`);
+            json(res, { ok: false, ha_status: haRes.statusCode, detail: d });
+          }
+        });
+      });
+      haReq.on("error", e => { console.error("[OW-Auto] Push error:", e.message); err(res, e.message, 502); });
+      haReq.write(haJson);
+      haReq.end();
+    } catch(e) {
+      console.error("[OW-Auto] Push-automation error:", e.message);
+      err(res, e.message, 500);
+    }
+    return;
+  }
+
+  /* ── /ow/delete-automation — remove from HA ─────────────────── */
+  if (pathname === "/ow/delete-automation" && req.method === "POST") {
+    try {
+      const { id } = await readBody(req);
+      const cfg = getHAConfig(loadConfig());
+      if (!cfg.ha_url && !process.env.SUPERVISOR_TOKEN) { json(res, { ok: true }); return; }
+      let hostname, port, basePath, token;
+      if (process.env.SUPERVISOR_TOKEN) {
+        hostname = "supervisor"; port = 80; basePath = "/core"; token = process.env.SUPERVISOR_TOKEN;
+      } else {
+        const u = new URL(cfg.ha_url.replace(/\/$/, ""));
+        hostname = u.hostname; port = parseInt(u.port) || (u.protocol === "https:" ? 443 : 80);
+        basePath = ""; token = cfg.ha_token;
+      }
+      const haReq = (process.env.SUPERVISOR_TOKEN ? http : https).request({
+        hostname, port, method: "DELETE",
+        path: `${basePath}/api/config/automation/config/${id}`,
+        headers: { "Authorization": `Bearer ${token}`, "Content-Length": "0" },
+      }, haRes => {
+        haRes.resume();
+        console.log(`[OW-Auto] Delete automation ${id} → HA ${haRes.statusCode}`);
+        json(res, { ok: true, ha_status: haRes.statusCode });
+      });
+      haReq.on("error", e => { json(res, { ok: false, detail: e.message }); });
+      haReq.end();
+    } catch(e) {
+      err(res, e.message, 500);
+    }
+    return;
+  }
+
   /* ── /ow/floors — floor list r/w ───────────────────────────── */
   if (pathname === "/ow/floors" && req.method === "GET") {
     json(res, loadFloors());
@@ -1979,6 +2098,111 @@ function sendWsFrame(sock, text) {
   else if (len < 65536) header = Buffer.from([0x81, 126, (len >> 8) & 0xff, len & 0xff]);
   else return;
   try { sock.write(Buffer.concat([header, payload])); } catch {}
+}
+
+
+/* ── Build HA automation config from OW draft ─────────────── */
+function buildHAAutomation(auto) {
+  const triggers    = [];
+  const conditions  = [];
+  const actions     = [];
+
+  // ── Triggers ──────────────────────────────────────────────
+  for (const t of (auto.triggers || [])) {
+    if (t.type === 'zone' || t.type === 'zone_arm') {
+      // Each selected zone generates a state trigger on its overwatch switch/binary sensor
+      const zoneIds = t.zone_ids || [];
+      const baseField = t.type === 'zone_arm' ? 'switch' : 'binary_sensor';
+      zoneIds.forEach(zid => {
+        triggers.push({
+          platform: "state",
+          entity_id: `${baseField}.overwatch_zone_${nameSlug(zid)}`,
+          to: t.type === 'zone_arm' ? (t.state === 'armed' ? 'on' : 'off') : (t.event === 'triggered' ? 'on' : 'off'),
+        });
+      });
+      // If no zones selected, trigger on any zone change
+      if (!zoneIds.length) {
+        triggers.push({ platform: "state", entity_id: `binary_sensor.overwatch_any_zone` });
+      }
+    } else if (t.type === 'person' || t.type === 'device') {
+      (t.entity_ids || []).forEach(eid => {
+        triggers.push({ platform: "state", entity_id: eid, to: t.state || 'home' });
+      });
+    } else if (t.type === 'entity') {
+      if (t.entity_id) {
+        triggers.push({ platform: "state", entity_id: t.entity_id, to: t.to || 'on' });
+      }
+    } else if (t.type === 'door' || t.type === 'window') {
+      (t.entity_ids || []).forEach(eid => {
+        triggers.push({ platform: "state", entity_id: eid, to: t.state || 'on' });
+      });
+    }
+  }
+
+  // ── Conditions ────────────────────────────────────────────
+  for (const c of (auto.conditions || [])) {
+    if (c.type === 'time') {
+      if (c.time_mode === 'entity' && c.time_entity) {
+        conditions.push({ condition: "template", value_template: `{{ now().strftime('%H:%M') == states('${c.time_entity}')[:5] }}` });
+      } else {
+        const cond = { condition: "time" };
+        if (c.after)  cond.after  = c.after;
+        if (c.before) cond.before = c.before;
+        conditions.push(cond);
+      }
+    } else if (c.type === 'entity' && c.entity_id) {
+      conditions.push({ condition: "state", entity_id: c.entity_id, state: c.state || 'on' });
+    }
+  }
+
+  // ── Actions ───────────────────────────────────────────────
+  for (const a of (auto.actions || [])) {
+    if (a.type === 'siren' || a.type === 'light') {
+      const allIds = [
+        ...(a.entity_ids       || []),
+        ...(a.entity_ids_extra || []),
+        ...(a.entity_ids_zone  || []),
+      ].filter(Boolean);
+      allIds.forEach(eid => {
+        const domain = eid.split('.')[0];
+        actions.push({ action: `${domain}.${a.service || 'turn_on'}`, target: { entity_id: eid } });
+      });
+    } else if (a.type === 'notify') {
+      const target = a.target || 'notify.notify';
+      const domain = target.split('.')[0];
+      const svc    = target.split('.').slice(1).join('.') || 'notify';
+      actions.push({
+        action: `${domain}.${svc}`,
+        data: { message: a.message || '', title: a.title || 'HA-Overwatch Alert' },
+      });
+    } else if (a.type === 'arm') {
+      if (a.entity_id) {
+        actions.push({
+          action: `alarm_control_panel.${a.service || 'alarm_arm_away'}`,
+          target: { entity_id: a.entity_id },
+        });
+      }
+    } else if (a.type === 'entity') {
+      if (a.entity_id) {
+        const domain = a.entity_id.split('.')[0];
+        actions.push({ action: `${domain}.${a.service || 'turn_on'}`, target: { entity_id: a.entity_id } });
+      }
+    }
+  }
+
+  return {
+    id: auto.id,
+    alias: `HA-Overwatch — ${auto.name}`,
+    description: `Created by HA-Overwatch Automation Editor`,
+    mode: "single",
+    trigger:    triggers,
+    condition:  conditions,
+    action:     actions,
+  };
+}
+
+function nameSlug(s) {
+  return (s || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
 }
 
 server.on("error", e => {
