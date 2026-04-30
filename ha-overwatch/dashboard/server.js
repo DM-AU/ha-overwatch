@@ -555,7 +555,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  /* ── /ow/automations — automation list r/w ─────────────────── */
+  /* ── /ow/automations — local index r/w (id list only) ──────── */
   if (pathname === "/ow/automations" && req.method === "GET") {
     const p = path.join(DATA_DIR, "config", "automations.json");
     try {
@@ -581,6 +581,87 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  /* ── /ow/ha-automations — read HA-Overwatch automations from HA ── */
+  if (pathname === "/ow/ha-automations" && req.method === "GET") {
+    try {
+      const cfg = getHAConfig(loadConfig());
+      if (!cfg.ha_url && !process.env.SUPERVISOR_TOKEN) { json(res, []); return; }
+      let hostname, port, basePath, token;
+      if (process.env.SUPERVISOR_TOKEN) {
+        hostname = "supervisor"; port = 80; basePath = "/core"; token = process.env.SUPERVISOR_TOKEN;
+      } else {
+        const u = new URL(cfg.ha_url.replace(/\/$/, ""));
+        hostname = u.hostname; port = parseInt(u.port)||(u.protocol==="https:"?443:80);
+        basePath = ""; token = cfg.ha_token;
+      }
+      const haReq = (process.env.SUPERVISOR_TOKEN ? http : https).request({
+        hostname, port, method: "GET",
+        path: `${basePath}/api/config/automation/config`,
+        headers: { "Authorization": `Bearer ${token}` },
+      }, haRes => {
+        let d = "";
+        haRes.on("data", c => d += c);
+        haRes.on("end", () => {
+          try {
+            const all = JSON.parse(d);
+            // Filter to HA-Overwatch automations only (by alias prefix or metadata)
+            const ours = Array.isArray(all) ? all.filter(a =>
+              (a.alias || "").startsWith("HA-Overwatch") ||
+              (a.description || "").includes("ow_meta:")
+            ) : [];
+            json(res, ours);
+          } catch(e) {
+            console.warn("[OW-Auto] Failed to parse HA automations:", e.message);
+            json(res, []);
+          }
+        });
+      });
+      haReq.on("error", e => { console.error("[OW-Auto] ha-automations fetch error:", e.message); json(res, []); });
+      haReq.end();
+    } catch(e) {
+      console.error("[OW-Auto] /ow/ha-automations error:", e.message);
+      json(res, []);
+    }
+    return;
+  }
+
+  /* ── /ow/ha-services — fetch HA service list (filtered by domain) ── */
+  if (pathname === "/ow/ha-services" && req.method === "GET") {
+    const domain = (new URLSearchParams(url.split("?")[1]||"")).get("domain") || "";
+    try {
+      const cfg = getHAConfig(loadConfig());
+      if (!cfg.ha_url && !process.env.SUPERVISOR_TOKEN) { json(res, []); return; }
+      let hostname, port, basePath, token;
+      if (process.env.SUPERVISOR_TOKEN) {
+        hostname = "supervisor"; port = 80; basePath = "/core"; token = process.env.SUPERVISOR_TOKEN;
+      } else {
+        const u = new URL(cfg.ha_url.replace(/\/$/, ""));
+        hostname = u.hostname; port = parseInt(u.port)||(u.protocol==="https:"?443:80);
+        basePath = ""; token = cfg.ha_token;
+      }
+      const haReq = (process.env.SUPERVISOR_TOKEN ? http : https).request({
+        hostname, port, method: "GET",
+        path: `${basePath}/api/services`,
+        headers: { "Authorization": `Bearer ${token}` },
+      }, haRes => {
+        let d = "";
+        haRes.on("data", c => d += c);
+        haRes.on("end", () => {
+          try {
+            const all = JSON.parse(d);
+            const filtered = domain
+              ? all.filter(s => s.domain === domain)
+              : all;
+            json(res, filtered);
+          } catch(e) { json(res, []); }
+        });
+      });
+      haReq.on("error", e => { json(res, []); });
+      haReq.end();
+    } catch(e) { json(res, []); }
+    return;
+  }
+
   /* ── /ow/push-automation — push one automation to HA REST API ── */
   if (pathname === "/ow/push-automation" && req.method === "POST") {
     try {
@@ -591,7 +672,7 @@ const server = http.createServer(async (req, res) => {
       }
 
       // Build a valid HA automation config object from our draft format
-      const haAuto = buildHAAutomation(auto);
+      const haAuto = buildHAAutomation(auto, loadZones(), loadGroups());
       const haJson = JSON.stringify(haAuto);
       const autoId = String(auto.id); // use our stable uid as HA automation id
 
@@ -2151,104 +2232,214 @@ function sendWsFrame(sock, text) {
 
 
 /* ── Build HA automation config from OW draft ─────────────── */
-function buildHAAutomation(auto) {
-  const triggers    = [];
-  const conditions  = [];
-  const actions     = [];
+function buildHAAutomation(auto, allZones, allGroups) {
+  const zoneList  = allZones  || [];
+  const groupList = allGroups || [];
 
-  // ── Triggers ──────────────────────────────────────────────
+  function zoneById(id)  { return zoneList.find(z => z.id === id); }
+  function zoneSlugById(id) {
+    const z = zoneById(id);
+    return z ? (nameSlug(z.name) || z.id) : nameSlug(id);
+  }
+  function groupSlugById(id) {
+    const g = groupList.find(g => g.id === id);
+    return g ? (nameSlug(g.name) || g.id) : nameSlug(id);
+  }
+
+  const triggers   = [];
+  const conditions = [];
+  const actions    = [];
+
+  const owMeta = JSON.stringify({ ow_meta:"1", ow_id:auto.id, ow_name:auto.name });
+
   for (const t of (auto.triggers || [])) {
+    const forDur = t.for_duration || null;
+
     if (t.type === 'zone' || t.type === 'zone_arm') {
-      // Each selected zone generates a state trigger on its overwatch switch/binary sensor
-      const zoneIds = t.zone_ids || [];
-      const baseField = t.type === 'zone_arm' ? 'switch' : 'binary_sensor';
-      zoneIds.forEach(zid => {
-        triggers.push({
-          platform: "state",
-          entity_id: `${baseField}.overwatch_zone_${nameSlug(zid)}`,
-          to: t.type === 'zone_arm' ? (t.state === 'armed' ? 'on' : 'off') : (t.event === 'triggered' ? 'on' : 'off'),
-        });
+      const isArm   = t.type === 'zone_arm';
+      const toState = isArm
+        ? (t.state === 'armed' ? 'on' : 'off')
+        : (t.event === 'triggered' ? 'on' : 'off');
+      const entityIds = [];
+      (t.group_ids || []).forEach(gid => {
+        const slug = groupSlugById(gid);
+        entityIds.push(isArm
+          ? `switch.overwatch_zone_group_${slug}`
+          : `binary_sensor.overwatch_zone_group_${slug}_triggered`);
       });
-      // If no zones selected, trigger on any zone change
-      if (!zoneIds.length) {
-        triggers.push({ platform: "state", entity_id: `binary_sensor.overwatch_any_zone` });
+      (t.zone_ids || []).forEach(zid => {
+        const slug = zoneSlugById(zid);
+        entityIds.push(isArm
+          ? `switch.overwatch_zone_${slug}`
+          : `binary_sensor.overwatch_zone_${slug}_triggered`);
+      });
+      if (entityIds.length > 0) {
+        const trig = { platform:"state", entity_id: entityIds.length===1?entityIds[0]:entityIds, to:toState };
+        if (forDur) trig.for = forDur;
+        triggers.push(trig);
+      } else {
+        triggers.push({ platform:"state", entity_id:"binary_sensor.overwatch_zone_master_triggered", to:"on" });
       }
     } else if (t.type === 'person' || t.type === 'device') {
-      (t.entity_ids || []).forEach(eid => {
-        triggers.push({ platform: "state", entity_id: eid, to: t.state || 'home' });
-      });
+      if ((t.entity_ids||[]).length) {
+        const trig = { platform:"state", entity_id:t.entity_ids.length===1?t.entity_ids[0]:t.entity_ids, to:t.state||'home' };
+        if (forDur) trig.for = forDur;
+        triggers.push(trig);
+      }
     } else if (t.type === 'entity') {
       if (t.entity_id) {
-        triggers.push({ platform: "state", entity_id: t.entity_id, to: t.to || 'on' });
+        const trig = { platform:"state", entity_id:t.entity_id, to:t.to||'on' };
+        if (forDur) trig.for = forDur;
+        triggers.push(trig);
       }
-    } else if (t.type === 'door' || t.type === 'window') {
-      (t.entity_ids || []).forEach(eid => {
-        triggers.push({ platform: "state", entity_id: eid, to: t.state || 'on' });
-      });
+    } else if (t.type === 'door' || t.type === 'window' || t.type === 'sensor') {
+      if ((t.entity_ids||[]).length) {
+        const trig = { platform:"state", entity_id:t.entity_ids.length===1?t.entity_ids[0]:t.entity_ids, to:t.state||'on' };
+        if (forDur) trig.for = forDur;
+        triggers.push(trig);
+      }
     }
   }
 
-  // ── Conditions ────────────────────────────────────────────
   for (const c of (auto.conditions || [])) {
     if (c.type === 'time') {
       if (c.time_mode === 'entity' && c.time_entity) {
-        conditions.push({ condition: "template", value_template: `{{ now().strftime('%H:%M') == states('${c.time_entity}')[:5] }}` });
+        conditions.push({ condition:"template", value_template:`{{ now().strftime('%H:%M') == states('${c.time_entity}')[:5] }}` });
       } else {
-        const cond = { condition: "time" };
+        const cond = { condition:"time" };
         if (c.after)  cond.after  = c.after;
         if (c.before) cond.before = c.before;
         conditions.push(cond);
       }
     } else if (c.type === 'entity' && c.entity_id) {
-      conditions.push({ condition: "state", entity_id: c.entity_id, state: c.state || 'on' });
+      conditions.push({ condition:"state", entity_id:c.entity_id, state:c.state||'on' });
     }
   }
 
-  // ── Actions ───────────────────────────────────────────────
   for (const a of (auto.actions || [])) {
-    if (a.type === 'siren' || a.type === 'light') {
-      const allIds = [
-        ...(a.entity_ids       || []),
-        ...(a.entity_ids_extra || []),
-        ...(a.entity_ids_zone  || []),
-      ].filter(Boolean);
-      allIds.forEach(eid => {
-        const domain = eid.split('.')[0];
-        actions.push({ action: `${domain}.${a.service || 'turn_on'}`, target: { entity_id: eid } });
-      });
+    if (a.type === 'siren') {
+      const ids = [...(a.entity_ids||[]), ...(a.entity_ids_extra||[])].filter(Boolean);
+      if (ids.length) actions.push({ action:`siren.${a.service||'turn_on'}`, target:{ entity_id:ids.length===1?ids[0]:ids } });
+    } else if (a.type === 'light') {
+      const ids = [...(a.entity_ids_zone||[]), ...(a.entity_ids_other||[]), ...(a.entity_ids||[])].filter(Boolean);
+      if (ids.length) actions.push({ action:`light.${a.service||'turn_on'}`, target:{ entity_id:ids.length===1?ids[0]:ids } });
     } else if (a.type === 'notify') {
-      const target = a.target || 'notify.notify';
-      const domain = target.split('.')[0];
-      const svc    = target.split('.').slice(1).join('.') || 'notify';
-      actions.push({
-        action: `${domain}.${svc}`,
-        data: { message: a.message || '', title: a.title || 'HA-Overwatch Alert' },
-      });
+      const target = a.target||'notify.notify';
+      const svc = target.startsWith('notify.')?target.slice(7):target;
+      actions.push({ action:`notify.${svc}`, data:{ message:a.message||'', title:a.title||'HA-Overwatch Alert' } });
     } else if (a.type === 'arm') {
-      if (a.entity_id) {
-        actions.push({
-          action: `alarm_control_panel.${a.service || 'alarm_arm_away'}`,
-          target: { entity_id: a.entity_id },
-        });
+      if (a.entity_id) actions.push({ action:`alarm_control_panel.${a.service||'alarm_arm_away'}`, target:{ entity_id:a.entity_id } });
+    } else if (a.type === 'camera') {
+      const ids = (a.entity_ids||[]).filter(Boolean);
+      if (ids.length && a.service) {
+        const act = { action:`camera.${a.service}`, target:{ entity_id:ids.length===1?ids[0]:ids } };
+        if (a.service_data && Object.keys(a.service_data).length) act.data = a.service_data;
+        actions.push(act);
       }
     } else if (a.type === 'entity') {
       if (a.entity_id) {
         const domain = a.entity_id.split('.')[0];
-        actions.push({ action: `${domain}.${a.service || 'turn_on'}`, target: { entity_id: a.entity_id } });
+        actions.push({ action:`${domain}.${a.service||'turn_on'}`, target:{ entity_id:a.entity_id } });
       }
     }
   }
 
   return {
-    id: auto.id,
-    alias: `HA-Overwatch — ${auto.name}`,
-    description: `Created by HA-Overwatch Automation Editor`,
-    mode: "single",
-    trigger:    triggers,
-    condition:  conditions,
-    action:     actions,
+    id:          auto.id,
+    alias:       `HA-Overwatch — ${auto.name}`,
+    description: owMeta,
+    mode:        "single",
+    triggers:    triggers,
+    conditions:  conditions,
+    actions:     actions,
   };
 }
+
+function parseHAAutomation(ha, allZones, allGroups) {
+  const warnings  = [];
+  const zoneList  = allZones  || [];
+  const groupList = allGroups || [];
+
+  let owId=null, owName=null;
+  try { const m=JSON.parse(ha.description||"{}"); owId=m.ow_id||null; owName=m.ow_name||null; } catch {}
+
+  const alias = ha.alias||"";
+  const displayName = owName || alias.replace(/^HA-Overwatch\s*[-–—]?\s*/i,"").trim();
+
+  const draft = {
+    id:       owId || uid_simple(),
+    name:     displayName,
+    enabled:  ha.state !== "off",
+    triggers: [], conditions: [], actions: [],
+    _ha_parse_warnings: [],
+  };
+
+  function zoneBySlug(slug) {
+    return zoneList.find(z => (nameSlug(z.name)||z.id)===slug || z.id===slug);
+  }
+  function groupBySlug(slug) {
+    return groupList.find(g => (nameSlug(g.name)||g.id)===slug || g.id===slug);
+  }
+
+  const rawTriggers = ha.triggers || ha.trigger || [];
+  for (const t of (Array.isArray(rawTriggers)?rawTriggers:[rawTriggers])) {
+    if (!t || t.platform !== "state") { if (t) warnings.push(`Unsupported trigger: ${t.platform||JSON.stringify(t)}`); continue; }
+    const ids = Array.isArray(t.entity_id)?t.entity_id:(t.entity_id?[t.entity_id]:[]);
+    const forDur = t.for||null;
+
+    const zoneTriggIds = ids.filter(id=>/^binary_sensor\.overwatch_zone_(?!group).+_triggered$/.test(id));
+    const groupTriggIds = ids.filter(id=>/^binary_sensor\.overwatch_zone_group_.+_triggered$/.test(id));
+    const zoneArmIds   = ids.filter(id=>/^switch\.overwatch_zone_(?!group)[^_]/.test(id));
+    const groupArmIds  = ids.filter(id=>/^switch\.overwatch_zone_group_/.test(id));
+    const nonOW        = ids.filter(id=>!id.includes('overwatch_zone'));
+
+    if (zoneTriggIds.length||groupTriggIds.length) {
+      const zIds = zoneTriggIds.map(id=>{const sl=id.replace(/^binary_sensor\.overwatch_zone_/,"").replace(/_triggered$/,"");return (zoneBySlug(sl)||{}).id||null;}).filter(Boolean);
+      const gIds = groupTriggIds.map(id=>{const sl=id.replace(/^binary_sensor\.overwatch_zone_group_/,"").replace(/_triggered$/,"");return (groupBySlug(sl)||{}).id||null;}).filter(Boolean);
+      draft.triggers.push({ id:uid_simple(), type:'zone', zone_ids:zIds, group_ids:gIds, event:t.to==='off'?'cleared':'triggered', for_duration:forDur });
+    } else if (zoneArmIds.length||groupArmIds.length) {
+      const zIds = zoneArmIds.map(id=>{const sl=id.replace(/^switch\.overwatch_zone_/,"");return (zoneBySlug(sl)||{}).id||null;}).filter(Boolean);
+      const gIds = groupArmIds.map(id=>{const sl=id.replace(/^switch\.overwatch_zone_group_/,"");return (groupBySlug(sl)||{}).id||null;}).filter(Boolean);
+      draft.triggers.push({ id:uid_simple(), type:'zone_arm', zone_ids:zIds, group_ids:gIds, state:t.to==='off'?'disarmed':'armed', for_duration:forDur });
+    } else if (nonOW.length) {
+      const domain = nonOW[0].split('.')[0];
+      if (domain==='person') draft.triggers.push({ id:uid_simple(), type:'person', entity_ids:nonOW, state:t.to||'home', for_duration:forDur });
+      else if (domain==='device_tracker') draft.triggers.push({ id:uid_simple(), type:'device', entity_ids:nonOW, state:t.to||'home', for_duration:forDur });
+      else { draft.triggers.push({ id:uid_simple(), type:'entity', entity_id:nonOW[0], to:t.to||'on', for_duration:forDur }); if(nonOW.length>1) warnings.push(`Multi-entity trigger partially imported`); }
+    }
+  }
+
+  const rawConds = ha.conditions||ha.condition||[];
+  for (const c of (Array.isArray(rawConds)?rawConds:[rawConds])) {
+    if (!c) continue;
+    if (c.condition==='time') draft.conditions.push({ id:uid_simple(), type:'time', time_mode:'manual', after:c.after||'00:00', before:c.before||'23:59' });
+    else if (c.condition==='state') draft.conditions.push({ id:uid_simple(), type:'entity', entity_id:c.entity_id||'', state:c.state||'on' });
+    else if (c.condition==='template') { const m=(c.value_template||'').match(/states\('([^']+)'\)/); if(m) draft.conditions.push({id:uid_simple(),type:'time',time_mode:'entity',time_entity:m[1]}); else warnings.push(`Unsupported template condition`); }
+    else warnings.push(`Unsupported condition: ${c.condition}`);
+  }
+
+  const rawActions = ha.actions||ha.action||[];
+  for (const a of (Array.isArray(rawActions)?rawActions:[rawActions])) {
+    if (!a) continue;
+    const actionKey = a.action||a.service||'';
+    const dotIdx = actionKey.indexOf('.');
+    const domain = dotIdx>=0?actionKey.slice(0,dotIdx):'';
+    const svc    = dotIdx>=0?actionKey.slice(dotIdx+1):'';
+    const tids   = a.target?.entity_id ? (Array.isArray(a.target.entity_id)?a.target.entity_id:[a.target.entity_id]) : [];
+
+    if (domain==='siren') draft.actions.push({ id:uid_simple(), type:'siren', entity_ids:tids, service:svc });
+    else if (domain==='light') draft.actions.push({ id:uid_simple(), type:'light', entity_ids_zone:tids, entity_ids_other:[], entity_ids:[], service:svc });
+    else if (domain==='notify') draft.actions.push({ id:uid_simple(), type:'notify', target:`notify.${svc}`, message:a.data?.message||'', title:a.data?.title||'' });
+    else if (domain==='alarm_control_panel') draft.actions.push({ id:uid_simple(), type:'arm', service:svc, entity_id:tids[0]||'' });
+    else if (domain==='camera') draft.actions.push({ id:uid_simple(), type:'camera', service:svc, entity_ids:tids, service_data:a.data||{} });
+    else draft.actions.push({ id:uid_simple(), type:'entity', entity_id:tids[0]||'', service:actionKey });
+  }
+
+  draft._ha_parse_warnings = warnings;
+  return { draft, warnings };
+}
+
+function uid_simple() { return 'auto_' + Math.random().toString(36).slice(2,9); }
 
 function nameSlug(s) {
   return (s || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
