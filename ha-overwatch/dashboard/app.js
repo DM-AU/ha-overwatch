@@ -2914,12 +2914,11 @@ function makeDoorPin(pin, isEdit, scale) {
     return el;
   };
 
-  // W = opening width (horizontal), H = frame height (vertical thickness on map)
-  // Both in image coordinates — scale WITH zoom like zones
-  const W   = Math.max(4, pin.sizeW || 20);   // door opening width
-  const H   = Math.max(2, pin.sizeH || 4);    // frame/jamb height (thickness of wall)
-  const T   = Math.max(0.6, W * 0.06);        // stroke width proportional
-  const jT  = T * 1.2;                         // jamb stroke
+  // W = opening width, H = wall/frame height (thickness)
+  const W   = Math.max(4, pin.sizeW || 20);
+  const H   = Math.max(1, pin.sizeH || 4);
+  const T   = Math.max(0.5, W * 0.05);
+  const jT  = T * 1.2;
 
   const doorType  = pin.doorType || 'single';
   const doorHand  = pin.doorHand || 'left';
@@ -2930,128 +2929,119 @@ function makeDoorPin(pin, isEdit, scale) {
   const rot = pin.rotation || 0;
   const iconG = mk('g', { transform: `translate(${cx},${cy}) rotate(${rot})` });
 
-  // Aura when open — same as siren: 3 expanding rings driven by time
-  if (isOpen && !isEdit) {
-    const auraRadius = pin.auraRadius || 3;
-    const maxRingR   = W * (0.5 + auraRadius * 0.3);
-    const minRingR   = W * 0.15;
-    const ringPhase  = (Date.now() % 1600) / 1600;
-    const auraCX     = 0;
-    const auraCY     = isDouble ? 0 : -W / 2;
-    // Radial glow
-    const glowId = `dg-${pin.id}`;
-    const defs = mk('defs', {});
-    const grad = mk('radialGradient', { id: glowId, cx:'50%', cy:'50%', r:'50%' });
-    const s1 = mk('stop', { offset:'0%', 'stop-color':colOpen, 'stop-opacity':'0.25' });
-    const s2 = mk('stop', { offset:'100%', 'stop-color':colOpen, 'stop-opacity':'0' });
-    grad.appendChild(s1); grad.appendChild(s2); defs.appendChild(grad); iconG.appendChild(defs);
-    const glow = mk('ellipse', { cx:auraCX, cy:auraCY, rx:maxRingR, ry:maxRingR, fill:`url(#${glowId})` });
-    iconG.appendChild(glow);
-    [0, 0.33, 0.66].forEach(offset => {
-      const phase = (ringPhase + offset) % 1;
-      const r     = minRingR + (maxRingR - minRingR) * phase;
-      const op    = Math.max(0, 0.7 * (1 - phase));
-      const ring  = mk('circle', { cx:auraCX, cy:auraCY, r, fill:'none', stroke:colOpen,
-        'stroke-width': T * 0.6, opacity: op });
-      iconG.appendChild(ring);
-    });
-  }
-
-  // Helper: draw wall rect (horizontal bar = door frame in top-down view)
-  // Wall spans from -W/2 to W/2 on X, and -H/2 to H/2 on Y
-  function drawWall(x1, x2) {
+  // Jamb rect helper — draws wall segment
+  function jamb(x1, x2) {
     iconG.appendChild(mk('rect', {
-      x: x1, y: -H/2, width: x2-x1, height: H,
-      fill: col, 'fill-opacity': '0.35', stroke: col, 'stroke-width': T*0.4
+      x:x1, y:-H/2, width:Math.max(0.5, x2-x1), height:H,
+      fill:col, 'fill-opacity':'0.5', stroke:col, 'stroke-width':T*0.3
     }));
   }
 
   if (isSliding) {
-    // Full frame rect (door in wall)
-    drawWall(-W/2, W/2);
+    // Two jambs + track + panel
+    jamb(-W/2, -W/2+H);  // left jamb
+    jamb( W/2-H,  W/2);  // right jamb
+    // Track
+    iconG.appendChild(mk('line', { x1:-W/2+H, y1:0, x2:W/2-H, y2:0,
+      stroke:col, 'stroke-width':T*0.4, 'stroke-dasharray':`${T*2},${T}` }));
+    const panelW = (W - H*2) * 0.9;
     if (isOpen) {
-      // Panel shifted — show as rect at one end, lighter
-      iconG.appendChild(mk('rect', {
-        x: -W/2, y: -H/2, width: W*0.45, height: H,
-        fill: col, 'fill-opacity': '0.7', stroke: col, 'stroke-width': T*0.5
-      }));
-      // Gap indication
-      iconG.appendChild(mk('line', { x1: -W/2+W*0.45+T, y1:0, x2:W/2, y2:0,
-        stroke: col, 'stroke-width': T*0.5, 'stroke-dasharray':`${T*1.5},${T}` }));
+      // Panel at left side
+      iconG.appendChild(mk('rect', { x:-W/2+H, y:-H/2, width:panelW, height:H,
+        fill:col, 'fill-opacity':'0.7', stroke:col, 'stroke-width':T*0.4 }));
     } else {
-      // Panel fills full opening — darker overlay
-      iconG.appendChild(mk('rect', {
-        x: -W/2+T, y: -H/2+T, width: W-T*2, height: H-T*2,
-        fill: col, 'fill-opacity': '0.5', stroke: 'none'
-      }));
+      // Panel centred in opening
+      const gap = (W - H*2 - panelW) / 2;
+      iconG.appendChild(mk('rect', { x:-W/2+H+gap, y:-H/2, width:panelW, height:H,
+        fill:col, 'fill-opacity':'0.5', stroke:col, 'stroke-width':T*0.4 }));
     }
 
   } else if (isDouble) {
-    // Frame rect at each side (jambs), gap in middle
-    drawWall(-W/2, -W/2+H);   // left jamb
-    drawWall( W/2-H,  W/2);   // right jamb
+    // Two jambs at outer edges, two panels from jamb face to centre
+    jamb(-W/2, -W/2+H);  // left jamb
+    jamb( W/2-H,  W/2);  // right jamb
+    const panelL = W/2 - H;  // each panel length
 
-    [[-W/2,'left'],[W/2,'right']].forEach(([hx, side]) => {
+    [[-W/2+H, 'left'],[W/2-H, 'right']].forEach(([hinge, side]) => {
       const fx    = 0;
       const sweep = side === 'left' ? 0 : 1;
-      const panelL = W/2 - H; // panel length = half opening minus jamb
-
+      const panelDX = side === 'left' ? panelL : -panelL;
+      // Hinge dot
+      iconG.appendChild(mk('circle', { cx:hinge, cy:0, r:jT*0.6, fill:col }));
       if (isOpen) {
-        // Panel swung perpendicular at hinge corner
-        const angle   = side === 'left' ? -90 : 90;
-        const panelDX = side === 'left' ? panelL : -panelL;
-        const hingeX  = side === 'left' ? -W/2+H : W/2-H;
-        const pg = mk('g', { transform:`rotate(${angle},${hingeX},0)` });
-        pg.appendChild(mk('line', { x1:hingeX, y1:0, x2:hingeX+panelDX, y2:0,
+        const angle = side === 'left' ? -90 : 90;
+        const pg = mk('g', { transform:`rotate(${angle},${hinge},0)` });
+        pg.appendChild(mk('line', { x1:hinge, y1:0, x2:hinge+panelDX, y2:0,
           stroke:col, 'stroke-width':T*1.5 }));
         iconG.appendChild(pg);
-        // Arc
         iconG.appendChild(mk('path', {
-          d:`M ${hingeX} ${-panelL} A ${panelL} ${panelL} 0 0 ${sweep} ${fx} 0`,
-          fill:'none', stroke:col, 'stroke-width':T*0.5, 'stroke-dasharray':`${T*1.5},${T}`
+          d:`M ${hinge} ${-panelL} A ${panelL} ${panelL} 0 0 ${sweep} ${fx} 0`,
+          fill:'none', stroke:col, 'stroke-width':T*0.5, 'stroke-dasharray':`${T*2},${T}`
         }));
       } else {
-        // Panel line across half opening
-        const hingeX = side === 'left' ? -W/2+H : W/2-H;
-        iconG.appendChild(mk('line', { x1:hingeX, y1:0, x2:fx, y2:0,
+        iconG.appendChild(mk('line', { x1:hinge, y1:0, x2:fx, y2:0,
           stroke:col, 'stroke-width':T*1.5 }));
       }
     });
 
   } else {
-    // Single door — frame rect on hinge side
-    const hingeX = doorHand === 'left' ? -W/2 : W/2-H;
-    const freeX  = doorHand === 'left' ?  W/2 : -W/2;
-    const sweep  = doorHand === 'left' ? 0 : 1;
-    const panelL = W - H;    // panel length = opening minus jamb thickness
+    // Single door — left and right jambs (same as double, no centre)
+    jamb(-W/2, -W/2+H);  // hinge-side jamb
+    jamb( W/2-H,  W/2);  // free-side jamb
+
+    // Hinge face x (inner edge of hinge jamb)
+    const hinge  = doorHand === 'left' ? -W/2+H : W/2-H;
+    const freeX  = doorHand === 'left' ?  W/2-H : -W/2+H;
+    const panelL = W - H*2;  // panel = opening minus both jambs
     const panelDX = doorHand === 'left' ? panelL : -panelL;
+    const sweep  = doorHand === 'left' ? 0 : 1;
 
-    // Jamb rect (wall portion with door frame)
-    drawWall(-W/2, W/2);
-
-    // Hinge point
-    iconG.appendChild(mk('circle', { cx: doorHand==='left' ? -W/2+H/2 : W/2-H/2, cy:0,
-      r: T*0.8, fill: col }));
+    // Hinge dot
+    iconG.appendChild(mk('circle', { cx:hinge, cy:0, r:jT*0.6, fill:col }));
 
     if (isOpen) {
-      // Panel rotated 90° from hinge face
-      const hFaceX = doorHand === 'left' ? -W/2+H : W/2-H;
-      const angle  = doorHand === 'left' ? -90 : 90;
-      const pg = mk('g', { transform:`rotate(${angle},${hFaceX},0)` });
-      pg.appendChild(mk('line', { x1:hFaceX, y1:0, x2:hFaceX+panelDX, y2:0,
+      // Panel perpendicular — rotated 90° at hinge face, NO horizontal line
+      const angle = doorHand === 'left' ? -90 : 90;
+      const pg = mk('g', { transform:`rotate(${angle},${hinge},0)` });
+      pg.appendChild(mk('line', { x1:hinge, y1:0, x2:hinge+panelDX, y2:0,
         stroke:col, 'stroke-width':T*1.5 }));
       iconG.appendChild(pg);
-      // Dashed arc
       iconG.appendChild(mk('path', {
-        d:`M ${hFaceX} ${-panelL} A ${panelL} ${panelL} 0 0 ${sweep} ${freeX} 0`,
-        fill:'none', stroke:col, 'stroke-width':T*0.5, 'stroke-dasharray':`${T*1.5},${T}`
+        d:`M ${hinge} ${-panelL} A ${panelL} ${panelL} 0 0 ${sweep} ${freeX} 0`,
+        fill:'none', stroke:col, 'stroke-width':T*0.5, 'stroke-dasharray':`${T*2},${T}`
       }));
     } else {
-      // Panel line only across opening, no arc
-      const hFaceX = doorHand === 'left' ? -W/2+H : W/2-H;
-      iconG.appendChild(mk('line', { x1:hFaceX, y1:0, x2:freeX, y2:0,
+      // Closed — horizontal panel line only, no arc
+      iconG.appendChild(mk('line', { x1:hinge, y1:0, x2:freeX, y2:0,
         stroke:col, 'stroke-width':T*1.5 }));
     }
+  }
+
+  // Aura when open — siren-style expanding rings, centred on door opening
+  if (isOpen && !isEdit) {
+    const auraRadius = pin.auraRadius || 3;
+    const maxRingR   = (W/2) * (0.8 + auraRadius * 0.4);
+    const minRingR   = W * 0.1;
+    const ringPhase  = (Date.now() % 1600) / 1600;
+    // Centre: middle of the opening gap (between the two jambs)
+    const auraCX = 0;
+    const auraCY = 0;  // at the threshold line — centre of the door opening
+    const glowId = `dg-${pin.id}`;
+    const defs = mk('defs', {});
+    const grad = mk('radialGradient', { id:glowId, cx:'50%', cy:'50%', r:'50%' });
+    const s1 = mk('stop', { offset:'0%', 'stop-color':colOpen, 'stop-opacity':'0.3' });
+    const s2 = mk('stop', { offset:'100%', 'stop-color':colOpen, 'stop-opacity':'0' });
+    grad.appendChild(s1); grad.appendChild(s2); defs.appendChild(grad);
+    iconG.insertBefore(defs, iconG.firstChild);
+    const glow = mk('ellipse', { cx:auraCX, cy:auraCY, rx:maxRingR, ry:maxRingR, fill:`url(#${glowId})` });
+    iconG.insertBefore(glow, iconG.firstChild);
+    [0, 0.33, 0.66].forEach(offset => {
+      const phase = (ringPhase + offset) % 1;
+      const r     = minRingR + (maxRingR - minRingR) * phase;
+      const op    = Math.max(0, 0.7 * (1 - phase));
+      iconG.appendChild(mk('circle', { cx:auraCX, cy:auraCY, r, fill:'none', stroke:colOpen,
+        'stroke-width':T*0.8, opacity:op }));
+    });
   }
 
   // Editor box
@@ -3565,10 +3555,8 @@ function renderZonesEditor() {
   const editPtsLabel  = isCreatingZone ? "✏️ Adding Points" : isEditingPoints ? "✔ Done Editing" : needsPoints ? "Add Points" : "Edit Zone";
   const hasSelection = !!(selectedZone || selectedGroup || activePinId);
   // Use saved size if user has customised it, otherwise default narrow when nothing selected
-  const hasSavedSize = localStorage.getItem('editorW') !== null;
-  const rawW    = (hasSelection || hasSavedSize) ? editorSize.w : 260;
   // When something is selected, guarantee both panels fit
-  const editorW  = (hasSelection && rawW < 420) ? 420 : rawW;
+  const editorW = hasSelection ? Math.max(editorSize.w, 420) : 260;
   const editorH = editorSize.h;
 
   // ── Build left panel zone list with group headers ──────────
@@ -6188,7 +6176,9 @@ function renderSettingsPanel() {
         </div>
 
         <div class="settings-section">
-          <div class="settings-section-title" id="zoneColourToggle" style="cursor:pointer;user-select:none;display:flex;align-items:center;justify-content:space-between;">
+          <div class="settings-section-title" id="zoneColourToggle"
+            style="cursor:pointer;user-select:none;display:flex;align-items:center;justify-content:space-between;"
+            onclick="(function(){var b=document.getElementById('zoneColourBody');var c=document.getElementById('zoneColourChevron');if(!b)return;var o=b.style.display==='none'||b.style.display==='';b.style.display=o?'block':'none';if(c)c.style.transform=o?'rotate(180deg)':'';localStorage.setItem('ow_zone_colour_open',String(o));})()">
             <span>Zone Colours ${perDeviceBadge}</span>
             <span id="zoneColourChevron" style="font-size:10px;color:#666;transition:transform 0.2s;">▼</span>
           </div>
