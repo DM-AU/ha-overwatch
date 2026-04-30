@@ -2904,8 +2904,17 @@ function makeDoorPin(pin, isEdit, scale) {
   const isUnlocked   = controlState === 'unlocked' || controlState === 'on';
   const hasControl   = !!pin.control_entity;
 
-  const rootCS  = getComputedStyle(document.documentElement);
-  const colOpen = noSensor ? '#888' : (rootCS.getPropertyValue('--color-door-open').trim() || '#ff6b35');
+  const rootCS     = getComputedStyle(document.documentElement);
+  const colOnDoor  = rootCS.getPropertyValue('--color-door-open').trim()  || '#ff6b35';
+  const colOffDoor = rootCS.getPropertyValue('--color-door-closed').trim() || '#ffcc00';
+
+  // Zone arm state — find the zone this pin belongs to
+  const ownerZone   = zones.find(z => z.id === pin.zone_id);
+  const zoneArmed   = ownerZone ? getZoneState(ownerZone) !== 'disabled' : true;
+
+  // Open door: use armed colour if zone armed, disarmed colour if zone disarmed
+  // Closed door: always green (safe, shut)
+  const colOpen = noSensor ? '#888' : zoneArmed ? colOnDoor : colOffDoor;
   const col     = noSensor ? '#888' : isOpen ? colOpen : '#34c759';
 
   const mk = (tag, attrs) => {
