@@ -627,7 +627,7 @@ const server = http.createServer(async (req, res) => {
 
   /* ── /ow/ha-services — fetch HA service list (filtered by domain) ── */
   if (pathname === "/ow/ha-services" && req.method === "GET") {
-    const domain = (new URLSearchParams(url.split("?")[1]||"")).get("domain") || "";
+    const domain = (new URLSearchParams((req.url||"").split("?")[1]||"")).get("domain") || "";
     try {
       const cfg = getHAConfig(loadConfig());
       if (!cfg.ha_url && !process.env.SUPERVISOR_TOKEN) { json(res, []); return; }
