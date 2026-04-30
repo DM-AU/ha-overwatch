@@ -6541,11 +6541,30 @@ function renderSettingsPanel() {
   Object.entries(colourMap).forEach(([id, lsKey]) => {
     document.getElementById(id)?.addEventListener("input", function() {
       localStorage.setItem(lsKey, this.value);
-      renderZones(); // apply immediately to floorplan
+      applyConfig();   // update CSS variables immediately
+      renderZones();   // re-render floorplan with new colours
     });
   });
 
-  if (!isAdmin) return;  // ══ Admin-only bindings below ══════════
+  if (!isAdmin) {
+    // Non-admin: still wire the reset button
+    document.getElementById("resetColoursBtn")?.addEventListener("click", () => {
+      const colourLsKeys = [
+        'ow_color_on_person','ow_color_on_motion','ow_color_on_door','ow_color_on_window',
+        'ow_color_on_animal','ow_color_on_vehicle','ow_color_on_smoke','ow_color_on_co','ow_color_on_default',
+        'ow_color_off_person','ow_color_off_motion','ow_color_off_door','ow_color_off_window',
+        'ow_color_off_animal','ow_color_off_vehicle','ow_color_off_smoke','ow_color_off_co','ow_color_off_default',
+        'ow_color_zone_triggered','ow_color_zone_fault','ow_color_zone_bypassed','ow_color_zone_armed','ow_color_zone_normal'
+      ];
+      colourLsKeys.forEach(k => localStorage.removeItem(k));
+      applyConfig();
+      renderZones();
+      openSettings('zones');
+      const st = document.getElementById('resetColoursStatus');
+      if (st) { st.textContent = '✓ Reset'; setTimeout(() => st.textContent = '', 2000); }
+    });
+    return;  // ══ Admin-only bindings below ══════════
+  }
 
   // ── Alarm entity live search ─────────────────────────────────
   const alarmInput   = document.getElementById("cfgAlarmEntity");
@@ -6786,6 +6805,7 @@ function renderSettingsPanel() {
     ];
     colourLsKeys.forEach(k => localStorage.removeItem(k));
     applyConfig();
+    renderZones();
     openSettings('zones');
     const st = document.getElementById('resetColoursStatus');
     if (st) { st.textContent = '✓ Reset'; setTimeout(() => st.textContent = '', 2000); }
