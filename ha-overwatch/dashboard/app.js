@@ -7708,6 +7708,8 @@ async function init() {
   if (IS_DIRECT_MODE) {
     const zonesBtn = document.getElementById("zonesBtn");
     if (zonesBtn) zonesBtn.style.display = "none";
+    const automationsBtnDirect = document.getElementById("automationsBtn");
+    if (automationsBtnDirect) automationsBtnDirect.style.display = "none";
   }
 
   // Automations button
