@@ -557,7 +557,7 @@ const server = http.createServer(async (req, res) => {
 
   /* ── /ow/automations — automation list r/w ─────────────────── */
   if (pathname === "/ow/automations" && req.method === "GET") {
-    const p = path.join(CONFIG_DIR, "automations.json");
+    const p = path.join(DATA_DIR, "config", "automations.json");
     try {
       json(res, JSON.parse(fs.readFileSync(p, "utf8")));
     } catch {
@@ -570,7 +570,8 @@ const server = http.createServer(async (req, res) => {
     try {
       const body = await readBody(req);
       const list = Array.isArray(body) ? body : [];
-      const p = path.join(CONFIG_DIR, "automations.json");
+      const p = path.join(DATA_DIR, "config", "automations.json");
+      fs.mkdirSync(path.join(DATA_DIR, "config"), { recursive: true });
       fs.writeFileSync(p, JSON.stringify(list, null, 2), "utf8");
       json(res, { ok: true });
     } catch(e) {

@@ -38,7 +38,7 @@ async function loadHAEntities() {
     return;
   }
   try {
-    const r = await fetch(apiPath('ow/ha-states') + '?v=' + Date.now());
+    const r = await fetch(apiPath('ow/states') + '?v=' + Date.now());
     if (r.ok) {
       const data = await r.json();
       _haEntities = Object.entries(data).map(([id,s]) => ({
