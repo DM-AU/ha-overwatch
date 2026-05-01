@@ -189,14 +189,45 @@ function camerasByGroupZone() {
 /* ── Zone/Group hierarchical selector for triggers ─────────── */
 // Returns zone/group tree for zone event / zone arm triggers
 function zoneGroupTree() {
+  // Build: floors → groups → zones, with ungrouped zones at the end
+  const floorList = ow().floors || [];
   const result = [];
-  groups().forEach(g=>{
-    const gZones=(g.zone_ids||[]).map(id=>zones().find(z=>z.id===id)).filter(Boolean);
-    result.push({type:'group',id:g.id,name:g.name||g.id,armed:groupArmed(g),triggered:groupTriggered(g),zones:gZones});
-  });
-  const gpzids=new Set(groups().flatMap(g=>g.zone_ids||[]));
-  const ungrouped=zones().filter(z=>!gpzids.has(z.id));
-  if(ungrouped.length) result.push({type:'ungrouped',zones:ungrouped});
+  const gpzids = new Set(groups().flatMap(g=>g.zone_ids||[]));
+
+  if (floorList.length > 0) {
+    floorList.forEach(floor => {
+      // Groups whose zones are on this floor
+      const floorGroups = groups().map(g => {
+        const gZones = (g.zone_ids||[]).map(id=>zones().find(z=>z.id===id)).filter(z=>z&&(!z.floor_id||z.floor_id===floor.id));
+        return gZones.length ? {type:'group',id:g.id,name:g.name||g.id,armed:groupArmed(g),triggered:groupTriggered(g),zones:gZones} : null;
+      }).filter(Boolean);
+
+      // Ungrouped zones on this floor
+      const floorUngrouped = zones().filter(z=>!gpzids.has(z.id)&&(!z.floor_id||z.floor_id===floor.id));
+
+      if (floorGroups.length || floorUngrouped.length) {
+        result.push({type:'floor',id:floor.id,name:floor.name||floor.id,groups:floorGroups,ungrouped:floorUngrouped});
+      }
+    });
+    // Zones with no floor assignment
+    const noFloor = zones().filter(z=>!z.floor_id);
+    const noFloorGroups = groups().map(g=>{
+      const gZones=(g.zone_ids||[]).map(id=>zones().find(z=>z.id===id)).filter(z=>z&&!z.floor_id);
+      return gZones.length?{type:'group',id:g.id,name:g.name||g.id,armed:groupArmed(g),triggered:groupTriggered(g),zones:gZones}:null;
+    }).filter(Boolean);
+    const noFloorUngrouped=noFloor.filter(z=>!gpzids.has(z.id));
+    if (noFloorGroups.length||noFloorUngrouped.length) {
+      result.push({type:'floor',id:'_nofloor',name:'Unassigned',groups:noFloorGroups,ungrouped:noFloorUngrouped});
+    }
+  } else {
+    // No floors — flat: groups then ungrouped
+    groups().forEach(g=>{
+      const gZones=(g.zone_ids||[]).map(id=>zones().find(z=>z.id===id)).filter(Boolean);
+      if(gZones.length) result.push({type:'group',id:g.id,name:g.name||g.id,armed:groupArmed(g),triggered:groupTriggered(g),zones:gZones});
+    });
+    const ungrouped=zones().filter(z=>!gpzids.has(z.id));
+    if(ungrouped.length) result.push({type:'ungrouped',zones:ungrouped});
+  }
   return result;
 }
 
@@ -259,7 +290,8 @@ function parseHAAutomation(ha) {
 
   const rawTriggers=ha.triggers||ha.trigger||[];
   for (const t of (Array.isArray(rawTriggers)?rawTriggers:rawTriggers?[rawTriggers]:[])) {
-    if (!t||t.platform!=='state') { if(t) warnings.push(`Unsupported trigger: ${t.platform||'unknown'}`); continue; }
+    const trigPlatform = t.platform || t.trigger || ''; // HA 2024.x uses 'trigger', older uses 'platform'
+    if (!t||trigPlatform!=='state') { if(t) warnings.push(`Unsupported trigger: ${trigPlatform||'unknown'}`); continue; }
     const ids=Array.isArray(t.entity_id)?t.entity_id:(t.entity_id?[t.entity_id]:[]);
     const forDur=t.for||null;
     const zoneTriggIds=ids.filter(id=>/^binary_sensor\.overwatch_zone_(?!group).+_triggered$/.test(id));
@@ -291,8 +323,10 @@ function parseHAAutomation(ha) {
     else if (c.condition==='state') {
       const eid = c.entity_id||'';
       const domain = eid.split('.')[0];
-      if (domain==='person'||domain==='device_tracker') {
+      if (domain==='person') {
         draft.conditions.push({id:uid(),type:'person',entity_ids:eid?[eid]:[],state:c.state||'home'});
+      } else if (domain==='device_tracker') {
+        draft.conditions.push({id:uid(),type:'device',entity_ids:eid?[eid]:[],state:c.state||'home'});
       } else {
         draft.conditions.push({id:uid(),type:'entity',entity_id:eid,state:c.state||'on'});
       }
@@ -358,6 +392,7 @@ function addCondition(type) {
     time:   {time_mode:'manual',after:'00:00',before:'23:59',time_entity:''},
     entity: {entity_id:'',state:'on'},
     person: {entity_ids:[],state:'home'},
+    device: {entity_ids:[],state:'home'},
   };
   _draft.conditions.push({id:uid(),type,...(defaults[type]||{})});
   renderEditorKeepScroll();
@@ -369,6 +404,7 @@ function addAction(type) {
     notify: {target:'',message:'HA-Overwatch: Zone triggered.',title:''},
     arm:    {service:'alarm_arm_away',entity_id:''},
     camera: {entity_ids:[],service:'snapshot',service_data:{}},
+    camera_view: {entity_ids:[],service:'turn_on'},
     entity: {entity_id:'',service:'turn_on'},
   };
   _draft.actions.push({id:uid(),type,...(defaults[type]||{})});
@@ -537,7 +573,8 @@ function renderEditor() {
       ${editorSection('🔀','Conditions','Only if true…','conditions',col.conditions,
         _draft.conditions.map(c=>conditionCard(c)).join('')||emptyStepMsg('No conditions — always runs.'),
         `<button class="ow-add-btn" data-add-cond="time">+ Time of day</button>
-         <button class="ow-add-btn" data-add-cond="person">+ Person / Device</button>
+         <button class="ow-add-btn" data-add-cond="person">+ Person</button>
+         <button class="ow-add-btn" data-add-cond="device">+ Device tracker</button>
          <button class="ow-add-btn" data-add-cond="entity">+ Entity state</button>`
       )}
       ${editorSection('🎯','Actions','Then do this…','actions',col.actions,
@@ -547,6 +584,7 @@ function renderEditor() {
          <button class="ow-add-btn" data-add-action="camera">+ Camera</button>
          <button class="ow-add-btn" data-add-action="notify">+ Notify</button>
          <button class="ow-add-btn" data-add-action="arm">+ Arm/Disarm</button>
+         <button class="ow-add-btn" data-add-action="camera_view">+ Camera view</button>
          <button class="ow-add-btn" data-add-action="entity">+ Other entity</button>`
       )}
     </div>`;
@@ -606,12 +644,30 @@ function renderEditor() {
  * ═══════════════════════════════════════════════════════════ */
 function triggerCard(t) {
   let inner = '';
+  const _fp = (t.for_duration||'').split(':');
+  const _fH = _fp[0]||'', _fM = _fp[1]||'', _fS = _fp[2]||'';
   const forField = `
     <div style="margin-top:10px;">
-      <label style="${labelStyle}">For (HH:MM:SS — optional)</label>
-      <input id="trig-for-${t.id}" type="text" value="${escH(t.for_duration||'')}"
-        placeholder="00:00:30 — trigger only after this duration"
-        style="${inputStyle}" autocomplete="off"/>
+      <label style="${labelStyle}">For duration (optional — trigger only after held this long)</label>
+      <div style="display:flex;align-items:center;gap:6px;">
+        <div style="flex:1;">
+          <input id="trig-for-h-${t.id}" type="number" min="0" max="23" value="${escH(_fH)}"
+            placeholder="0" style="${inputStyle}text-align:center;" autocomplete="off"/>
+          <div style="font-size:9px;color:#444;text-align:center;margin-top:2px;">Hours</div>
+        </div>
+        <span style="color:#555;font-size:18px;padding-bottom:14px;">:</span>
+        <div style="flex:1;">
+          <input id="trig-for-m-${t.id}" type="number" min="0" max="59" value="${escH(_fM)}"
+            placeholder="0" style="${inputStyle}text-align:center;" autocomplete="off"/>
+          <div style="font-size:9px;color:#444;text-align:center;margin-top:2px;">Minutes</div>
+        </div>
+        <span style="color:#555;font-size:18px;padding-bottom:14px;">:</span>
+        <div style="flex:1;">
+          <input id="trig-for-s-${t.id}" type="number" min="0" max="59" value="${escH(_fS)}"
+            placeholder="0" style="${inputStyle}text-align:center;" autocomplete="off"/>
+          <div style="font-size:9px;color:#444;text-align:center;margin-top:2px;">Seconds</div>
+        </div>
+      </div>
     </div>`;
 
   if (t.type === 'zone' || t.type === 'zone_arm') {
@@ -708,113 +764,164 @@ function zoneGroupSelector(t, id) {
   const tree = zoneGroupTree();
   const selZones = t.zone_ids||[];
   const selGroups = t.group_ids||[];
+  const showSensors = (t.type === 'zone');
 
-  return `<div id="${escH(id)}" class="ow-scbl" style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:8px;overflow:hidden;">
-    <div style="position:relative;border-bottom:1px solid rgba(255,255,255,0.06);">
-      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" style="position:absolute;left:9px;top:50%;transform:translateY(-50%);opacity:0.35;pointer-events:none;"><circle cx="11" cy="11" r="7" stroke="white" stroke-width="2.5"/><path d="M16 16L21 21" stroke="white" stroke-width="2.5" stroke-linecap="round"/></svg>
-      <input type="text" placeholder="Filter zones…" autocomplete="off"
-        style="width:100%;background:none;border:none;color:#ccc;padding:7px 10px 7px 28px;font-size:12px;outline:none;box-sizing:border-box;"
-        oninput="(function(el){var q=el.value.toLowerCase();el.closest('.ow-scbl').querySelectorAll('[data-scbl-item]').forEach(function(r){r.style.display=r.dataset.scblLabel.toLowerCase().includes(q)?'':'none';});})(this)"
-        onkeydown="event.stopPropagation()"/>
-    </div>
-    <div style="max-height:220px;overflow-y:auto;padding:4px;">
-      ${tree.map(node => {
-        if (node.type === 'ungrouped') {
-          return node.zones.map(z => zoneRow(z, selZones, selGroups, null)).join('');
-        }
-        // Group node
-        const gId = escH(node.id);
-        const gCollapsed = !!_collapsedSteps[`zg-${node.id}`];
-        const gState = stateBadge(node.triggered, node.armed);
-        const allZoneIds = node.zones.map(z=>z.id);
-        const allSelected = allZoneIds.every(zid=>selZones.includes(zid));
-        const someSelected = allZoneIds.some(zid=>selZones.includes(zid)) || selGroups.includes(node.id);
-        return `
-          <div data-scbl-item data-scbl-label="${escH(node.name)}">
-            <div style="display:flex;align-items:center;padding:5px 6px;gap:6px;">
-              <button data-grp-collapse="${gId}" style="background:none;border:none;color:#555;cursor:pointer;font-size:10px;padding:0 2px;flex-shrink:0;">${gCollapsed?'▶':'▼'}</button>
-              <label style="display:flex;align-items:center;gap:7px;cursor:pointer;flex:1;">
-                <input type="checkbox" data-grp-cb="${gId}" ${someSelected?'checked':''} ${allSelected&&!gCollapsed?'':''}
-                  style="accent-color:#0064d2;flex-shrink:0;">
-                <span style="font-size:12px;font-weight:600;color:#ccc;">${escH(node.name)}</span>
-                ${gState}
-              </label>
-            </div>
-            ${gCollapsed?'':`<div data-grp-children="${gId}" style="padding-left:20px;">${node.zones.map(z=>zoneRow(z,selZones,selGroups,node.id)).join('')}</div>`}
-          </div>`;
-      }).join('')}
-    </div>
-  </div>`;
+  function renderTree() {
+    return tree.map(node => {
+      if (node.type === 'ungrouped') {
+        return node.zones.map(z => zoneRow(z, selZones, selGroups, null, showSensors)).join('');
+      }
+      if (node.type === 'floor') {
+        const fCollapsed = !!_collapsedSteps['zf-' + node.id];
+        const fTriggered = node.groups.some(g=>g.triggered) || node.ungrouped.some(z=>zoneTriggered(z));
+        const fArmed = node.groups.some(g=>g.armed) || node.ungrouped.some(z=>zoneArmed(z));
+        const children = fCollapsed ? '' :
+          '<div style="padding-left:8px;">' +
+          node.groups.map(g => zoneGroupBlock(g, selZones, selGroups, showSensors)).join('') +
+          node.ungrouped.map(z => zoneRow(z, selZones, selGroups, null, showSensors)).join('') +
+          '</div>';
+        return '<div data-scbl-item data-scbl-label="' + escH(node.name) + '">' +
+          '<div style="display:flex;align-items:center;padding:5px 6px;gap:5px;background:rgba(255,255,255,0.03);border-radius:5px;margin-bottom:2px;">' +
+          '<button data-flo-collapse="' + escH(node.id) + '" style="background:none;border:none;color:#666;cursor:pointer;font-size:10px;padding:0 2px;">' + (fCollapsed?'▶':'▼') + '</button>' +
+          '<span style="font-size:11px;font-weight:700;color:#aaa;text-transform:uppercase;letter-spacing:0.06em;flex:1;">' + escH(node.name) + '</span>' +
+          stateBadge(fTriggered, fArmed) +
+          '</div>' + children + '</div>';
+      }
+      return zoneGroupBlock(node, selZones, selGroups, showSensors);
+    }).join('');
+  }
+
+  return '<div id="' + escH(id) + '" class="ow-scbl" style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:8px;overflow:hidden;">' +
+    '<div style="position:relative;border-bottom:1px solid rgba(255,255,255,0.06);">' +
+    '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" style="position:absolute;left:9px;top:50%;transform:translateY(-50%);opacity:0.35;pointer-events:none;"><circle cx="11" cy="11" r="7" stroke="white" stroke-width="2.5"/><path d="M16 16L21 21" stroke="white" stroke-width="2.5" stroke-linecap="round"/></svg>' +
+    '<input type="text" placeholder="Filter zones\u2026" autocomplete="off"' +
+    ' style="width:100%;background:none;border:none;color:#ccc;padding:7px 10px 7px 28px;font-size:12px;outline:none;box-sizing:border-box;"' +
+    ' oninput="(function(el){var q=el.value.toLowerCase();el.closest(\'.ow-scbl\').querySelectorAll(\'[data-scbl-item]\').forEach(function(r){r.style.display=r.dataset.scblLabel.toLowerCase().includes(q)?\'\':\\\'none\\\';});})(this)"' +
+    ' onkeydown="event.stopPropagation()"/>' +
+    '</div>' +
+    '<div style="max-height:280px;overflow-y:auto;padding:4px;">' + renderTree() + '</div>' +
+    '</div>';
 }
 
-function zoneRow(z, selZones, selGroups, groupId) {
+function zoneGroupBlock(g, selZones, selGroups, showSensors) {
+  const gId = escH(g.id);
+  // Collapsed by default unless something is selected inside
+  const hasSelection = g.zones.some(z=>selZones.includes(z.id)) || selGroups.includes(g.id);
+  const gCollapsed = !hasSelection && (_collapsedSteps['zg-' + g.id] !== false);
+  const someSelected = hasSelection;
+  const children = gCollapsed ? '' :
+    '<div data-grp-children="' + gId + '" style="padding-left:16px;">' +
+    g.zones.map(z => zoneRow(z, selZones, selGroups, g.id, showSensors)).join('') +
+    '</div>';
+  return '<div data-scbl-item data-scbl-label="' + escH(g.name) + '">' +
+    '<div style="display:flex;align-items:center;padding:4px 6px;gap:6px;">' +
+    '<button data-grp-collapse="' + gId + '" style="background:none;border:none;color:#555;cursor:pointer;font-size:10px;padding:0 2px;flex-shrink:0;">' + (gCollapsed?'▶':'▼') + '</button>' +
+    '<label style="display:flex;align-items:center;gap:7px;cursor:pointer;flex:1;">' +
+    '<input type="checkbox" data-grp-cb="' + gId + '" ' + (someSelected?'checked':'') + ' style="accent-color:#0064d2;flex-shrink:0;">' +
+    '<span style="font-size:12px;font-weight:600;color:#ccc;">' + escH(g.name) + '</span>' +
+    stateBadge(g.triggered, g.armed) +
+    '</label></div>' + children + '</div>';
+}
+
+function zoneRow(z, selZones, selGroups, groupId, showSensors) {
   const zId = escH(z.id);
-  const zCollapsed = !!_collapsedSteps[`zzr-${z.id}`];
+  const sensors = z.sensors || [];
+  const hasSensors = showSensors && sensors.length > 0;
+  const zSelected = selZones.includes(z.id);
+  // Zones collapsed by default unless selected
+  const zCollapsed = hasSensors && !zSelected && (_collapsedSteps['zzr-' + z.id] !== false);
   const state = stateBadge(zoneTriggered(z), zoneArmed(z));
-  const sensors = (z.sensors||[]);
-  return `<div data-scbl-item data-scbl-label="${escH(z.name||z.id)}">
-    <div style="display:flex;align-items:center;padding:4px 6px;gap:6px;">
-      ${sensors.length?`<button data-zone-sensor-collapse="${zId}" style="background:none;border:none;color:#444;cursor:pointer;font-size:9px;padding:0 2px;flex-shrink:0;">${zCollapsed?'▶':'▼'}</button>`:'<span style="width:14px;flex-shrink:0;"></span>'}
-      <label style="display:flex;align-items:center;gap:7px;cursor:pointer;flex:1;">
-        <input type="checkbox" data-zone-cb="${zId}" data-group-id="${escH(groupId||'')}" ${selZones.includes(z.id)?'checked':''} style="accent-color:#0064d2;flex-shrink:0;">
-        <span style="font-size:11px;color:#bbb;">${escH(z.name||z.id)}</span>
-        ${state}
-      </label>
-    </div>
-    ${!zCollapsed&&sensors.length?`<div style="padding-left:28px;">${sensors.map(eid=>`
-      <div style="display:flex;align-items:center;padding:2px 6px;gap:6px;">
-        <span style="font-size:10px;color:#444;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escH(haStates()[eid]?.attributes?.friendly_name||eid.split('.').pop())}</span>
-        ${stateBadge(haStates()[eid]?.state==='on',null,'small')}
-      </div>`).join('')}</div>`:``}
-  </div>`;
+  const expandBtn = hasSensors
+    ? '<button data-zone-sensor-collapse="' + zId + '" style="background:none;border:none;color:#444;cursor:pointer;font-size:9px;padding:0 2px;flex-shrink:0;">' + (zCollapsed?'▶':'▼') + '</button>'
+    : '<span style="width:14px;flex-shrink:0;"></span>';
+  const sensorRows = (!zCollapsed && hasSensors) ?
+    '<div style="padding-left:28px;">' + sensors.map(eid => {
+      const fn = (haStates()[eid]?.attributes?.friendly_name) || eid.split('.').pop().replace(/_/g,' ');
+      const st = haStates()[eid]?.state;
+      return '<label style="display:flex;align-items:center;gap:7px;padding:2px 4px;cursor:pointer;border-radius:4px;" onmouseenter="this.style.background=\'rgba(255,255,255,0.04)\'" onmouseleave="this.style.background=\'\'">' +
+        '<input type="checkbox" data-sensor-cb value="' + escH(eid) + '" data-zone-id="' + zId + '" ' + (zSelected ? 'checked' : '') + ' style="accent-color:#0064d2;flex-shrink:0;">' +
+        '<span style="flex:1;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + escH(fn) + '</span>' +
+        (st !== undefined ? stateBadge(st==='on', null, 'small') : '') +
+        '</label>';
+    }).join('') + '</div>' : '';
+  return '<div data-scbl-item data-scbl-label="' + escH(z.name||z.id) + '">' +
+    '<div style="display:flex;align-items:center;padding:4px 6px;gap:6px;">' +
+    expandBtn +
+    '<label style="display:flex;align-items:center;gap:7px;cursor:pointer;flex:1;">' +
+    '<input type="checkbox" data-zone-cb="' + zId + '" data-group-id="' + escH(groupId||'') + '"' + (zSelected?' checked':'') + ' style="accent-color:#0064d2;flex-shrink:0;">' +
+    '<span style="font-size:11px;color:#bbb;">' + escH(z.name||z.id) + '</span>' +
+    state + '</label></div>' + sensorRows + '</div>';
 }
+
 
 function wireZoneGroupSelector(t, id) {
   const el = _panelEl?.querySelector(`#${CSS.escape(id)}`);
   if (!el) return;
 
-  // Group collapse buttons
-  el.querySelectorAll('[data-grp-collapse]').forEach(btn=>{
-    btn.onclick=e=>{e.stopPropagation();const gid=btn.dataset.grpCollapse;_collapsedSteps[`zg-${gid}`]=!_collapsedSteps[`zg-${gid}`];renderEditorKeepScroll();};
+  // Floor collapse
+  el.querySelectorAll('[data-flo-collapse]').forEach(btn=>{
+    btn.onclick=e=>{e.stopPropagation();const fid=btn.dataset.floCollapse;_collapsedSteps['zf-'+fid]=!_collapsedSteps['zf-'+fid];renderEditorKeepScroll();};
   });
+  // Group collapse
+  el.querySelectorAll('[data-grp-collapse]').forEach(btn=>{
+    btn.onclick=e=>{e.stopPropagation();const gid=btn.dataset.grpCollapse;_collapsedSteps['zg-'+gid]=!_collapsedSteps['zg-'+gid];renderEditorKeepScroll();};
+  });
+  // Zone sensor expand
   el.querySelectorAll('[data-zone-sensor-collapse]').forEach(btn=>{
-    btn.onclick=e=>{e.stopPropagation();const zid=btn.dataset.zoneSensorCollapse;_collapsedSteps[`zzr-${zid}`]=!_collapsedSteps[`zzr-${zid}`];renderEditorKeepScroll();};
+    btn.onclick=e=>{e.stopPropagation();const zid=btn.dataset.zoneSensorCollapse;_collapsedSteps['zzr-'+zid]=!_collapsedSteps['zzr-'+zid];renderEditorKeepScroll();};
   });
 
-  // Zone checkboxes
   function collectSelections() {
-    t.zone_ids  = [...el.querySelectorAll('[data-zone-cb]:checked')].map(cb=>cb.dataset.zoneCb);
+    t.zone_ids = [...el.querySelectorAll('[data-zone-cb]:checked')].map(cb=>cb.dataset.zoneCb);
     t.group_ids = [...el.querySelectorAll('[data-grp-cb]:checked')].map(cb=>cb.dataset.grpCb)
-      .filter(gid=>{ // only include group if ALL its zones are selected
-        const grp = groups().find(g=>g.id===gid);
-        if (!grp) return false;
-        return (grp.zone_ids||[]).every(zid=>t.zone_ids.includes(zid));
+      .filter(gid=>{
+        const grp=groups().find(g=>g.id===gid);
+        return grp && (grp.zone_ids||[]).every(zid=>t.zone_ids.includes(zid));
       });
   }
+
+  // Zone checkboxes — also update sensor checkboxes within the zone
   el.querySelectorAll('[data-zone-cb]').forEach(cb=>{
     cb.onchange=()=>{
+      // Cascade to sensor checkboxes in this zone
+      el.querySelectorAll(`[data-sensor-cb][data-zone-id="${CSS.escape(cb.dataset.zoneCb)}"]`).forEach(scb=>scb.checked=cb.checked);
       collectSelections();
-      // Update parent group checkbox state
+      // Update parent group checkbox
       const gid=cb.dataset.groupId;
       if (gid) {
         const grp=groups().find(g=>g.id===gid);
         if (grp) {
-          const allZids=grp.zone_ids||[];
           const grpCb=el.querySelector(`[data-grp-cb="${CSS.escape(gid)}"]`);
-          if(grpCb) grpCb.checked=allZids.every(zid=>t.zone_ids.includes(zid));
+          if(grpCb) grpCb.checked=(grp.zone_ids||[]).every(zid=>t.zone_ids.includes(zid));
         }
       }
     };
   });
+
+  // Sensor checkboxes — individual sensor check means the zone is "partially" selected
+  // For now: checking a sensor selects its zone; unchecking doesn't deselect the zone
+  // (zone still selected, just that one sensor will be tracked via the zone entity anyway)
+  // This is display feedback only — what goes to HA is zone entities, not individual sensors
+  el.querySelectorAll('[data-sensor-cb]').forEach(scb=>{
+    scb.onchange=()=>{
+      if (scb.checked) {
+        // Ensure parent zone checkbox is checked
+        const zCb=el.querySelector(`[data-zone-cb="${CSS.escape(scb.dataset.zoneId)}"]`);
+        if(zCb&&!zCb.checked){zCb.checked=true;}
+        collectSelections();
+      }
+    };
+  });
+
+  // Group checkboxes — cascade to zones
   el.querySelectorAll('[data-grp-cb]').forEach(cb=>{
     cb.onchange=()=>{
       const gid=cb.dataset.grpCb;
       const grp=groups().find(g=>g.id===gid);
       if (grp) {
-        // Cascade: check/uncheck all zone checkboxes in this group
         (grp.zone_ids||[]).forEach(zid=>{
           const zCb=el.querySelector(`[data-zone-cb="${CSS.escape(zid)}"]`);
-          if (zCb) zCb.checked=cb.checked;
+          if (zCb) { zCb.checked=cb.checked; el.querySelectorAll(`[data-sensor-cb][data-zone-id="${CSS.escape(zid)}"]`).forEach(scb=>scb.checked=cb.checked); }
         });
       }
       collectSelections();
@@ -948,15 +1055,13 @@ function conditionCard(c) {
       <div><label style="${labelStyle}">Must be in state</label><input id="cond-state-${c.id}" type="text" value="${escH(c.state||'on')}" placeholder="on / off / home / …" style="${inputStyle}"/></div>`;
   }
   if (c.type === 'person') {
-    const persons  = entitiesByDomain('person');
-    const trackers = entitiesByDomain('device_tracker');
-    const all      = [...persons, ...trackers];
+    const persons = entitiesByDomain('person');
     inner = `
       <div style="margin-bottom:10px;">
-        <label style="${labelStyle}">Person / Device tracker</label>
-        ${all.length
-          ? searchableCheckboxList(c.entity_ids||[], all, `cond-person-${c.id}`)
-          : entityAutocomplete(`cond-person-ac-${c.id}`, c.entity_ids?.[0]||'', 'person.* / device_tracker.*', null, ['person','device_tracker'])}
+        <label style="${labelStyle}">Person</label>
+        ${persons.length
+          ? searchableCheckboxList(c.entity_ids||[], persons, `cond-person-${c.id}`)
+          : entityAutocomplete(`cond-person-ac-${c.id}`, c.entity_ids?.[0]||'', 'person.*', null, ['person'])}
       </div>
       <div>
         <label style="${labelStyle}">Must be in state</label>
@@ -966,7 +1071,24 @@ function conditionCard(c) {
         </select>
       </div>`;
   }
-  const labels = {time:'Time of Day', entity:'Entity State', person:'Person / Device'};
+  if (c.type === 'device') {
+    const trackers = entitiesByDomain('device_tracker');
+    inner = `
+      <div style="margin-bottom:10px;">
+        <label style="${labelStyle}">Device Tracker</label>
+        ${trackers.length
+          ? searchableCheckboxList(c.entity_ids||[], trackers, `cond-device-${c.id}`)
+          : entityAutocomplete(`cond-device-ac-${c.id}`, c.entity_ids?.[0]||'', 'device_tracker.*', null, ['device_tracker'])}
+      </div>
+      <div>
+        <label style="${labelStyle}">Must be in state</label>
+        <select id="cond-device-state-${c.id}" style="${selectStyle}">
+          <option value="home"     ${c.state==='home'    ?'selected':''}>Home</option>
+          <option value="not_home" ${c.state==='not_home'?'selected':''}>Away (not home)</option>
+        </select>
+      </div>`;
+  }
+  const labels = {time:'Time of Day', entity:'Entity State', person:'Person', device:'Device Tracker'};
   return stepCard(c.id, labels[c.type]||c.type, inner, 'cond');
 }
 
@@ -1071,6 +1193,30 @@ function actionCard(a, idx, total) {
         </select></div>`;
   }
 
+  if (a.type === 'camera_view') {
+    // Camera view switches created by HA-Overwatch: switch.overwatch_camera_*
+    // Show them grouped by floor → group → zone, plus the master all switch
+    const camViewSwitches = allEntities().filter(e =>
+      e.entity_id.startsWith('switch.overwatch_camera_') ||
+      e.entity_id === 'switch.overwatch_camera_all'
+    ).sort((a,b)=>a.entity_id.localeCompare(b.entity_id));
+    inner = `
+      <div style="margin-bottom:10px;">
+        <label style="${labelStyle}">Camera view switches <span style="color:#444;font-weight:400;">(HA-Overwatch camera toggles)</span></label>
+        ${camViewSwitches.length
+          ? searchableCheckboxList(a.entity_ids||[], camViewSwitches, `act-camview-${a.id}`)
+          : `<div style="color:#555;font-size:11px;">No overwatch camera switches found in HA states.</div>`}
+      </div>
+      <div>
+        <label style="${labelStyle}">Action</label>
+        <select id="act-camview-svc-${a.id}" style="${selectStyle}">
+          <option value="turn_on"  ${a.service==='turn_on' ?'selected':''}>Turn ON (show cameras)</option>
+          <option value="turn_off" ${a.service==='turn_off'?'selected':''}>Turn OFF (hide cameras)</option>
+          <option value="toggle"   ${a.service==='toggle'  ?'selected':''}>Toggle</option>
+        </select>
+      </div>`;
+  }
+
   if (a.type === 'entity') {
     inner = `
       <div style="margin-bottom:10px;"><label style="${labelStyle}">Entity</label>${entityAutocomplete(`act-entity-ac-${a.id}`,a.entity_id||'','Search any entity…')}</div>
@@ -1082,7 +1228,7 @@ function actionCard(a, idx, total) {
         </select></div>`;
   }
 
-  const labels={siren:'Siren',light:'Light',camera:'Camera',notify:'Notify',arm:'Arm/Disarm',entity:'Other Entity'};
+  const labels={siren:'Siren',light:'Light',camera:'Camera',camera_view:'Camera View',notify:'Notify',arm:'Arm/Disarm',entity:'Other Entity'};
   return stepCard(a.id, labels[a.type]||a.type, inner, 'action', moveControls);
 }
 
@@ -1214,7 +1360,17 @@ function wireTriggerFields(t) {
   if (t.type==='person') { wireSelect(`trig-personstate-${t.id}`,v=>t.state=v); wireSearchableCheckbox(`trig-person-${t.id}`,ids=>t.entity_ids=ids); wireAutocomplete(`trig-person-ac-${t.id}`,v=>t.entity_ids=v?[v]:[]); }
   if (t.type==='device') { wireSelect(`trig-devicestate-${t.id}`,v=>t.state=v); wireSearchableCheckbox(`trig-device-${t.id}`,ids=>t.entity_ids=ids); wireAutocomplete(`trig-device-ac-${t.id}`,v=>t.entity_ids=v?[v]:[]); }
   if (t.type==='entity') { wireAutocomplete(`trig-entity-ac-${t.id}`,v=>t.entity_id=v); wireInput(`trig-to-${t.id}`,v=>t.to=v); }
-  wireInput(`trig-for-${t.id}`,v=>t.for_duration=v.trim()||null);
+  // Wire HH:MM:SS inputs
+  function updateForDuration() {
+    const h=(_panelEl?.querySelector(`#trig-for-h-${t.id}`)?.value||'').padStart(2,'0');
+    const m=(_panelEl?.querySelector(`#trig-for-m-${t.id}`)?.value||'').padStart(2,'0');
+    const s=(_panelEl?.querySelector(`#trig-for-s-${t.id}`)?.value||'').padStart(2,'0');
+    t.for_duration = (h==='00'&&m==='00'&&s==='00') ? null : `${h}:${m}:${s}`;
+  }
+  [`trig-for-h-${t.id}`,`trig-for-m-${t.id}`,`trig-for-s-${t.id}`].forEach(id=>{
+    const el=_panelEl?.querySelector(`#${CSS.escape(id)}`);
+    if(el)el.oninput=updateForDuration;
+  });
 }
 
 function wireConditionFields(c) {
@@ -1228,6 +1384,11 @@ function wireConditionFields(c) {
     wireSearchableCheckbox(`cond-person-${c.id}`,ids=>c.entity_ids=ids);
     wireAutocomplete(`cond-person-ac-${c.id}`,v=>c.entity_ids=v?[v]:[]);
     wireSelect(`cond-person-state-${c.id}`,v=>c.state=v);
+  }
+  if (c.type==='device') {
+    wireSearchableCheckbox(`cond-device-${c.id}`,ids=>c.entity_ids=ids);
+    wireAutocomplete(`cond-device-ac-${c.id}`,v=>c.entity_ids=v?[v]:[]);
+    wireSelect(`cond-device-state-${c.id}`,v=>c.state=v);
   }
 }
 
@@ -1273,6 +1434,10 @@ function wireActionFields(a) {
     }
   }
   if (a.type==='arm') { wireSelect(`act-arm-entity-sel-${a.id}`,v=>a.entity_id=v); wireAutocomplete(`act-arm-entity-ac-${a.id}`,v=>a.entity_id=v); wireSelect(`act-arm-svc-${a.id}`,v=>a.service=v); }
+  if (a.type==='camera_view') {
+    wireSearchableCheckbox(`act-camview-${a.id}`,ids=>a.entity_ids=ids);
+    wireSelect(`act-camview-svc-${a.id}`,v=>a.service=v);
+  }
   if (a.type==='entity') { wireAutocomplete(`act-entity-ac-${a.id}`,v=>a.entity_id=v); wireSelect(`act-entity-svc-${a.id}`,v=>a.service=v); }
 }
 

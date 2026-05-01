@@ -930,6 +930,14 @@ const server = http.createServer(async (req, res) => {
       }, haRes => {
         haRes.resume();
         console.log(`[OW-Auto] Delete automation ${id} → HA ${haRes.statusCode}`);
+        // Reload HA automations so deletion takes effect immediately
+        const reloadReq = (process.env.SUPERVISOR_TOKEN ? http : https).request({
+          hostname, port, method: "POST",
+          path: `${basePath}/api/services/automation/reload`,
+          headers: { "Authorization": `Bearer ${token}`, "Content-Length": "0" },
+        }, r => r.resume());
+        reloadReq.on("error", () => {});
+        reloadReq.end();
         json(res, { ok: true, ha_status: haRes.statusCode });
       });
       haReq.on("error", e => { json(res, { ok: false, detail: e.message }); });
@@ -2458,27 +2466,27 @@ function buildHAAutomation(auto, allZones, allGroups) {
           : `binary_sensor.overwatch_zone_${slug}_triggered`);
       });
       if (entityIds.length > 0) {
-        const trig = { platform:"state", entity_id: entityIds.length===1?entityIds[0]:entityIds, to:toState };
+        const trig = { trigger:"state", entity_id: entityIds.length===1?entityIds[0]:entityIds, to:toState };
         if (forDur) trig.for = forDur;
         triggers.push(trig);
       } else {
-        triggers.push({ platform:"state", entity_id:"binary_sensor.overwatch_zone_master_triggered", to:"on" });
+        triggers.push({ trigger:"state", entity_id:"binary_sensor.overwatch_zone_master_triggered", to:"on" });
       }
     } else if (t.type === 'person' || t.type === 'device') {
       if ((t.entity_ids||[]).length) {
-        const trig = { platform:"state", entity_id:t.entity_ids.length===1?t.entity_ids[0]:t.entity_ids, to:t.state||'home' };
+        const trig = { trigger:"state", entity_id:t.entity_ids.length===1?t.entity_ids[0]:t.entity_ids, to:t.state||'home' };
         if (forDur) trig.for = forDur;
         triggers.push(trig);
       }
     } else if (t.type === 'entity') {
       if (t.entity_id) {
-        const trig = { platform:"state", entity_id:t.entity_id, to:t.to||'on' };
+        const trig = { trigger:"state", entity_id:t.entity_id, to:t.to||'on' };
         if (forDur) trig.for = forDur;
         triggers.push(trig);
       }
     } else if (t.type === 'door' || t.type === 'window' || t.type === 'sensor') {
       if ((t.entity_ids||[]).length) {
-        const trig = { platform:"state", entity_id:t.entity_ids.length===1?t.entity_ids[0]:t.entity_ids, to:t.state||'on' };
+        const trig = { trigger:"state", entity_id:t.entity_ids.length===1?t.entity_ids[0]:t.entity_ids, to:t.state||'on' };
         if (forDur) trig.for = forDur;
         triggers.push(trig);
       }
@@ -2498,8 +2506,10 @@ function buildHAAutomation(auto, allZones, allGroups) {
     } else if (c.type === 'entity' && c.entity_id) {
       conditions.push({ condition:"state", entity_id:c.entity_id, state:c.state||'on' });
     } else if (c.type === 'person' && (c.entity_ids||[]).length) {
-      // Multiple persons → AND (all must be in state) — most useful for "all home"
-      // For OR semantics the user should add separate conditions
+      c.entity_ids.forEach(eid => {
+        conditions.push({ condition:"state", entity_id:eid, state:c.state||'home' });
+      });
+    } else if (c.type === 'device' && (c.entity_ids||[]).length) {
       c.entity_ids.forEach(eid => {
         conditions.push({ condition:"state", entity_id:eid, state:c.state||'home' });
       });
@@ -2525,6 +2535,11 @@ function buildHAAutomation(auto, allZones, allGroups) {
         const act = { action:`camera.${a.service}`, target:{ entity_id:ids.length===1?ids[0]:ids } };
         if (a.service_data && Object.keys(a.service_data).length) act.data = a.service_data;
         actions.push(act);
+      }
+    } else if (a.type === 'camera_view') {
+      const ids = (a.entity_ids||[]).filter(Boolean);
+      if (ids.length) {
+        actions.push({ action:`switch.${a.service||'turn_on'}`, target:{ entity_id:ids.length===1?ids[0]:ids } });
       }
     } else if (a.type === 'entity') {
       if (a.entity_id) {
@@ -2573,7 +2588,8 @@ function parseHAAutomation(ha, allZones, allGroups) {
 
   const rawTriggers = ha.triggers || ha.trigger || [];
   for (const t of (Array.isArray(rawTriggers)?rawTriggers:[rawTriggers])) {
-    if (!t || t.platform !== "state") { if (t) warnings.push(`Unsupported trigger: ${t.platform||JSON.stringify(t)}`); continue; }
+    const trigPlatform = t.platform || t.trigger || ""; // HA 2024.x uses "trigger" key, older uses "platform"
+    if (!t || trigPlatform !== "state") { if (t) warnings.push(`Unsupported trigger: ${trigPlatform||JSON.stringify(t)}`); continue; }
     const ids = Array.isArray(t.entity_id)?t.entity_id:(t.entity_id?[t.entity_id]:[]);
     const forDur = t.for||null;
 
