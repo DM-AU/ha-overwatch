@@ -268,6 +268,86 @@ const globalTriggeredZones = {}; // nameSlug(zone.name) -> bool
 // Keyed by entity_id, value is the full HA state object {entity_id, state, attributes, ...}
 const serverHaStates = {};
 
+/* ── Parse HA automations.yaml without a YAML library ─────────
+ * HA's automations.yaml is a YAML list of objects. We need to
+ * extract enough fields to identify and round-trip OW automations:
+ * id, alias, description, triggers/trigger, conditions/condition,
+ * actions/action, mode, state.
+ * We use JSON.parse on the description field which is stored as a
+ * JSON string inside the YAML.
+ * Rather than writing a full YAML parser, we use the fact that HA
+ * writes automations.yaml in a predictable format when using the
+ * config flow, and we can safely use a line-by-line state machine
+ * for the fields we care about. For the full structure we rely on
+ * the REST API to provide the parsed version when individual
+ * automations are fetched by ID.
+ *
+ * Returns array of {id, alias, description, state, _raw_yaml}
+ * The _raw_yaml is the per-automation YAML block for later parsing.
+ * ──────────────────────────────────────────────────────────────── */
+function parseAutomationsYaml(yamlText) {
+  const results = [];
+  // Split into individual automation blocks — each starts with "- " or "- id:"
+  // at column 0 (list items at root level)
+  const lines = yamlText.split("\n");
+  let currentBlock = [];
+  let currentObj = {};
+
+  function commitBlock() {
+    if (!currentBlock.length) return;
+    const blockText = currentBlock.join("\n");
+    // Extract simple scalar fields via regex
+    const getId    = blockText.match(/^(?:\s*-\s+)?id:\s*['""]?([^\s'""\n]+)['""]?/m);
+    const getAlias = blockText.match(/^(?:\s+)?alias:\s*(.+)/m);
+    const getDesc  = blockText.match(/^(?:\s+)?description:\s*(.+)/m);
+    const getMode  = blockText.match(/^(?:\s+)?mode:\s*(.+)/m);
+    const getState = blockText.match(/^(?:\s+)?state:\s*(.+)/m);
+
+    function unquote(s) {
+      if (!s) return "";
+      s = s.trim();
+      if ((s.startsWith("'") && s.endsWith("'")) ||
+          (s.startsWith('"') && s.endsWith('"'))) {
+        return s.slice(1,-1);
+      }
+      return s;
+    }
+
+    const obj = {
+      id:          getId   ? unquote(getId[1])    : "",
+      alias:       getAlias? unquote(getAlias[1]) : "",
+      description: getDesc ? unquote(getDesc[1])  : "",
+      mode:        getMode ? unquote(getMode[1])  : "single",
+      state:       getState? unquote(getState[1]) : "on",
+      _raw_yaml:   blockText,
+    };
+
+    // description may be a JSON string with escaped quotes — try unescaping
+    try {
+      // HA writes: description: '{"ow_meta":"1",...}'
+      // or:        description: "{\"ow_meta\":\"1\",...}"
+      if (obj.description.includes("ow_meta")) {
+        // already readable
+      }
+    } catch {}
+
+    if (obj.id || obj.alias) results.push(obj);
+    currentBlock = [];
+  }
+
+  for (const line of lines) {
+    // A new root-level list item starts a new automation block
+    if (line.match(/^- /) || line.match(/^- *$/)) {
+      commitBlock();
+      currentBlock.push(line);
+    } else {
+      currentBlock.push(line);
+    }
+  }
+  commitBlock();
+  return results;
+}
+
 /* ─── REQUEST HANDLER ─────────────────────────────────────── */
 const server = http.createServer(async (req, res) => {
   // CORS preflight
@@ -581,43 +661,147 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  /* ── /ow/ha-automations — read HA-Overwatch automations from HA ── */
+  /* ── /ow/ha-automations — read HA-Overwatch automations ──────── */
   if (pathname === "/ow/ha-automations" && req.method === "GET") {
     try {
-      const cfg = getHAConfig(loadConfig());
-      if (!cfg.ha_url && !process.env.SUPERVISOR_TOKEN) { json(res, []); return; }
-      let hostname, port, basePath, token;
-      if (process.env.SUPERVISOR_TOKEN) {
-        hostname = "supervisor"; port = 80; basePath = "/core"; token = process.env.SUPERVISOR_TOKEN;
-      } else {
-        const u = new URL(cfg.ha_url.replace(/\/$/, ""));
-        hostname = u.hostname; port = parseInt(u.port)||(u.protocol==="https:"?443:80);
-        basePath = ""; token = cfg.ha_token;
-      }
-      const haReq = (process.env.SUPERVISOR_TOKEN ? http : https).request({
-        hostname, port, method: "GET",
-        path: `${basePath}/api/config/automation/config`,
-        headers: { "Authorization": `Bearer ${token}` },
-      }, haRes => {
-        let d = "";
-        haRes.on("data", c => d += c);
-        haRes.on("end", () => {
+      // Strategy 1: Read automation files directly from HA config dir (add-on mode)
+      // HA stores automations in /config/automations.yaml or /config/automations/*.yaml
+      const haConfigDir = process.env.SUPERVISOR_TOKEN ? "/config" : null;
+      let allAutomations = [];
+      let readFromDisk = false;
+
+      if (haConfigDir) {
+        // Try /config/automations.yaml first (single file)
+        const singleFile = path.join(haConfigDir, "automations.yaml");
+        const autoDir    = path.join(haConfigDir, "automations");
+
+        try {
+          const raw = fs.readFileSync(singleFile, "utf8");
+          // Parse YAML manually — only need to extract objects, use simple approach
+          allAutomations = parseAutomationsYaml(raw);
+          readFromDisk = true;
+        } catch {}
+
+        if (!readFromDisk) {
+          // Try /config/automations/ directory with individual files
           try {
-            const all = JSON.parse(d);
-            // Filter to HA-Overwatch automations only (by alias prefix or metadata)
-            const ours = Array.isArray(all) ? all.filter(a =>
-              (a.alias || "").startsWith("HA-Overwatch") ||
-              (a.description || "").includes("ow_meta:")
-            ) : [];
-            json(res, ours);
-          } catch(e) {
-            console.warn("[OW-Auto] Failed to parse HA automations:", e.message);
-            json(res, []);
+            const files = fs.readdirSync(autoDir).filter(f => f.endsWith(".yaml") || f.endsWith(".yml"));
+            for (const file of files) {
+              try {
+                const raw = fs.readFileSync(path.join(autoDir, file), "utf8");
+                const autos = parseAutomationsYaml(raw);
+                allAutomations.push(...autos);
+                readFromDisk = true;
+              } catch {}
+            }
+          } catch {}
+        }
+      }
+
+      if (!readFromDisk) {
+        // Strategy 2: HA REST — use /api/states to find automation.* entities,
+        // then fetch each config individually
+        // Note: GET /api/config/automation/config is not a list endpoint in all HA versions
+        // Instead, use states to get the list of automation entity IDs
+        const cfg = getHAConfig(loadConfig());
+        if (!cfg.ha_url && !process.env.SUPERVISOR_TOKEN) { json(res, []); return; }
+        let hostname, port, basePath, token;
+        if (process.env.SUPERVISOR_TOKEN) {
+          hostname = "supervisor"; port = 80; basePath = "/core"; token = process.env.SUPERVISOR_TOKEN;
+        } else {
+          const u = new URL(cfg.ha_url.replace(/\/$/, ""));
+          hostname = u.hostname; port = parseInt(u.port)||(u.protocol==="https:"?443:80);
+          basePath = ""; token = cfg.ha_token;
+        }
+        // Read from serverHaStates cache if available (avoids extra HTTP round-trip)
+        const owStates = Object.values(serverHaStates).filter(st =>
+          st.entity_id?.startsWith("automation.") &&
+          (st.attributes?.friendly_name||"").startsWith("HA-Overwatch")
+        );
+        if (owStates.length > 0) {
+          // Build minimal automation objects from states
+          allAutomations = owStates.map(st => ({
+            id:          st.attributes?.id || st.entity_id.replace("automation.",""),
+            alias:       st.attributes?.friendly_name || "",
+            description: st.attributes?.description || "",
+            state:       st.state,
+          }));
+        } else {
+          // Full REST fetch of states
+          await new Promise((resolve) => {
+            const haReq = (process.env.SUPERVISOR_TOKEN ? http : https).request({
+              hostname, port, method: "GET",
+              path: `${basePath}/api/states`,
+              headers: { "Authorization": `Bearer ${token}` },
+            }, haRes => {
+              let d = "";
+              haRes.on("data", c => d += c);
+              haRes.on("end", () => {
+                try {
+                  const states = JSON.parse(d);
+                  allAutomations = states
+                    .filter(st => st.entity_id?.startsWith("automation.") &&
+                      (st.attributes?.friendly_name||"").startsWith("HA-Overwatch"))
+                    .map(st => ({
+                      id:          st.attributes?.id || st.entity_id.replace("automation.",""),
+                      alias:       st.attributes?.friendly_name || "",
+                      description: st.attributes?.description || "",
+                      state:       st.state,
+                    }));
+                } catch {}
+                resolve();
+              });
+            });
+            haReq.on("error", () => resolve());
+            haReq.end();
+          });
+        }
+      }
+
+      // Filter to HA-Overwatch automations only
+      const ours = allAutomations.filter(a =>
+        (a.alias || "").startsWith("HA-Overwatch") ||
+        (a.description || "").includes("ow_meta:")
+      );
+
+      // For each found automation, fetch the full config from HA REST if we only have partial data
+      const fullAutomations = await Promise.all(ours.map(async (a) => {
+        // If we already have triggers/actions from YAML parse, use as-is
+        if (a.triggers || a.trigger || a.actions || a.action) return a;
+        // Otherwise fetch full config by ID
+        if (!a.id) return a;
+        try {
+          const cfg2 = getHAConfig(loadConfig());
+          let hostname2, port2, basePath2, token2;
+          if (process.env.SUPERVISOR_TOKEN) {
+            hostname2 = "supervisor"; port2 = 80; basePath2 = "/core"; token2 = process.env.SUPERVISOR_TOKEN;
+          } else {
+            const u2 = new URL((cfg2.ha_url||"").replace(/\/$/, ""));
+            hostname2 = u2.hostname; port2 = parseInt(u2.port)||(u2.protocol==="https:"?443:80);
+            basePath2 = ""; token2 = cfg2.ha_token;
           }
-        });
-      });
-      haReq.on("error", e => { console.error("[OW-Auto] ha-automations fetch error:", e.message); json(res, []); });
-      haReq.end();
+          const full = await new Promise((resolve) => {
+            const r = (process.env.SUPERVISOR_TOKEN ? http : https).request({
+              hostname: hostname2, port: port2, method: "GET",
+              path: `${basePath2}/api/config/automation/config/${a.id}`,
+              headers: { "Authorization": `Bearer ${token2}` },
+            }, haRes2 => {
+              let d2 = "";
+              haRes2.on("data", c => d2 += c);
+              haRes2.on("end", () => {
+                try { resolve(JSON.parse(d2)); } catch { resolve(a); }
+              });
+            });
+            r.on("error", () => resolve(a));
+            r.end();
+          });
+          // Merge: keep our id/alias/description if HA doesn't return them
+          return { ...a, ...full, id: a.id || full.id };
+        } catch { return a; }
+      }));
+
+      console.log(`[OW-Auto] ha-automations: found ${fullAutomations.length} OW automations (${readFromDisk?"disk":"REST"})`);
+      json(res, fullAutomations);
     } catch(e) {
       console.error("[OW-Auto] /ow/ha-automations error:", e.message);
       json(res, []);
@@ -2313,6 +2497,12 @@ function buildHAAutomation(auto, allZones, allGroups) {
       }
     } else if (c.type === 'entity' && c.entity_id) {
       conditions.push({ condition:"state", entity_id:c.entity_id, state:c.state||'on' });
+    } else if (c.type === 'person' && (c.entity_ids||[]).length) {
+      // Multiple persons → AND (all must be in state) — most useful for "all home"
+      // For OR semantics the user should add separate conditions
+      c.entity_ids.forEach(eid => {
+        conditions.push({ condition:"state", entity_id:eid, state:c.state||'home' });
+      });
     }
   }
 

@@ -288,7 +288,15 @@ function parseHAAutomation(ha) {
   for (const c of (Array.isArray(rawConds)?rawConds:rawConds?[rawConds]:[])) {
     if (!c) continue;
     if (c.condition==='time') draft.conditions.push({id:uid(),type:'time',time_mode:'manual',after:c.after||'00:00',before:c.before||'23:59'});
-    else if (c.condition==='state') draft.conditions.push({id:uid(),type:'entity',entity_id:c.entity_id||'',state:c.state||'on'});
+    else if (c.condition==='state') {
+      const eid = c.entity_id||'';
+      const domain = eid.split('.')[0];
+      if (domain==='person'||domain==='device_tracker') {
+        draft.conditions.push({id:uid(),type:'person',entity_ids:eid?[eid]:[],state:c.state||'home'});
+      } else {
+        draft.conditions.push({id:uid(),type:'entity',entity_id:eid,state:c.state||'on'});
+      }
+    }
     else if (c.condition==='template') { const m=(c.value_template||'').match(/states\('([^']+)'\)/); if(m) draft.conditions.push({id:uid(),type:'time',time_mode:'entity',time_entity:m[1]}); else warnings.push('Unsupported template condition'); }
     else warnings.push(`Unsupported condition: ${c.condition}`);
   }
@@ -349,6 +357,7 @@ function addCondition(type) {
   const defaults = {
     time:   {time_mode:'manual',after:'00:00',before:'23:59',time_entity:''},
     entity: {entity_id:'',state:'on'},
+    person: {entity_ids:[],state:'home'},
   };
   _draft.conditions.push({id:uid(),type,...(defaults[type]||{})});
   renderEditorKeepScroll();
@@ -528,6 +537,7 @@ function renderEditor() {
       ${editorSection('🔀','Conditions','Only if true…','conditions',col.conditions,
         _draft.conditions.map(c=>conditionCard(c)).join('')||emptyStepMsg('No conditions — always runs.'),
         `<button class="ow-add-btn" data-add-cond="time">+ Time of day</button>
+         <button class="ow-add-btn" data-add-cond="person">+ Person / Device</button>
          <button class="ow-add-btn" data-add-cond="entity">+ Entity state</button>`
       )}
       ${editorSection('🎯','Actions','Then do this…','actions',col.actions,
@@ -937,7 +947,27 @@ function conditionCard(c) {
       <div style="margin-bottom:10px;"><label style="${labelStyle}">Entity</label>${entityAutocomplete(`cond-entity-ac-${c.id}`,c.entity_id||'','Search any entity…')}</div>
       <div><label style="${labelStyle}">Must be in state</label><input id="cond-state-${c.id}" type="text" value="${escH(c.state||'on')}" placeholder="on / off / home / …" style="${inputStyle}"/></div>`;
   }
-  return stepCard(c.id, {time:'Time of Day',entity:'Entity State'}[c.type]||c.type, inner, 'cond');
+  if (c.type === 'person') {
+    const persons  = entitiesByDomain('person');
+    const trackers = entitiesByDomain('device_tracker');
+    const all      = [...persons, ...trackers];
+    inner = `
+      <div style="margin-bottom:10px;">
+        <label style="${labelStyle}">Person / Device tracker</label>
+        ${all.length
+          ? searchableCheckboxList(c.entity_ids||[], all, `cond-person-${c.id}`)
+          : entityAutocomplete(`cond-person-ac-${c.id}`, c.entity_ids?.[0]||'', 'person.* / device_tracker.*', null, ['person','device_tracker'])}
+      </div>
+      <div>
+        <label style="${labelStyle}">Must be in state</label>
+        <select id="cond-person-state-${c.id}" style="${selectStyle}">
+          <option value="home"     ${c.state==='home'    ?'selected':''}>Home</option>
+          <option value="not_home" ${c.state==='not_home'?'selected':''}>Away (not home)</option>
+        </select>
+      </div>`;
+  }
+  const labels = {time:'Time of Day', entity:'Entity State', person:'Person / Device'};
+  return stepCard(c.id, labels[c.type]||c.type, inner, 'cond');
 }
 
 /* ════════════════════════════════════════════════════════════
@@ -989,18 +1019,24 @@ function actionCard(a, idx, total) {
   if (a.type === 'camera') {
     const camTree = camerasByGroupZone();
     const camServices = _haServices['camera']||[];
+    const baseServices = [
+      {name:'turn_on',  description:'Turn on / enable camera'},
+      {name:'turn_off', description:'Turn off / disable camera'},
+      {name:'snapshot', description:'Take a snapshot'},
+      {name:'record',   description:'Start recording'},
+    ];
+    const baseNames = new Set(baseServices.map(s=>s.name));
+    const mergedServices = [...baseServices, ...camServices.filter(s=>!baseNames.has(s.name))];
     inner = `
       <div style="margin-bottom:10px;">
         <label style="${labelStyle}">Cameras</label>
         ${camTree.map(node=>cameraGroupZoneBlock(node,a,`act-cam-${a.id}`)).join('')}
-        ${!camTree.length?`<div style="color:#555;font-size:11px;">No cameras in zones. Use entity search:</div>${entityAutocomplete(`act-cam-ac-${a.id}`,a.entity_ids?.[0]||'','camera.*',null,['camera'])}`:''}
+        ${!camTree.length?`<div style="color:#555;font-size:11px;margin-bottom:6px;">No cameras in zones — search HA:</div>${entityAutocomplete(`act-cam-ac-${a.id}`,a.entity_ids?.[0]||'','camera.*',null,['camera'])}`:''}
       </div>
       <div style="margin-bottom:10px;"><label style="${labelStyle}">Action</label>
-        ${camServices.length ? `
-          <select id="act-cam-svc-${a.id}" style="${selectStyle}">
-            ${camServices.map(s=>`<option value="${escH(s.name)}" ${a.service===s.name?'selected':''}>${escH(s.name)} — ${escH(s.description)}</option>`).join('')}
-          </select>` : `
-          <input id="act-cam-svc-${a.id}" type="text" value="${escH(a.service||'snapshot')}" placeholder="snapshot / record / …" style="${inputStyle}"/>`}
+        <select id="act-cam-svc-${a.id}" style="${selectStyle}">
+          ${mergedServices.map(s=>`<option value="${escH(s.name)}" ${a.service===s.name?'selected':''}>${escH(s.name)} — ${escH(s.description)}</option>`).join('')}
+        </select>
       </div>`;
   }
 
@@ -1188,6 +1224,11 @@ function wireConditionFields(c) {
     else wireAutocomplete(`cond-time-entity-ac-${c.id}`,v=>c.time_entity=v);
   }
   if (c.type==='entity') { wireAutocomplete(`cond-entity-ac-${c.id}`,v=>c.entity_id=v); wireInput(`cond-state-${c.id}`,v=>c.state=v); }
+  if (c.type==='person') {
+    wireSearchableCheckbox(`cond-person-${c.id}`,ids=>c.entity_ids=ids);
+    wireAutocomplete(`cond-person-ac-${c.id}`,v=>c.entity_ids=v?[v]:[]);
+    wireSelect(`cond-person-state-${c.id}`,v=>c.state=v);
+  }
 }
 
 function wireActionFields(a) {
