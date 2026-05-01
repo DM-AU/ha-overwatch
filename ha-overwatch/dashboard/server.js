@@ -2528,7 +2528,14 @@ function buildHAAutomation(auto, allZones, allGroups) {
       const svc = target.startsWith('notify.')?target.slice(7):target;
       actions.push({ action:`notify.${svc}`, data:{ message:a.message||'', title:a.title||'HA-Overwatch Alert' } });
     } else if (a.type === 'arm') {
-      if (a.entity_id) actions.push({ action:`alarm_control_panel.${a.service||'alarm_arm_away'}`, target:{ entity_id:a.entity_id } });
+      const ids = (a.entity_ids||[]).filter(Boolean);
+      if (ids.length) {
+        // New format: OW zone/group switches
+        actions.push({ action:`switch.${a.service||'turn_on'}`, target:{ entity_id:ids.length===1?ids[0]:ids } });
+      } else if (a.entity_id) {
+        // Backward compat: old single alarm_control_panel entity
+        actions.push({ action:`alarm_control_panel.${a.service||'alarm_arm_away'}`, target:{ entity_id:a.entity_id } });
+      }
     } else if (a.type === 'camera') {
       const ids = (a.entity_ids||[]).filter(Boolean);
       if (ids.length && a.service) {

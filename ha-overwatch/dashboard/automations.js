@@ -131,28 +131,44 @@ function sensorsByType(type) {
   return result;
 }
 
-function lightsByGroupZone() {
-  // Returns [{type:'group',id,name,armed,triggered, children:[{type:'zone',...,children:[{entity_id,...}]}]}]
+// Build a device tree (lights/cameras) from zoneGroupTree, filtering to zones that have the device type
+function deviceTreeFromZones(deviceKey) {
+  // deviceKey: 'lights' | 'cameras'
+  // Returns the same floor→group→zone structure as zoneGroupTree but only nodes with devices
+  const tree = zoneGroupTree();
   const result = [];
-  groups().forEach(g => {
-    const gZones = (g.zone_ids||[]).map(id=>zones().find(z=>z.id===id)).filter(Boolean).filter(z=>z.lights?.length);
-    if (!gZones.length) return;
-    result.push({ type:'group', id:g.id, name:g.name||g.id, armed:groupArmed(g), triggered:groupTriggered(g),
-      children: gZones.map(z=>({
-        type:'zone', id:z.id, name:z.name||z.id, armed:zoneArmed(z), triggered:zoneTriggered(z),
-        children: (z.lights||[]).map(eid=>({ entity_id:eid, name:haStates()[eid]?.attributes?.friendly_name||eid.split('.').pop().replace(/_/g,' '), state:haStates()[eid]?.state }))
-      }))
-    });
-  });
-  // Ungrouped zones with lights
-  const groupedZoneIds = new Set(groups().flatMap(g=>g.zone_ids||[]));
-  zones().filter(z=>!groupedZoneIds.has(z.id)&&z.lights?.length).forEach(z=>{
-    result.push({ type:'zone', id:z.id, name:z.name||z.id, armed:zoneArmed(z), triggered:zoneTriggered(z),
-      children:(z.lights||[]).map(eid=>({ entity_id:eid, name:haStates()[eid]?.attributes?.friendly_name||eid.split('.').pop().replace(/_/g,' '), state:haStates()[eid]?.state }))
-    });
+  tree.forEach(node => {
+    if (node.type === 'floor') {
+      const floorGroups = (node.groups||[]).map(g => {
+        const gZones = g.zones.filter(z=>(z[deviceKey]||[]).length>0).map(z=>({
+          ...z, devices:(z[deviceKey]||[]).map(eid=>({entity_id:eid,name:haStates()[eid]?.attributes?.friendly_name||eid.split('.').pop().replace(/_/g,' '),state:haStates()[eid]?.state}))
+        }));
+        return gZones.length ? {...g, zones:gZones} : null;
+      }).filter(Boolean);
+      const floorUngrouped = (node.ungrouped||[]).filter(z=>(z[deviceKey]||[]).length>0).map(z=>({
+        ...z, devices:(z[deviceKey]||[]).map(eid=>({entity_id:eid,name:haStates()[eid]?.attributes?.friendly_name||eid.split('.').pop().replace(/_/g,' '),state:haStates()[eid]?.state}))
+      }));
+      if (floorGroups.length||floorUngrouped.length) {
+        result.push({type:'floor',id:node.id,name:node.name,groups:floorGroups,ungrouped:floorUngrouped,triggered:node.triggered,armed:node.armed});
+      }
+    } else if (node.type === 'group') {
+      const gZones = node.zones.filter(z=>(z[deviceKey]||[]).length>0).map(z=>({
+        ...z, devices:(z[deviceKey]||[]).map(eid=>({entity_id:eid,name:haStates()[eid]?.attributes?.friendly_name||eid.split('.').pop().replace(/_/g,' '),state:haStates()[eid]?.state}))
+      }));
+      if (gZones.length) result.push({type:'group',...node,zones:gZones});
+    } else if (node.type === 'ungrouped') {
+      (node.zones||[]).filter(z=>(z[deviceKey]||[]).length>0).forEach(z=>{
+        result.push({type:'zone',...z, devices:(z[deviceKey]||[]).map(eid=>({entity_id:eid,name:haStates()[eid]?.attributes?.friendly_name||eid.split('.').pop().replace(/_/g,' '),state:haStates()[eid]?.state}))});
+      });
+    }
   });
   return result;
 }
+
+function lightsByGroupZone()   { return deviceTreeFromZones('lights'); }
+function camerasByGroupZone()  { return deviceTreeFromZones('cameras'); }
+
+
 
 function sirenEntities() {
   const s = new Set();
@@ -166,61 +182,52 @@ function sirenEntities() {
   }).map(id=>({ entity_id:id, name:haStates()[id]?.attributes?.friendly_name||id.split('.').pop().replace(/_/g,' '), state:haStates()[id]?.state }));
 }
 
-function camerasByGroupZone() {
-  const result = [];
-  groups().forEach(g=>{
-    const gZones=(g.zone_ids||[]).map(id=>zones().find(z=>z.id===id)).filter(z=>z&&z.cameras?.length);
-    if(!gZones.length)return;
-    result.push({type:'group',id:g.id,name:g.name||g.id,armed:groupArmed(g),triggered:groupTriggered(g),
-      children:gZones.map(z=>({type:'zone',id:z.id,name:z.name||z.id,armed:zoneArmed(z),triggered:zoneTriggered(z),
-        children:(z.cameras||[]).map(eid=>({entity_id:eid,name:haStates()[eid]?.attributes?.friendly_name||eid.split('.').pop().replace(/_/g,' '),state:haStates()[eid]?.state}))
-      }))
-    });
-  });
-  const gpzids=new Set(groups().flatMap(g=>g.zone_ids||[]));
-  zones().filter(z=>!gpzids.has(z.id)&&z.cameras?.length).forEach(z=>{
-    result.push({type:'zone',id:z.id,name:z.name||z.id,armed:zoneArmed(z),triggered:zoneTriggered(z),
-      children:(z.cameras||[]).map(eid=>({entity_id:eid,name:haStates()[eid]?.attributes?.friendly_name||eid.split('.').pop().replace(/_/g,' '),state:haStates()[eid]?.state}))
-    });
-  });
-  return result;
-}
-
 /* ── Zone/Group hierarchical selector for triggers ─────────── */
 // Returns zone/group tree for zone event / zone arm triggers
 function zoneGroupTree() {
-  // Build: floors → groups → zones, with ungrouped zones at the end
   const floorList = ow().floors || [];
   const result = [];
   const gpzids = new Set(groups().flatMap(g=>g.zone_ids||[]));
 
   if (floorList.length > 0) {
+    // Track which groups have been placed under a named floor
+    const placedGroupIds = new Set();
+
     floorList.forEach(floor => {
-      // Groups whose zones are on this floor
+      // Groups that have at least one zone on this floor
       const floorGroups = groups().map(g => {
-        const gZones = (g.zone_ids||[]).map(id=>zones().find(z=>z.id===id)).filter(z=>z&&(!z.floor_id||z.floor_id===floor.id));
-        return gZones.length ? {type:'group',id:g.id,name:g.name||g.id,armed:groupArmed(g),triggered:groupTriggered(g),zones:gZones} : null;
+        const gZones = (g.zone_ids||[]).map(id=>zones().find(z=>z.id===id))
+          .filter(z=>z && z.floor_id === floor.id);
+        if (!gZones.length) return null;
+        placedGroupIds.add(g.id);
+        return {type:'group',id:g.id,name:g.name||g.id,armed:groupArmed(g),triggered:groupTriggered(g),zones:gZones};
       }).filter(Boolean);
 
       // Ungrouped zones on this floor
-      const floorUngrouped = zones().filter(z=>!gpzids.has(z.id)&&(!z.floor_id||z.floor_id===floor.id));
+      const floorUngrouped = zones().filter(z=>!gpzids.has(z.id) && z.floor_id === floor.id);
 
       if (floorGroups.length || floorUngrouped.length) {
         result.push({type:'floor',id:floor.id,name:floor.name||floor.id,groups:floorGroups,ungrouped:floorUngrouped});
       }
     });
-    // Zones with no floor assignment
-    const noFloor = zones().filter(z=>!z.floor_id);
-    const noFloorGroups = groups().map(g=>{
-      const gZones=(g.zone_ids||[]).map(id=>zones().find(z=>z.id===id)).filter(z=>z&&!z.floor_id);
-      return gZones.length?{type:'group',id:g.id,name:g.name||g.id,armed:groupArmed(g),triggered:groupTriggered(g),zones:gZones}:null;
+
+    // Groups whose zones have no floor_id (or floors that weren't placed above)
+    const noFloorGroups = groups().map(g => {
+      // Only include zones with no floor assignment, and only if group wasn't fully placed
+      const unplacedZones = (g.zone_ids||[]).map(id=>zones().find(z=>z.id===id))
+        .filter(z=>z && !z.floor_id);
+      if (!unplacedZones.length) return null;
+      return {type:'group',id:g.id,name:g.name||g.id,armed:groupArmed(g),triggered:groupTriggered(g),zones:unplacedZones};
     }).filter(Boolean);
-    const noFloorUngrouped=noFloor.filter(z=>!gpzids.has(z.id));
-    if (noFloorGroups.length||noFloorUngrouped.length) {
+
+    // Ungrouped zones with no floor assignment
+    const noFloorUngrouped = zones().filter(z=>!gpzids.has(z.id) && !z.floor_id);
+
+    if (noFloorGroups.length || noFloorUngrouped.length) {
       result.push({type:'floor',id:'_nofloor',name:'Unassigned',groups:noFloorGroups,ungrouped:noFloorUngrouped});
     }
   } else {
-    // No floors — flat: groups then ungrouped
+    // No floors configured — flat: groups then ungrouped zones
     groups().forEach(g=>{
       const gZones=(g.zone_ids||[]).map(id=>zones().find(z=>z.id===id)).filter(Boolean);
       if(gZones.length) result.push({type:'group',id:g.id,name:g.name||g.id,armed:groupArmed(g),triggered:groupTriggered(g),zones:gZones});
@@ -338,7 +345,15 @@ function parseHAAutomation(ha) {
   const rawActions=ha.actions||ha.action||[];
   for (const a of (Array.isArray(rawActions)?rawActions:rawActions?[rawActions]:[])) {
     if (!a) continue;
+    // Detect unsupported action structures FIRST before trying to parse
+    if (a.choose !== undefined) { warnings.push('Unsupported action: choose block — edit in HA directly'); continue; }
+    if (a.repeat !== undefined) { warnings.push('Unsupported action: repeat block — edit in HA directly'); continue; }
+    if (a.parallel !== undefined) { warnings.push('Unsupported action: parallel block — edit in HA directly'); continue; }
+    if (a.sequence !== undefined) { warnings.push('Unsupported action: sequence block — edit in HA directly'); continue; }
+    if (a.if !== undefined) { warnings.push('Unsupported action: if block — edit in HA directly'); continue; }
+    if (a.delay !== undefined) { warnings.push('Unsupported action: delay — edit in HA directly'); continue; }
     const actionKey=a.action||a.service||'';
+    if (!actionKey) { warnings.push(`Unsupported action structure: ${JSON.stringify(a).slice(0,60)}`); continue; }
     const di=actionKey.indexOf('.');
     const domain=di>=0?actionKey.slice(0,di):'';
     const svc=di>=0?actionKey.slice(di+1):'';
@@ -346,8 +361,15 @@ function parseHAAutomation(ha) {
     if (domain==='siren') draft.actions.push({id:uid(),type:'siren',entity_ids:tids,service:svc});
     else if (domain==='light') draft.actions.push({id:uid(),type:'light',entity_ids_zone:tids,entity_ids_other:[],entity_ids:[],service:svc});
     else if (domain==='notify') draft.actions.push({id:uid(),type:'notify',target:`notify.${svc}`,message:a.data?.message||'',title:a.data?.title||''});
-    else if (domain==='alarm_control_panel') draft.actions.push({id:uid(),type:'arm',service:svc,entity_id:tids[0]||''});
+    else if (domain==='alarm_control_panel') draft.actions.push({id:uid(),type:'arm',service:svc,entity_ids:[],entity_id:tids[0]||''});
+    else if (domain==='switch' && tids.some(id=>id.includes('overwatch_zone'))) {
+      // OW arm/disarm switch action
+      draft.actions.push({id:uid(),type:'arm',service:svc,entity_ids:tids,entity_id:''});
+    }
     else if (domain==='camera') draft.actions.push({id:uid(),type:'camera',service:svc,entity_ids:tids,service_data:a.data||{}});
+    else if (domain==='switch' && tids.some(id=>id.includes('overwatch_camera'))) {
+      draft.actions.push({id:uid(),type:'camera_view',entity_ids:tids,service:svc});
+    }
     else draft.actions.push({id:uid(),type:'entity',entity_id:tids[0]||'',service:actionKey});
   }
 
@@ -603,6 +625,19 @@ function renderEditor() {
   _panelEl.querySelectorAll('[data-add-trigger]').forEach(b=>b.onclick=()=>addTrigger(b.dataset.addTrigger));
   _panelEl.querySelectorAll('[data-add-cond]').forEach(b=>b.onclick=()=>addCondition(b.dataset.addCond));
   _panelEl.querySelectorAll('[data-add-action]').forEach(b=>b.onclick=()=>addAction(b.dataset.addAction));
+
+  // Wire all searchable list filter inputs (data-scbl-filter) via delegation
+  _panelEl.querySelectorAll('[data-scbl-filter]').forEach(inp=>{
+    inp.oninput=()=>{
+      const q=inp.value.toLowerCase();
+      const list=inp.closest('.ow-scbl');
+      if(!list)return;
+      list.querySelectorAll('[data-scbl-item]').forEach(r=>{
+        r.style.display=r.dataset.scblLabel?.toLowerCase().includes(q)?'':'none';
+      });
+    };
+    inp.onkeydown=e=>e.stopPropagation();
+  });
   _panelEl.querySelectorAll('[data-remove-trigger]').forEach(b=>b.onclick=()=>{_draft.triggers=_draft.triggers.filter(t=>t.id!==b.dataset.removeTrigger);renderEditorKeepScroll();});
   _panelEl.querySelectorAll('[data-remove-cond]').forEach(b=>b.onclick=()=>{_draft.conditions=_draft.conditions.filter(c=>c.id!==b.dataset.removeCond);renderEditorKeepScroll();});
   _panelEl.querySelectorAll('[data-remove-action]').forEach(b=>b.onclick=()=>{_draft.actions=_draft.actions.filter(a=>a.id!==b.dataset.removeAction);renderEditorKeepScroll();});
@@ -796,8 +831,8 @@ function zoneGroupSelector(t, id) {
     '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" style="position:absolute;left:9px;top:50%;transform:translateY(-50%);opacity:0.35;pointer-events:none;"><circle cx="11" cy="11" r="7" stroke="white" stroke-width="2.5"/><path d="M16 16L21 21" stroke="white" stroke-width="2.5" stroke-linecap="round"/></svg>' +
     '<input type="text" placeholder="Filter zones\u2026" autocomplete="off"' +
     ' style="width:100%;background:none;border:none;color:#ccc;padding:7px 10px 7px 28px;font-size:12px;outline:none;box-sizing:border-box;"' +
-    ' oninput="(function(el){var q=el.value.toLowerCase();el.closest(\'.ow-scbl\').querySelectorAll(\'[data-scbl-item]\').forEach(function(r){r.style.display=r.dataset.scblLabel.toLowerCase().includes(q)?\'\':\\\'none\\\';});})(this)"' +
-    ' onkeydown="event.stopPropagation()"/>' +
+    ' data-scbl-filter="1"' +
+    '/>' +
     '</div>' +
     '<div style="max-height:280px;overflow-y:auto;padding:4px;">' + renderTree() + '</div>' +
     '</div>';
@@ -937,8 +972,8 @@ function sensorsHierarchicalSelector(selectedIds, id) {
       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" style="position:absolute;left:9px;top:50%;transform:translateY(-50%);opacity:0.35;pointer-events:none;"><circle cx="11" cy="11" r="7" stroke="white" stroke-width="2.5"/><path d="M16 16L21 21" stroke="white" stroke-width="2.5" stroke-linecap="round"/></svg>
       <input type="text" placeholder="Filter sensors…" autocomplete="off"
         style="width:100%;background:none;border:none;color:#ccc;padding:7px 10px 7px 28px;font-size:12px;outline:none;box-sizing:border-box;"
-        oninput="(function(el){var q=el.value.toLowerCase();el.closest('.ow-scbl').querySelectorAll('[data-scbl-item]').forEach(function(r){r.style.display=r.dataset.scblLabel.toLowerCase().includes(q)?'':'none';});})(this)"
-        onkeydown="event.stopPropagation()"/>
+        data-scbl-filter="1"
+       />
     </div>
     <div style="max-height:220px;overflow-y:auto;padding:4px;">
       ${tree.map(node=>{
@@ -1127,7 +1162,7 @@ function actionCard(a, idx, total) {
       return !allZoneLightIds.has(e.entity_id);
     });
     inner = `
-      ${tree.map(node=>lightGroupZoneBlock(node,a,`act-light-${a.id}`)).join('')}
+      ${tree.length ? deviceActionTree(tree, a.entity_ids_zone||[], `act-light-${a.id}`) : ''}
       ${otherLights.length ? `<div style="margin-bottom:10px;"><label style="${labelStyle}">Other lights from HA</label>${searchableCheckboxList(a.entity_ids_other||[],otherLights,`act-light-other-${a.id}`)}</div>` : ''}
       ${!tree.length&&!otherLights.length?`<div style="color:#555;font-size:11px;margin-bottom:8px;">No lights found in zones.</div>`:''}
       <div><label style="${labelStyle}">Action</label>
@@ -1141,19 +1176,17 @@ function actionCard(a, idx, total) {
   if (a.type === 'camera') {
     const camTree = camerasByGroupZone();
     const camServices = _haServices['camera']||[];
+    // #7: Remove turn_on/turn_off — not real camera functions
     const baseServices = [
-      {name:'turn_on',  description:'Turn on / enable camera'},
-      {name:'turn_off', description:'Turn off / disable camera'},
       {name:'snapshot', description:'Take a snapshot'},
       {name:'record',   description:'Start recording'},
     ];
     const baseNames = new Set(baseServices.map(s=>s.name));
-    const mergedServices = [...baseServices, ...camServices.filter(s=>!baseNames.has(s.name))];
+    const mergedServices = [...baseServices, ...camServices.filter(s=>!baseNames.has(s.name)&&s.name!=='turn_on'&&s.name!=='turn_off')];
     inner = `
       <div style="margin-bottom:10px;">
         <label style="${labelStyle}">Cameras</label>
-        ${camTree.map(node=>cameraGroupZoneBlock(node,a,`act-cam-${a.id}`)).join('')}
-        ${!camTree.length?`<div style="color:#555;font-size:11px;margin-bottom:6px;">No cameras in zones — search HA:</div>${entityAutocomplete(`act-cam-ac-${a.id}`,a.entity_ids?.[0]||'','camera.*',null,['camera'])}`:''}
+        ${camTree.length ? deviceActionTree(camTree, a.entity_ids||[], `act-cam-${a.id}`) : `<div style="color:#555;font-size:11px;margin-bottom:6px;">No cameras in zones — search HA:</div>${entityAutocomplete(`act-cam-ac-${a.id}`,a.entity_ids?.[0]||'','camera.*',null,['camera'])}`}
       </div>
       <div style="margin-bottom:10px;"><label style="${labelStyle}">Action</label>
         <select id="act-cam-svc-${a.id}" style="${selectStyle}">
@@ -1178,19 +1211,71 @@ function actionCard(a, idx, total) {
   }
 
   if (a.type === 'arm') {
-    const alarmEnts = entitiesByDomain('alarm_control_panel');
-    const def = ow().uiConfig?.alarm_entity||'';
+    // Build OW zone arm switches from zone/group hierarchy
+    const armTree = zoneGroupTree();
+    // Also include master switch if it exists
+    const masterSwitch = allEntities().find(e=>e.entity_id==='switch.overwatch_master');
+
+    function buildArmRows(tree) {
+      let rows = '';
+      if (masterSwitch) {
+        const isSel = (a.entity_ids||[]).includes(masterSwitch.entity_id);
+        rows += '<label style="display:flex;align-items:center;gap:8px;padding:5px 6px;cursor:pointer;border-radius:5px;background:rgba(255,255,255,0.04);margin-bottom:4px;" onmouseenter="this.style.background=\'rgba(255,255,255,0.06)\'" onmouseleave="this.style.background=\'rgba(255,255,255,0.04)\'">' +
+          '<input type="checkbox" data-arm-cb value="' + escH(masterSwitch.entity_id) + '" ' + (isSel?'checked':'') + ' style="accent-color:#0064d2;">' +
+          '<span style="font-size:12px;font-weight:600;color:#ccc;">All Zones (master)</span>' +
+          stateBadge(false, masterSwitch.state==='on') + '</label>';
+      }
+      tree.forEach(node=>{
+        if (node.type==='floor') {
+          rows += '<div style="font-size:10px;font-weight:700;color:#555;text-transform:uppercase;letter-spacing:0.08em;padding:4px 6px 2px;">' + escH(node.name) + '</div>';
+          (node.groups||[]).forEach(g=>{ rows += buildGroupArmRow(g); });
+          (node.ungrouped||[]).forEach(z=>{ rows += buildZoneArmRow(z); });
+        } else if (node.type==='group') {
+          rows += buildGroupArmRow(node);
+        } else if (node.type==='zone'||node.type==='ungrouped') {
+          (node.zones||[node]).forEach(z=>{ rows += buildZoneArmRow(z); });
+        }
+      });
+      return rows;
+    }
+    function buildGroupArmRow(g) {
+      const slug = nameSlug(g.name)||g.id;
+      const eid = 'switch.overwatch_zone_group_' + slug;
+      const isSel = (a.entity_ids||[]).includes(eid);
+      const st = haStates()[eid]?.state;
+      return '<label style="display:flex;align-items:center;gap:8px;padding:4px 6px;cursor:pointer;border-radius:5px;" onmouseenter="this.style.background=\'rgba(255,255,255,0.04)\'" onmouseleave="this.style.background=\'\'">' +
+        '<input type="checkbox" data-arm-cb value="' + escH(eid) + '" ' + (isSel?'checked':'') + ' style="accent-color:#0064d2;">' +
+        '<span style="font-size:12px;font-weight:600;color:#ccc;">' + escH(g.name) + '</span>' +
+        stateBadge(g.triggered, g.armed) +
+        (st?'<span style="font-size:10px;color:#444;margin-left:4px;">' + escH(eid) + '</span>':'') +
+        '</label>';
+    }
+    function buildZoneArmRow(z) {
+      const slug = nameSlug(z.name)||z.id;
+      const eid = 'switch.overwatch_zone_' + slug;
+      const isSel = (a.entity_ids||[]).includes(eid);
+      return '<label style="display:flex;align-items:center;gap:8px;padding:3px 6px 3px 18px;cursor:pointer;border-radius:5px;" onmouseenter="this.style.background=\'rgba(255,255,255,0.04)\'" onmouseleave="this.style.background=\'\'">' +
+        '<input type="checkbox" data-arm-cb value="' + escH(eid) + '" ' + (isSel?'checked':'') + ' style="accent-color:#0064d2;">' +
+        '<span style="font-size:11px;color:#bbb;">' + escH(z.name||z.id) + '</span>' +
+        stateBadge(zoneTriggered(z), zoneArmed(z)) +
+        '</label>';
+    }
+
     inner = `
-      <div style="margin-bottom:10px;"><label style="${labelStyle}">Alarm Panel</label>
-        ${alarmEnts.length ? `<select id="act-arm-entity-sel-${a.id}" style="${selectStyle}">${alarmEnts.map(e=>`<option value="${escH(e.entity_id)}" ${(a.entity_id||def)===e.entity_id?'selected':''}>${escH(e.name)}</option>`).join('')}</select>` : entityAutocomplete(`act-arm-entity-ac-${a.id}`,a.entity_id||def,'alarm_control_panel.*',null,['alarm_control_panel'])}
+      <div style="margin-bottom:10px;">
+        <label style="${labelStyle}">Zone / Group switches</label>
+        <div id="act-arm-zones-${a.id}" style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:8px;padding:8px;max-height:180px;overflow-y:auto;">
+          ${buildArmRows(armTree)||'<div style="color:#555;font-size:11px;">No OW zone switches found.</div>'}
+        </div>
       </div>
-      <div><label style="${labelStyle}">Action</label>
+      <div>
+        <label style="${labelStyle}">Action</label>
         <select id="act-arm-svc-${a.id}" style="${selectStyle}">
-          <option value="alarm_arm_away"  ${a.service==='alarm_arm_away' ?'selected':''}>Arm Away</option>
-          <option value="alarm_arm_home"  ${a.service==='alarm_arm_home' ?'selected':''}>Arm Home</option>
-          <option value="alarm_arm_night" ${a.service==='alarm_arm_night'?'selected':''}>Arm Night</option>
-          <option value="alarm_disarm"    ${a.service==='alarm_disarm'   ?'selected':''}>Disarm</option>
-        </select></div>`;
+          <option value="turn_on"  ${a.service==='turn_on' ||!a.service?'selected':''}>Arm (turn on)</option>
+          <option value="turn_off" ${a.service==='turn_off'?'selected':''}>Disarm (turn off)</option>
+          <option value="toggle"   ${a.service==='toggle'  ?'selected':''}>Toggle</option>
+        </select>
+      </div>`;
   }
 
   if (a.type === 'camera_view') {
@@ -1232,117 +1317,123 @@ function actionCard(a, idx, total) {
   return stepCard(a.id, labels[a.type]||a.type, inner, 'action', moveControls);
 }
 
-function lightGroupZoneBlock(node, a, baseId) {
-  if (node.type==='group') {
-    const gCollapsed=!!_collapsedSteps[`lg-${node.id}`];
-    return `<div style="margin-bottom:6px;">
-      <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">
-        <button data-lg-collapse="${escH(node.id)}" style="background:none;border:none;color:#555;cursor:pointer;font-size:10px;padding:0 2px;">${gCollapsed?'▶':'▼'}</button>
-        <span style="font-size:11px;font-weight:600;color:#ccc;">${escH(node.name)}</span>${stateBadge(node.triggered,node.armed)}
-      </div>
-      ${gCollapsed?'':node.children.map(z=>lightGroupZoneBlock(z,a,baseId)).join('')}
-    </div>`;
+/* ════════════════════════════════════════════════════════════
+ * UNIFIED DEVICE ACTION TREE (lights / cameras)
+ * Same floor→group→zone hierarchy as zone selector.
+ * deviceKey: for wiring callbacks ('entity_ids_zone' or 'entity_ids')
+ * ═══════════════════════════════════════════════════════════ */
+function deviceActionTree(tree, selectedIds, baseId) {
+  // tree = result of lightsByGroupZone() or camerasByGroupZone()
+  // which is now deviceTreeFromZones — same shape as zoneGroupTree nodes
+  // but with .devices[] on zone nodes
+  function renderNode(node, depth) {
+    const pad = depth * 12;
+    if (node.type === 'floor') {
+      const fCollapsed = !!_collapsedSteps['dlf-' + node.id];
+      const children = fCollapsed ? '' :
+        '<div style="padding-left:' + pad + 'px;">' +
+        (node.groups||[]).map(g => renderNode(g, depth+1)).join('') +
+        (node.ungrouped||[]).map(z => renderNode(z, depth+1)).join('') +
+        '</div>';
+      return '<div>' +
+        '<div style="display:flex;align-items:center;gap:5px;padding:4px 6px;background:rgba(255,255,255,0.03);border-radius:4px;margin-bottom:2px;">' +
+        '<button data-dlf-collapse="' + escH(node.id) + '" data-base-id="' + escH(baseId) + '" style="background:none;border:none;color:#666;cursor:pointer;font-size:10px;padding:0 2px;">' + (fCollapsed?'▶':'▼') + '</button>' +
+        '<span style="font-size:11px;font-weight:700;color:#aaa;text-transform:uppercase;letter-spacing:0.06em;flex:1;">' + escH(node.name) + '</span>' +
+        stateBadge(node.triggered, node.armed) +
+        '</div>' + children + '</div>';
+    }
+    if (node.type === 'group') {
+      const gCollapsed = !!_collapsedSteps['dlg-' + node.id];
+      const allDevIds = node.zones ? node.zones.flatMap(z=>z.devices||[]).map(d=>d.entity_id) : [];
+      const allSel = allDevIds.length && allDevIds.every(id=>selectedIds.includes(id));
+      const children = gCollapsed ? '' :
+        '<div style="padding-left:' + (pad+8) + 'px;">' +
+        (node.zones||[]).map(z => renderNode(z, depth+1)).join('') +
+        '</div>';
+      return '<div>' +
+        '<div style="display:flex;align-items:center;gap:6px;padding:4px 6px;">' +
+        '<button data-dlg-collapse="' + escH(node.id) + '" data-base-id="' + escH(baseId) + '" style="background:none;border:none;color:#555;cursor:pointer;font-size:10px;padding:0 2px;">' + (gCollapsed?'▶':'▼') + '</button>' +
+        '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;">' +
+        '<input type="checkbox" data-dlg-cb="' + escH(node.id) + '" data-base-id="' + escH(baseId) + '" ' + (allSel?'checked':'') + ' style="accent-color:#0064d2;flex-shrink:0;">' +
+        '<span style="font-size:12px;font-weight:600;color:#ccc;">' + escH(node.name) + '</span>' +
+        stateBadge(node.triggered, node.armed) +
+        '</label></div>' + children + '</div>';
+    }
+    // zone node (may come from group.zones or ungrouped)
+    const zone = node;
+    const devIds = (zone.devices||[]).map(d=>d.entity_id);
+    const zAllSel = devIds.length && devIds.every(id=>selectedIds.includes(id));
+    const zCollapsed = !!_collapsedSteps['dlz-' + zone.id];
+    return '<div style="padding-left:' + pad + 'px;">' +
+      '<div style="display:flex;align-items:center;gap:6px;padding:3px 6px;">' +
+      '<button data-dlz-collapse="' + escH(zone.id) + '" data-base-id="' + escH(baseId) + '" style="background:none;border:none;color:#444;cursor:pointer;font-size:9px;padding:0 2px;">' + (zCollapsed?'▶':'▼') + '</button>' +
+      '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;">' +
+      '<input type="checkbox" data-dlz-cb="' + escH(zone.id) + '" data-base-id="' + escH(baseId) + '" ' + (zAllSel?'checked':'') + ' style="accent-color:#0064d2;flex-shrink:0;">' +
+      '<span style="font-size:11px;color:#bbb;">' + escH(zone.name||zone.id) + '</span>' +
+      stateBadge(zoneTriggered(zone), zoneArmed(zone)) +
+      '</label></div>' +
+      (zCollapsed ? '' :
+        '<div style="padding-left:' + (pad+20) + 'px;">' +
+        (zone.devices||[]).map(d => {
+          const isSel = selectedIds.includes(d.entity_id);
+          return '<label style="display:flex;align-items:center;gap:7px;padding:2px 4px;cursor:pointer;border-radius:4px;">' +
+            '<input type="checkbox" data-dl-cb value="' + escH(d.entity_id) + '" data-zone-id="' + escH(zone.id) + '" data-base-id="' + escH(baseId) + '" ' + (isSel?'checked':'') + ' style="accent-color:#0064d2;flex-shrink:0;">' +
+            '<span style="flex:1;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + escH(d.name) + '</span>' +
+            (d.state !== undefined ? stateBadge(d.state==='on', null, 'small') : '') +
+            '</label>';
+        }).join('') +
+        '</div>') +
+      '</div>';
   }
-  // Zone node
-  const zCollapsed=!!_collapsedSteps[`lz-${node.id}`];
-  const lightIds=node.children.map(l=>l.entity_id);
-  const selIds=a.entity_ids_zone||[];
-  const allSel=lightIds.every(e=>selIds.includes(e));
-  return `<div style="margin-bottom:4px;padding-left:16px;">
-    <div style="display:flex;align-items:center;gap:6px;margin-bottom:3px;">
-      <button data-lz-collapse="${escH(node.id)}" style="background:none;border:none;color:#444;cursor:pointer;font-size:9px;padding:0 2px;">${zCollapsed?'▶':'▼'}</button>
-      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;">
-        <input type="checkbox" data-lz-zone-cb="${escH(node.id)}" data-base-id="${escH(baseId)}" ${allSel?'checked':''} style="accent-color:#0064d2;">
-        <span style="font-size:11px;color:#bbb;">${escH(node.name)}</span>${stateBadge(node.triggered,node.armed)}
-      </label>
-    </div>
-    ${!zCollapsed?`<div style="padding-left:20px;">${node.children.map(l=>`
-      <label style="display:flex;align-items:center;gap:7px;padding:2px 4px;cursor:pointer;border-radius:4px;" onmouseenter="this.style.background='rgba(255,255,255,0.04)'" onmouseleave="this.style.background=''">
-        <input type="checkbox" data-light-cb value="${escH(l.entity_id)}" data-base-id="${escH(baseId)}" ${selIds.includes(l.entity_id)?'checked':''} style="accent-color:#0064d2;flex-shrink:0;">
-        <span style="flex:1;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escH(l.name)}</span>
-        ${l.state!==undefined?stateBadge(l.state==='on',null,'small'):''}
-      </label>`).join('')}</div>`:``}
-  </div>`;
+  return '<div style="margin-bottom:10px;">' + tree.map(n=>renderNode(n,0)).join('') + '</div>';
 }
 
-function wireLightTree(a, baseId) {
-  const el=_panelEl;
+function wireDeviceActionTree(selectedIds, onUpdate, baseId) {
+  const el = _panelEl;
   if (!el) return;
-  el.querySelectorAll('[data-lg-collapse]').forEach(btn=>{
-    btn.onclick=e=>{e.stopPropagation();_collapsedSteps[`lg-${btn.dataset.lgCollapse}`]=!_collapsedSteps[`lg-${btn.dataset.lgCollapse}`];renderEditorKeepScroll();};
+  // Floor collapse
+  el.querySelectorAll(`[data-dlf-collapse][data-base-id="${CSS.escape(baseId)}"]`).forEach(btn=>{
+    btn.onclick=e=>{e.stopPropagation();_collapsedSteps['dlf-'+btn.dataset.dlfCollapse]=!_collapsedSteps['dlf-'+btn.dataset.dlfCollapse];renderEditorKeepScroll();};
   });
-  el.querySelectorAll('[data-lz-collapse]').forEach(btn=>{
-    btn.onclick=e=>{e.stopPropagation();_collapsedSteps[`lz-${btn.dataset.lzCollapse}`]=!_collapsedSteps[`lz-${btn.dataset.lzCollapse}`];renderEditorKeepScroll();};
+  // Group collapse
+  el.querySelectorAll(`[data-dlg-collapse][data-base-id="${CSS.escape(baseId)}"]`).forEach(btn=>{
+    btn.onclick=e=>{e.stopPropagation();_collapsedSteps['dlg-'+btn.dataset.dlgCollapse]=!_collapsedSteps['dlg-'+btn.dataset.dlgCollapse];renderEditorKeepScroll();};
   });
-  function collectLights() {
-    return [...el.querySelectorAll(`[data-light-cb][data-base-id="${CSS.escape(baseId)}"]:checked`)].map(cb=>cb.value);
-  }
-  el.querySelectorAll(`[data-lz-zone-cb][data-base-id="${CSS.escape(baseId)}"]`).forEach(zoneCb=>{
-    zoneCb.onchange=()=>{
-      const zid=zoneCb.dataset.lzZoneCb;
-      const z=zones().find(z=>z.id===zid);
-      if(z)(z.lights||[]).forEach(eid=>{const cb=el.querySelector(`[data-light-cb][value="${CSS.escape(eid)}"]`);if(cb)cb.checked=zoneCb.checked;});
-      a.entity_ids_zone=collectLights();
+  // Zone collapse
+  el.querySelectorAll(`[data-dlz-collapse][data-base-id="${CSS.escape(baseId)}"]`).forEach(btn=>{
+    btn.onclick=e=>{e.stopPropagation();_collapsedSteps['dlz-'+btn.dataset.dlzCollapse]=!_collapsedSteps['dlz-'+btn.dataset.dlzCollapse];renderEditorKeepScroll();};
+  });
+  function collectIds() { return [...el.querySelectorAll(`[data-dl-cb][data-base-id="${CSS.escape(baseId)}"]:checked`)].map(cb=>cb.value); }
+  // Group checkbox — cascade to all zone devices
+  el.querySelectorAll(`[data-dlg-cb][data-base-id="${CSS.escape(baseId)}"]`).forEach(grpCb=>{
+    grpCb.onchange=()=>{
+      el.querySelectorAll(`[data-dl-cb][data-base-id="${CSS.escape(baseId)}"]`).forEach(devCb=>{
+        // Only cascade if device is in a zone that belongs to this group
+        // (we'll cascade all visible device checkboxes under this group's subtree)
+        const zid = devCb.dataset.zoneId;
+        const zone = zones().find(z=>z.id===zid);
+        const inGroup = zone && groups().some(g=>g.id===grpCb.dataset.dlgCb&&(g.zone_ids||[]).includes(zid));
+        if (inGroup) devCb.checked=grpCb.checked;
+      });
+      onUpdate(collectIds());
     };
   });
-  el.querySelectorAll(`[data-light-cb][data-base-id="${CSS.escape(baseId)}"]`).forEach(cb=>{
-    cb.onchange=()=>{
-      a.entity_ids_zone=collectLights();
-      const z=zones().find(z=>(z.lights||[]).includes(cb.value));
-      if(z){const zCb=el.querySelector(`[data-lz-zone-cb="${CSS.escape(z.id)}"]`);if(zCb)zCb.checked=(z.lights||[]).every(e=>el.querySelector(`[data-light-cb][value="${CSS.escape(e)}"]`)?.checked);}
+  // Zone checkbox — cascade to its devices
+  el.querySelectorAll(`[data-dlz-cb][data-base-id="${CSS.escape(baseId)}"]`).forEach(zCb=>{
+    zCb.onchange=()=>{
+      el.querySelectorAll(`[data-dl-cb][data-zone-id="${CSS.escape(zCb.dataset.dlzCb)}"][data-base-id="${CSS.escape(baseId)}"]`).forEach(devCb=>devCb.checked=zCb.checked);
+      onUpdate(collectIds());
     };
   });
-}
-
-function cameraGroupZoneBlock(node, a, baseId) {
-  if (node.type==='group') {
-    const gC=!!_collapsedSteps[`cg-${node.id}`];
-    return `<div style="margin-bottom:6px;">
-      <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">
-        <button data-cg-collapse="${escH(node.id)}" style="background:none;border:none;color:#555;cursor:pointer;font-size:10px;padding:0 2px;">${gC?'▶':'▼'}</button>
-        <span style="font-size:11px;font-weight:600;color:#ccc;">${escH(node.name)}</span>${stateBadge(node.triggered,node.armed)}
-      </div>
-      ${gC?'':node.children.map(z=>cameraGroupZoneBlock(z,a,baseId)).join('')}
-    </div>`;
-  }
-  const zC=!!_collapsedSteps[`cz-${node.id}`];
-  const selIds=a.entity_ids||[];
-  const camIds=node.children.map(c=>c.entity_id);
-  const allSel=camIds.every(e=>selIds.includes(e));
-  return `<div style="margin-bottom:4px;padding-left:16px;">
-    <div style="display:flex;align-items:center;gap:6px;margin-bottom:3px;">
-      <button data-cz-collapse="${escH(node.id)}" style="background:none;border:none;color:#444;cursor:pointer;font-size:9px;padding:0 2px;">${zC?'▶':'▼'}</button>
-      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;">
-        <input type="checkbox" data-cz-zone-cb="${escH(node.id)}" data-base-id="${escH(baseId)}" ${allSel?'checked':''} style="accent-color:#0064d2;">
-        <span style="font-size:11px;color:#bbb;">${escH(node.name)}</span>${stateBadge(node.triggered,node.armed)}
-      </label>
-    </div>
-    ${!zC?`<div style="padding-left:20px;">${node.children.map(c=>`
-      <label style="display:flex;align-items:center;gap:7px;padding:2px 4px;cursor:pointer;border-radius:4px;" onmouseenter="this.style.background='rgba(255,255,255,0.04)'" onmouseleave="this.style.background=''">
-        <input type="checkbox" data-cam-cb value="${escH(c.entity_id)}" data-base-id="${escH(baseId)}" ${selIds.includes(c.entity_id)?'checked':''} style="accent-color:#0064d2;flex-shrink:0;">
-        <span style="flex:1;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escH(c.name)}</span>
-      </label>`).join('')}</div>`:``}
-  </div>`;
-}
-
-function wireCameraTree(a, baseId) {
-  const el=_panelEl;
-  if(!el)return;
-  el.querySelectorAll('[data-cg-collapse]').forEach(btn=>{btn.onclick=e=>{e.stopPropagation();_collapsedSteps[`cg-${btn.dataset.cgCollapse}`]=!_collapsedSteps[`cg-${btn.dataset.cgCollapse}`];renderEditorKeepScroll();};});
-  el.querySelectorAll('[data-cz-collapse]').forEach(btn=>{btn.onclick=e=>{e.stopPropagation();_collapsedSteps[`cz-${btn.dataset.czCollapse}`]=!_collapsedSteps[`cz-${btn.dataset.czCollapse}`];renderEditorKeepScroll();};});
-  function collectCams() { return [...el.querySelectorAll(`[data-cam-cb][data-base-id="${CSS.escape(baseId)}"]:checked`)].map(cb=>cb.value); }
-  el.querySelectorAll(`[data-cz-zone-cb][data-base-id="${CSS.escape(baseId)}"]`).forEach(zoneCb=>{
-    zoneCb.onchange=()=>{
-      const z=zones().find(z=>z.id===zoneCb.dataset.czZoneCb);
-      if(z)(z.cameras||[]).forEach(eid=>{const cb=el.querySelector(`[data-cam-cb][value="${CSS.escape(eid)}"]`);if(cb)cb.checked=zoneCb.checked;});
-      a.entity_ids=collectCams();
-    };
-  });
-  el.querySelectorAll(`[data-cam-cb][data-base-id="${CSS.escape(baseId)}"]`).forEach(cb=>{
-    cb.onchange=()=>{
-      a.entity_ids=collectCams();
-      const z=zones().find(z=>(z.cameras||[]).includes(cb.value));
-      if(z){const zCb=el.querySelector(`[data-cz-zone-cb="${CSS.escape(z.id)}"]`);if(zCb)zCb.checked=(z.cameras||[]).every(e=>el.querySelector(`[data-cam-cb][value="${CSS.escape(e)}"]`)?.checked);}
+  // Individual device checkbox
+  el.querySelectorAll(`[data-dl-cb][data-base-id="${CSS.escape(baseId)}"]`).forEach(devCb=>{
+    devCb.onchange=()=>{
+      onUpdate(collectIds());
+      // Update zone checkbox
+      const zid=devCb.dataset.zoneId;
+      const allDevInZone=[...el.querySelectorAll(`[data-dl-cb][data-zone-id="${CSS.escape(zid)}"][data-base-id="${CSS.escape(baseId)}"]`)];
+      const zCb=el.querySelector(`[data-dlz-cb="${CSS.escape(zid)}"][data-base-id="${CSS.escape(baseId)}"]`);
+      if(zCb) zCb.checked=allDevInZone.every(c=>c.checked);
     };
   });
 }
@@ -1399,15 +1490,14 @@ function wireActionFields(a) {
     wireSelect(`act-siren-svc-${a.id}`,v=>a.service=v);
   }
   if (a.type==='light') {
-    wireLightTree(a,`act-light-${a.id}`);
+    wireDeviceActionTree(a.entity_ids_zone||[], ids=>a.entity_ids_zone=ids, `act-light-${a.id}`);
     wireSearchableCheckbox(`act-light-other-${a.id}`,ids=>a.entity_ids_other=ids);
     wireSelect(`act-light-svc-${a.id}`,v=>a.service=v);
   }
   if (a.type==='camera') {
-    wireCameraTree(a,`act-cam-${a.id}`);
+    wireDeviceActionTree(a.entity_ids||[], ids=>a.entity_ids=ids, `act-cam-${a.id}`);
     wireAutocomplete(`act-cam-ac-${a.id}`,v=>a.entity_ids=v?[v]:[]);
     wireSelect(`act-cam-svc-${a.id}`,v=>a.service=v);
-    wireInput(`act-cam-svc-${a.id}`,v=>a.service=v);
   }
   if (a.type==='notify') {
     wireSearchableCheckbox(`act-notify-target-${a.id}`,ids=>a.target=ids[0]||'',true);
@@ -1433,7 +1523,17 @@ function wireActionFields(a) {
       };
     }
   }
-  if (a.type==='arm') { wireSelect(`act-arm-entity-sel-${a.id}`,v=>a.entity_id=v); wireAutocomplete(`act-arm-entity-ac-${a.id}`,v=>a.entity_id=v); wireSelect(`act-arm-svc-${a.id}`,v=>a.service=v); }
+  if (a.type==='arm') {
+    const armBox=_panelEl?.querySelector(`#act-arm-zones-${a.id}`);
+    if(armBox) {
+      armBox.querySelectorAll('[data-arm-cb]').forEach(cb=>{
+        cb.onchange=()=>{
+          a.entity_ids=[...armBox.querySelectorAll('[data-arm-cb]:checked')].map(c=>c.value);
+        };
+      });
+    }
+    wireSelect(`act-arm-svc-${a.id}`,v=>a.service=v);
+  }
   if (a.type==='camera_view') {
     wireSearchableCheckbox(`act-camview-${a.id}`,ids=>a.entity_ids=ids);
     wireSelect(`act-camview-svc-${a.id}`,v=>a.service=v);
@@ -1446,24 +1546,27 @@ function wireActionFields(a) {
  * ═══════════════════════════════════════════════════════════ */
 function searchableCheckboxList(selectedIds, entities, id, singleSelect=false) {
   if (!entities.length) return `<div style="color:#555;font-size:11px;">No entities found</div>`;
+  // Sort: checked items first, then alphabetical
+  const sel = selectedIds||[];
+  const sorted = [...entities].sort((a,b)=>{
+    const aChk = sel.includes(a.entity_id)?0:1;
+    const bChk = sel.includes(b.entity_id)?0:1;
+    if (aChk!==bChk) return aChk-bChk;
+    return (a.name||a.entity_id).localeCompare(b.name||b.entity_id);
+  });
   return `<div id="${escH(id)}" class="ow-scbl" style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:8px;overflow:hidden;">
     <div style="position:relative;border-bottom:1px solid rgba(255,255,255,0.06);">
       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" style="position:absolute;left:9px;top:50%;transform:translateY(-50%);opacity:0.35;pointer-events:none;"><circle cx="11" cy="11" r="7" stroke="white" stroke-width="2.5"/><path d="M16 16L21 21" stroke="white" stroke-width="2.5" stroke-linecap="round"/></svg>
       <input type="text" placeholder="Filter…" autocomplete="off"
         style="width:100%;background:none;border:none;color:#ccc;padding:7px 10px 7px 28px;font-size:12px;outline:none;box-sizing:border-box;"
-        oninput="(function(el){var q=el.value.toLowerCase();el.closest('.ow-scbl').querySelectorAll('[data-scbl-item]').forEach(function(r){r.style.display=r.dataset.scblLabel.toLowerCase().includes(q)?'':'none';});})(this)"
-        onkeydown="event.stopPropagation()"/>
+        data-scbl-filter="1"/>
     </div>
     <div style="max-height:160px;overflow-y:auto;padding:4px;">
-      ${entities.map(e=>{
+      ${sorted.map(e=>{
         const state=e.state??haStates()[e.entity_id]?.state;
         const badge=state!==undefined?stateBadge(state==='on'||state==='home',null,'small'):'';
-        return `<label data-scbl-item data-scbl-label="${escH((e.name||e.entity_id)+' '+e.entity_id)}" style="display:flex;align-items:center;gap:8px;padding:5px 6px;cursor:pointer;border-radius:5px;" onmouseenter="this.style.background='rgba(255,255,255,0.04)'" onmouseleave="this.style.background=''">
-          <input type="${singleSelect?'radio':'checkbox'}" name="${singleSelect?escH(id):''}" value="${escH(e.entity_id)}" ${(selectedIds||[]).includes(e.entity_id)?'checked':''} style="accent-color:#0064d2;flex-shrink:0;">
-          <span style="flex:1;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escH(e.name||e.entity_id.split('.').pop())}</span>
-          <span style="font-size:10px;color:#444;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escH(e.entity_id)}</span>
-          ${badge}
-        </label>`;
+        const isChecked = sel.includes(e.entity_id);
+        return `<label data-scbl-item data-scbl-label="${escH((e.name||e.entity_id)+' '+e.entity_id)}" style="display:flex;align-items:center;gap:8px;padding:5px 6px;cursor:pointer;border-radius:5px;${isChecked?'background:rgba(0,100,210,0.08);':''}" onmouseenter="this.style.background='rgba(255,255,255,0.04)'" onmouseleave="this.style.background='${isChecked?'rgba(0,100,210,0.08)':''}'">\n          <input type="${singleSelect?'radio':'checkbox'}" name="${singleSelect?escH(id):''}" value="${escH(e.entity_id)}" ${isChecked?'checked':''} style="accent-color:#0064d2;flex-shrink:0;">\n          <span style="flex:1;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escH(e.name||e.entity_id.split('.').pop())}</span>\n          <span style="font-size:10px;color:#444;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escH(e.entity_id)}</span>\n          ${badge}\n        </label>`;
       }).join('')}
     </div>
   </div>`;
