@@ -1292,21 +1292,29 @@ function actionCard(a, idx, total) {
       const slug = nameSlug(g.name)||g.id;
       const eid = 'switch.overwatch_zone_group_' + slug;
       const isSel = (a.entity_ids||[]).includes(eid);
-      const st = haStates()[eid]?.state;
-      return '<label style="display:flex;align-items:center;gap:8px;padding:4px 6px;padding-left:'+indent+'px;cursor:pointer;border-radius:5px;">' +
-        '<input type="checkbox" data-arm-cb value="' + escH(eid) + '" ' + (isSel?'checked':'') + ' style="accent-color:#0064d2;">' +
+      const gKey = 'armg-'+g.id;
+      const gC = _collapsedSteps[gKey] !== false; // collapsed by default
+      // Zone members of this group
+      const memberZones = (g.zones||[]);
+      const zoneRows = memberZones.map(z=>buildZoneArmRow(z, indent+12)).join('');
+      return '<div>' +
+        '<div style="display:flex;align-items:center;gap:5px;padding:3px 6px;padding-left:'+indent+'px;">' +
+        (memberZones.length ? '<button data-armg-collapse="'+escH(gKey)+'" style="background:none;border:none;color:#555;cursor:pointer;font-size:9px;padding:0 2px;">'+(gC?'▶':'▼')+'</button>' : '<span style="width:12px;flex-shrink:0;"></span>') +
+        '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;">' +
+        '<input type="checkbox" data-arm-cb value="' + escH(eid) + '" ' + (isSel?'checked':'') + ' style="accent-color:#0064d2;flex-shrink:0;">' +
         '<span style="font-size:12px;font-weight:600;color:#ccc;">' + escH(g.name) + '</span>' +
         stateBadge(g.triggered, g.armed) +
-        (st?'<span style="font-size:10px;color:#444;margin-left:4px;">' + escH(eid) + '</span>':'') +
-        '</label>';
+        '</label></div>' +
+        '<div data-ow-children="'+escH(gKey)+'"' + (gC?' style="display:none"':'') + '>' + zoneRows + '</div>' +
+        '</div>';
     }
     function buildZoneArmRow(z, indent) {
       indent = indent || 18;
       const slug = nameSlug(z.name)||z.id;
       const eid = 'switch.overwatch_zone_' + slug;
       const isSel = (a.entity_ids||[]).includes(eid);
-      return '<label style="display:flex;align-items:center;gap:8px;padding:3px 6px;padding-left:'+(indent+12)+'px;cursor:pointer;border-radius:5px;">' +
-        '<input type="checkbox" data-arm-cb value="' + escH(eid) + '" ' + (isSel?'checked':'') + ' style="accent-color:#0064d2;">' +
+      return '<label style="display:flex;align-items:center;gap:6px;padding:3px 6px;padding-left:'+indent+'px;cursor:pointer;border-radius:4px;">' +
+        '<input type="checkbox" data-arm-cb value="' + escH(eid) + '" ' + (isSel?'checked':'') + ' style="accent-color:#0064d2;flex-shrink:0;">' +
         '<span style="font-size:11px;color:#bbb;">' + escH(z.name||z.id) + '</span>' +
         stateBadge(zoneTriggered(z), zoneArmed(z)) +
         '</label>';
@@ -1363,7 +1371,7 @@ function actionCard(a, idx, total) {
               const zonesSw=g.zones.map(z=>{
                 const zSw=camViewAll.find(e=>e.entity_id==='switch.overwatch_camera_zone_'+(nameSlug(z.name)||z.id));
                 const zSel=(a.entity_ids||[]).includes(zSw?.entity_id);
-                return zSw?'<label style="display:flex;align-items:center;gap:6px;padding:2px 6px 2px 24px;cursor:pointer;"><input type="checkbox" data-camview-cb value="'+escH(zSw.entity_id)+'" '+(zSel?'checked':'')+' style="accent-color:#0064d2;"><span style="font-size:11px;color:#bbb;">'+escH(z.name||z.id)+'</span></label>':'';
+                return zSw?'<div style="display:flex;align-items:center;padding:2px 6px 2px 22px;"><span style="width:12px;flex-shrink:0;"></span><label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;"><input type="checkbox" data-camview-cb value="'+escH(zSw.entity_id)+'" '+(zSel?'checked':'')+' style="accent-color:#0064d2;"><span style="font-size:11px;color:#bbb;">'+escH(z.name||z.id)+'</span></label></div>':'';
               }).join('');
               return '<div>' +
                 '<div style="display:flex;align-items:center;gap:5px;padding:2px 6px 2px 12px;">' +
@@ -1641,6 +1649,10 @@ function wireActionFields(a) {
     // Wire floor collapse
     _panelEl?.querySelectorAll('[data-armf-collapse]').forEach(btn=>{
       btn.onclick=e=>{e.stopPropagation();e.preventDefault();const key='armf-'+btn.dataset.armfCollapse;const ch=btn.parentElement?.nextElementSibling;const nowCollapsed=ch&&ch.style.display==='none';_collapsedSteps[key]=!nowCollapsed;if(ch)ch.style.display=nowCollapsed?'':'none';btn.textContent=nowCollapsed?'▼':'▶';};
+    });
+    // Wire group collapse
+    _panelEl?.querySelectorAll('[data-armg-collapse]').forEach(btn=>{
+      btn.onclick=e=>{e.stopPropagation();e.preventDefault();const key=btn.dataset.armgCollapse;const ch=btn.parentElement?.nextElementSibling;const nowCollapsed=ch&&ch.style.display==='none';_collapsedSteps[key]=!nowCollapsed;if(ch)ch.style.display=nowCollapsed?'':'none';btn.textContent=nowCollapsed?'▼':'▶';};
     });
     // Wire floor checkboxes — cascade to all group and zone switches on floor
     _panelEl?.querySelectorAll('[data-armf-cb]').forEach(flCb=>{
