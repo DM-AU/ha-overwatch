@@ -763,7 +763,7 @@ function triggerCard(t) {
     inner = `
       <div style="margin-bottom:10px;">
         <label style="${labelStyle}">${isDoor ? 'Door / Window sensors from zones' : 'Sensors from zones'}</label>
-        ${isDoor ? `<div style="font-size:11px;color:#555;margin-bottom:4px;">Shows door sensors from zone door pins, plus all sensors. Use the filter to narrow down.</div>` : ''}
+        ${isDoor ? `<div style="font-size:11px;color:#555;margin-bottom:4px;">Shows only sensors configured in each zone's <strong style="color:#888;">Doors</strong> tab. Add window contact sensors there to include them here.</div>` : ''}
         ${sensorsHierarchicalSelector(
           t.entity_ids||[],
           isDoor ? `trig-door-${t.id}` : `trig-sensor-${t.id}`,
@@ -989,16 +989,14 @@ function wireZoneGroupSelector(t, id) {
 }
 
 
-function sensorsHierarchicalSelector(selectedIds, id, extraSensorsFn) {
+function sensorsHierarchicalSelector(selectedIds, id, overrideSensorsFn) {
   const tree = zoneGroupTree();
-  // extraSensorsFn: optional (zoneId) => [entityId, ...] — supplements z.sensors
-  // Used by door trigger to inject doorPin sensor entities
+  // overrideSensorsFn: optional (zoneId) => [entityId, ...] — REPLACES z.sensors when set
+  // Used by door trigger to show only door pin sensors for each zone
 
   function allSensorsIn(node) {
     function zoneSensors(z) {
-      const base = z.sensors||[];
-      const extra = extraSensorsFn ? extraSensorsFn(z.id).filter(e=>!base.includes(e)) : [];
-      return [...base, ...extra];
+      return overrideSensorsFn ? overrideSensorsFn(z.id) : (z.sensors||[]);
     }
     if (node.sensors) return zoneSensors(node); // bare zone
     if (node.type === 'group' || node.zones) return (node.zones||[]).flatMap(z=>zoneSensors(z));
@@ -1011,9 +1009,7 @@ function sensorsHierarchicalSelector(selectedIds, id, extraSensorsFn) {
 
   function renderSensorZone(z, indent) {
     const zCollapsed = _collapsedSteps['sz-'+z.id] !== false;
-    const baseSensors = z.sensors||[];
-    const extraSensors = extraSensorsFn ? extraSensorsFn(z.id).filter(e=>!baseSensors.includes(e)) : [];
-    const sensors = [...baseSensors, ...extraSensors];
+    const sensors = overrideSensorsFn ? overrideSensorsFn(z.id) : (z.sensors||[]);
     if (!sensors.length) return '';
     const allSel = sensors.every(e=>selectedIds.includes(e));
     return '<div data-sg-zone="' + escH(z.id) + '" data-scbl-item data-scbl-label="' + escH(z.name||z.id) + '">' +
