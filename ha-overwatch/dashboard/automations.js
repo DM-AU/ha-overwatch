@@ -904,15 +904,15 @@ function wireZoneGroupSelector(t, id) {
 
   // Floor collapse
   el.querySelectorAll('[data-flo-collapse]').forEach(btn=>{
-    btn.onclick=e=>{e.stopPropagation();e.preventDefault();const fid=btn.dataset.floCollapse;const key='zf-'+fid;_collapsedSteps[key]=!_collapsedSteps[key];const ch=btn.parentElement?.parentElement?.querySelector('[data-ow-children="'+key+'"]');if(ch)ch.style.display=_collapsedSteps[key]?'none':'';btn.textContent=_collapsedSteps[key]?'▶':'▼';};
+    btn.onclick=e=>{e.stopPropagation();e.preventDefault();const fid=btn.dataset.floCollapse;const key='zf-'+fid;const ch=btn.parentElement?.nextElementSibling;const nowCollapsed=ch&&ch.style.display==='none';_collapsedSteps[key]=!nowCollapsed;if(ch)ch.style.display=nowCollapsed?'':'none';btn.textContent=nowCollapsed?'▼':'▶';};
   });
   // Group collapse
   el.querySelectorAll('[data-grp-collapse]').forEach(btn=>{
-    btn.onclick=e=>{e.stopPropagation();e.preventDefault();const gid=btn.dataset.grpCollapse;const key='zg-'+gid;_collapsedSteps[key]=!_collapsedSteps[key];const ch=btn.parentElement?.parentElement?.querySelector('[data-ow-children="'+key+'"]');if(ch)ch.style.display=_collapsedSteps[key]?'none':'';btn.textContent=_collapsedSteps[key]?'▶':'▼';};
+    btn.onclick=e=>{e.stopPropagation();e.preventDefault();const gid=btn.dataset.grpCollapse;const key='zg-'+gid;const ch=btn.parentElement?.nextElementSibling;const nowCollapsed=ch&&ch.style.display==='none';_collapsedSteps[key]=!nowCollapsed;if(ch)ch.style.display=nowCollapsed?'':'none';btn.textContent=nowCollapsed?'▼':'▶';};
   });
   // Zone sensor expand
   el.querySelectorAll('[data-zone-sensor-collapse]').forEach(btn=>{
-    btn.onclick=e=>{e.stopPropagation();e.preventDefault();const zid=btn.dataset.zoneSensorCollapse;const key='zzr-'+zid;_collapsedSteps[key]=!_collapsedSteps[key];const ch=btn.parentElement?.parentElement?.querySelector('[data-ow-children="'+key+'"]');if(ch)ch.style.display=_collapsedSteps[key]?'none':'';btn.textContent=_collapsedSteps[key]?'▶':'▼';};
+    btn.onclick=e=>{e.stopPropagation();e.preventDefault();const zid=btn.dataset.zoneSensorCollapse;const key='zzr-'+zid;const ch=btn.parentElement?.nextElementSibling;const nowCollapsed=ch&&ch.style.display==='none';_collapsedSteps[key]=!nowCollapsed;if(ch)ch.style.display=nowCollapsed?'':'none';btn.textContent=nowCollapsed?'▼':'▶';};
   });
 
   function collectSelections() {
@@ -1051,13 +1051,13 @@ function wireSensorHierarchicalSelector(id, fn) {
   const el=_panelEl?.querySelector(`#${CSS.escape(id)}`);
   if (!el) return;
   el.querySelectorAll('[data-sf-collapse]').forEach(btn=>{
-    btn.onclick=e=>{e.stopPropagation();e.preventDefault();const key='sf-'+btn.dataset.sfCollapse;_collapsedSteps[key]=!_collapsedSteps[key];const ch=btn.parentElement?.parentElement?.querySelector('[data-ow-children="'+key+'"]');if(ch)ch.style.display=_collapsedSteps[key]?'none':'';btn.textContent=_collapsedSteps[key]?'▶':'▼';};
+    btn.onclick=e=>{e.stopPropagation();e.preventDefault();const key='sf-'+btn.dataset.sfCollapse;const ch=btn.parentElement?.nextElementSibling;const nowCollapsed=ch&&ch.style.display==='none';_collapsedSteps[key]=!nowCollapsed;if(ch)ch.style.display=nowCollapsed?'':'none';btn.textContent=nowCollapsed?'▼':'▶';};
   });
   el.querySelectorAll('[data-sg-collapse]').forEach(btn=>{
-    btn.onclick=e=>{e.stopPropagation();e.preventDefault();const key='sg-'+btn.dataset.sgCollapse;_collapsedSteps[key]=!_collapsedSteps[key];const ch=btn.parentElement?.parentElement?.querySelector('[data-ow-children="'+key+'"]');if(ch)ch.style.display=_collapsedSteps[key]?'none':'';btn.textContent=_collapsedSteps[key]?'▶':'▼';};
+    btn.onclick=e=>{e.stopPropagation();e.preventDefault();const key='sg-'+btn.dataset.sgCollapse;const ch=btn.parentElement?.nextElementSibling;const nowCollapsed=ch&&ch.style.display==='none';_collapsedSteps[key]=!nowCollapsed;if(ch)ch.style.display=nowCollapsed?'':'none';btn.textContent=nowCollapsed?'▼':'▶';};
   });
   el.querySelectorAll('[data-sz-collapse]').forEach(btn=>{
-    btn.onclick=e=>{e.stopPropagation();e.preventDefault();const key='sz-'+btn.dataset.szCollapse;_collapsedSteps[key]=!_collapsedSteps[key];const ch=btn.parentElement?.parentElement?.querySelector('[data-ow-children="'+key+'"]');if(ch)ch.style.display=_collapsedSteps[key]?'none':'';btn.textContent=_collapsedSteps[key]?'▶':'▼';};
+    btn.onclick=e=>{e.stopPropagation();e.preventDefault();const key='sz-'+btn.dataset.szCollapse;const ch=btn.parentElement?.nextElementSibling;const nowCollapsed=ch&&ch.style.display==='none';_collapsedSteps[key]=!nowCollapsed;if(ch)ch.style.display=nowCollapsed?'':'none';btn.textContent=nowCollapsed?'▼':'▶';};
   });
   function collect() { return [...el.querySelectorAll('input[value]:checked')].map(cb=>cb.value); }
   el.querySelectorAll('[data-sz-zone-cb]').forEach(zoneCb=>{
@@ -1264,18 +1264,25 @@ function actionCard(a, idx, total) {
       tree.forEach(node=>{
         if (node.type==='floor') {
           const fCollapsed = !!_collapsedSteps['armf-'+node.id];
+          const allFloorEids = [
+            ...(node.groups||[]).map(g=>'switch.overwatch_zone_group_'+(nameSlug(g.name)||g.id)),
+            ...(node.ungrouped||[]).map(z=>'switch.overwatch_zone_'+(nameSlug(z.name)||z.id)),
+          ];
+          const fAllSel = allFloorEids.length && allFloorEids.every(e=>(a.entity_ids||[]).includes(e));
           rows += '<div>' +
             '<div style="display:flex;align-items:center;gap:5px;padding:4px 6px;background:rgba(255,255,255,0.03);border-radius:4px;margin-bottom:2px;">' +
             '<button data-armf-collapse="' + escH(node.id) + '" style="background:none;border:none;color:#666;cursor:pointer;font-size:10px;padding:0 2px;">' + (fCollapsed?'▶':'▼') + '</button>' +
+            '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;">' +
+            '<input type="checkbox" data-armf-cb value="' + escH(node.id) + '" ' + (fAllSel?'checked':'') + ' style="accent-color:#0064d2;flex-shrink:0;">' +
             '<span style="font-size:11px;font-weight:700;color:#aaa;text-transform:uppercase;letter-spacing:0.06em;">' + escH(node.name) + '</span>' +
-            '</div>';
-          const armFlCh = !fCollapsed ? ((node.groups||[]).map(g=>buildGroupArmRow(g,12)).join('')+(node.ungrouped||[]).map(z=>buildZoneArmRow(z,12)).join('')) : '';
+            '</label></div>';
+          const armFlCh = (node.groups||[]).map(g=>buildGroupArmRow(g,12)).join('')+(node.ungrouped||[]).map(z=>buildZoneArmRow(z,12)).join('');
           rows += '<div data-ow-children="armf-' + escH(node.id) + '"' + (fCollapsed?' style="display:none"':'') + '>' + armFlCh + '</div>';
           rows += '</div>';
         } else if (node.type==='group') {
           rows += buildGroupArmRow(node, 6);
         } else if (node.type==='ungrouped') {
-          (node.zones||[]).forEach(z=>{ rows += buildZoneArmRow(z, 6); });
+          (node.ungrouped||node.zones||[]).forEach(z=>{ rows += buildZoneArmRow(z, 6); });
         }
       });
       return rows;
@@ -1356,7 +1363,7 @@ function actionCard(a, idx, total) {
               const zonesSw=g.zones.map(z=>{
                 const zSw=camViewAll.find(e=>e.entity_id==='switch.overwatch_camera_zone_'+(nameSlug(z.name)||z.id));
                 const zSel=(a.entity_ids||[]).includes(zSw?.entity_id);
-                return zSw?'<label style="display:flex;align-items:center;gap:6px;padding:2px 6px 2px 30px;cursor:pointer;"><input type="checkbox" data-camview-cb value="'+escH(zSw.entity_id)+'" '+(zSel?'checked':'')+' style="accent-color:#0064d2;"><span style="font-size:11px;color:#bbb;">'+escH(z.name||z.id)+'</span></label>':'';
+                return zSw?'<label style="display:flex;align-items:center;gap:6px;padding:2px 6px 2px 24px;cursor:pointer;"><input type="checkbox" data-camview-cb value="'+escH(zSw.entity_id)+'" '+(zSel?'checked':'')+' style="accent-color:#0064d2;"><span style="font-size:11px;color:#bbb;">'+escH(z.name||z.id)+'</span></label>':'';
               }).join('');
               return '<div>' +
                 '<div style="display:flex;align-items:center;gap:5px;padding:2px 6px 2px 12px;">' +
@@ -1365,11 +1372,17 @@ function actionCard(a, idx, total) {
                 '<span style="font-size:11px;font-weight:600;color:#ccc;">'+escH(g.name)+'</span></label></div>' +
                 '<div data-ow-children="cvg-'+escH(fl.id+'-'+g.id)+'"'+(gC?' style="display:none"':'')+'>' + zonesSw + '</div></div>';
             }).join('');
+            // All camview entities on this floor (floor switch + group switches)
+            const allFlCamEids=[flSwEntity,...fl.groups.map(g=>g.sw?.entity_id)].filter(Boolean);
+            const cvfAllSel=allFlCamEids.length&&allFlCamEids.every(e=>(a.entity_ids||[]).includes(e));
             return '<div>' +
               '<div style="display:flex;align-items:center;gap:5px;padding:3px 6px;background:rgba(255,255,255,0.03);border-radius:4px;margin-bottom:2px;">' +
               '<button data-cvf-collapse="'+escH(fl.id)+'" style="background:none;border:none;color:#666;cursor:pointer;font-size:10px;padding:0 2px;">'+(fCollapsed?'▶':'▼')+'</button>' +
-              '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;">'+(flSwEntity?'<input type="checkbox" data-camview-cb value="'+escH(flSwEntity)+'" '+(fAllSel?'checked':'')+' style="accent-color:#0064d2;">':'')+
-              '<span style="font-size:11px;font-weight:700;color:#aaa;text-transform:uppercase;letter-spacing:0.06em;">'+escH(fl.name)+'</span></label></div>' +
+              '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;">' +
+              '<input type="checkbox" data-cvfall-cb="'+escH(fl.id)+'" '+( cvfAllSel?'checked':'')+' style="accent-color:#0064d2;flex-shrink:0;">' +
+              '<span style="font-size:11px;font-weight:700;color:#aaa;text-transform:uppercase;letter-spacing:0.06em;">'+escH(fl.name)+'</span>' +
+              (flSwEntity?'<span style="font-size:10px;color:#444;margin-left:4px;">floor switch</span>':'') +
+              '</label></div>' +
               '<div data-ow-children="cvf-'+escH(fl.id)+'"'+(fCollapsed?' style="display:none"':'')+'>' + groupsHtml + '</div></div>';
           }).join('')}
           ${!camViewByFloor.length && !masterSw ? '<div style="color:#555;font-size:11px;">No OW camera view switches found.</div>' : ''}
@@ -1412,7 +1425,7 @@ function deviceActionTree(tree, selectedIds, baseId) {
     const pad = depth * 12;
     if (node.type === 'floor') {
       const fCollapsed = !!_collapsedSteps['dlf-' + node.id];
-      const children = '<div data-ow-children="dlf-' + escH(node.id) + '" style="padding-left:' + pad + 'px;' + (fCollapsed?'display:none;':'') + '">' +
+      const children = '<div data-ow-children="dlf-' + escH(node.id) + '"' + (fCollapsed?' style="display:none"':'') + '>' +
         (node.groups||[]).map(g => renderNode(g, depth+1)).join('') +
         (node.ungrouped||[]).map(z => renderNode(z, depth+1)).join('') +
         '</div>';
@@ -1431,11 +1444,11 @@ function deviceActionTree(tree, selectedIds, baseId) {
       const gCollapsed = _collapsedSteps['dlg-' + node.id] !== false; // collapsed unless explicitly expanded
       const allDevIds = node.zones ? node.zones.flatMap(z=>z.devices||[]).map(d=>d.entity_id) : [];
       const allSel = allDevIds.length && allDevIds.every(id=>selectedIds.includes(id));
-      const children = '<div data-ow-children="dlg-' + escH(node.id) + '" style="padding-left:' + (pad+8) + 'px;' + (gCollapsed?'display:none;':'') + '">' +
+      const children = '<div data-ow-children="dlg-' + escH(node.id) + '"' + (gCollapsed?' style="display:none"':'') + '>' +
         (node.zones||[]).map(z => renderNode(z, depth+1)).join('') +
         '</div>';
       return '<div>' +
-        '<div style="display:flex;align-items:center;gap:6px;padding:4px 6px;">' +
+        '<div style="display:flex;align-items:center;gap:6px;padding:4px 6px;padding-left:' + (pad+6) + 'px;">' +
         '<button data-dlg-collapse="' + escH(node.id) + '" data-base-id="' + escH(baseId) + '" style="background:none;border:none;color:#555;cursor:pointer;font-size:10px;padding:0 2px;">' + (gCollapsed?'▶':'▼') + '</button>' +
         '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;">' +
         '<input type="checkbox" data-dlg-cb="' + escH(node.id) + '" data-base-id="' + escH(baseId) + '" ' + (allSel?'checked':'') + ' style="accent-color:#0064d2;flex-shrink:0;">' +
@@ -1448,15 +1461,15 @@ function deviceActionTree(tree, selectedIds, baseId) {
     const devIds = (zone.devices||[]).map(d=>d.entity_id);
     const zAllSel = devIds.length && devIds.every(id=>selectedIds.includes(id));
     const zCollapsed = _collapsedSteps['dlz-' + zone.id] !== false; // collapsed unless explicitly expanded
-    return '<div style="padding-left:' + pad + 'px;">' +
-      '<div style="display:flex;align-items:center;gap:6px;padding:3px 6px;">' +
+    return '<div>' +
+      '<div style="display:flex;align-items:center;gap:6px;padding:3px 6px;padding-left:' + (pad+6) + 'px;">' +
       '<button data-dlz-collapse="' + escH(zone.id) + '" data-base-id="' + escH(baseId) + '" style="background:none;border:none;color:#444;cursor:pointer;font-size:9px;padding:0 2px;">' + (zCollapsed?'▶':'▼') + '</button>' +
       '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;">' +
       '<input type="checkbox" data-dlz-cb="' + escH(zone.id) + '" data-base-id="' + escH(baseId) + '" ' + (zAllSel?'checked':'') + ' style="accent-color:#0064d2;flex-shrink:0;">' +
       '<span style="font-size:11px;color:#bbb;">' + escH(zone.name||zone.id) + '</span>' +
       stateBadge(zoneTriggered(zone), zoneArmed(zone)) +
       '</label></div>' +
-      ('<div data-ow-children="dlz-' + escH(zone.id) + '" style="padding-left:' + (pad+20) + 'px;' + (zCollapsed?'display:none;':'') + '">' +
+      ('<div data-ow-children="dlz-' + escH(zone.id) + '" style="padding-left:' + (pad+18) + 'px;' + (zCollapsed?'display:none;':'') + '">' +
         (zone.devices||[]).map(d => {
           const isSel = selectedIds.includes(d.entity_id);
           return '<label style="display:flex;align-items:center;gap:7px;padding:2px 4px;cursor:pointer;border-radius:4px;">' +
@@ -1476,7 +1489,7 @@ function wireDeviceActionTree(selectedIds, onUpdate, baseId) {
   if (!el) return;
   // Floor collapse
   el.querySelectorAll(`[data-dlf-collapse][data-base-id="${CSS.escape(baseId)}"]`).forEach(btn=>{
-    btn.onclick=e=>{e.stopPropagation();e.preventDefault();const key='dlf-'+btn.dataset.dlfCollapse;_collapsedSteps[key]=!_collapsedSteps[key];const ch=btn.closest('div').parentElement?.querySelector('[data-ow-children="'+key+'"]');if(ch)ch.style.display=_collapsedSteps[key]?'none':'';btn.textContent=_collapsedSteps[key]?'▶':'▼';};
+    btn.onclick=e=>{e.stopPropagation();e.preventDefault();const key='dlf-'+btn.dataset.dlfCollapse;const ch=btn.parentElement?.nextElementSibling;const nowCollapsed=ch&&ch.style.display==='none';_collapsedSteps[key]=!nowCollapsed;if(ch)ch.style.display=nowCollapsed?'':'none';btn.textContent=nowCollapsed?'▼':'▶';};
   });
   // Floor checkboxes — cascade to all devices on floor
   el.querySelectorAll(`[data-dlf-cb][data-base-id="${CSS.escape(baseId)}"]`).forEach(flCb=>{
@@ -1490,11 +1503,11 @@ function wireDeviceActionTree(selectedIds, onUpdate, baseId) {
   });
   // Group collapse
   el.querySelectorAll(`[data-dlg-collapse][data-base-id="${CSS.escape(baseId)}"]`).forEach(btn=>{
-    btn.onclick=e=>{e.stopPropagation();e.preventDefault();const key='dlg-'+btn.dataset.dlgCollapse;_collapsedSteps[key]=!_collapsedSteps[key];const ch=btn.closest('div').parentElement?.querySelector('[data-ow-children="'+key+'"]');if(ch)ch.style.display=_collapsedSteps[key]?'none':'';btn.textContent=_collapsedSteps[key]?'▶':'▼';};
+    btn.onclick=e=>{e.stopPropagation();e.preventDefault();const key='dlg-'+btn.dataset.dlgCollapse;const ch=btn.parentElement?.nextElementSibling;const nowCollapsed=ch&&ch.style.display==='none';_collapsedSteps[key]=!nowCollapsed;if(ch)ch.style.display=nowCollapsed?'':'none';btn.textContent=nowCollapsed?'▼':'▶';};
   });
   // Zone collapse
   el.querySelectorAll(`[data-dlz-collapse][data-base-id="${CSS.escape(baseId)}"]`).forEach(btn=>{
-    btn.onclick=e=>{e.stopPropagation();e.preventDefault();const key='dlz-'+btn.dataset.dlzCollapse;_collapsedSteps[key]=!_collapsedSteps[key];const ch=btn.closest('div').parentElement?.querySelector('[data-ow-children="'+key+'"]');if(ch)ch.style.display=_collapsedSteps[key]?'none':'';btn.textContent=_collapsedSteps[key]?'▶':'▼';};
+    btn.onclick=e=>{e.stopPropagation();e.preventDefault();const key='dlz-'+btn.dataset.dlzCollapse;const ch=btn.parentElement?.nextElementSibling;const nowCollapsed=ch&&ch.style.display==='none';_collapsedSteps[key]=!nowCollapsed;if(ch)ch.style.display=nowCollapsed?'':'none';btn.textContent=nowCollapsed?'▼':'▶';};
   });
   function collectIds() { return [...el.querySelectorAll(`[data-dl-cb][data-base-id="${CSS.escape(baseId)}"]:checked`)].map(cb=>cb.value); }
   // Group checkbox — cascade to all zone devices
@@ -1627,7 +1640,23 @@ function wireActionFields(a) {
   if (a.type==='arm') {
     // Wire floor collapse
     _panelEl?.querySelectorAll('[data-armf-collapse]').forEach(btn=>{
-      btn.onclick=e=>{e.stopPropagation();e.preventDefault();const key='armf-'+btn.dataset.armfCollapse;_collapsedSteps[key]=!_collapsedSteps[key];const ch=btn.closest('div').querySelector('[data-ow-children="'+key+'"]');if(ch)ch.style.display=_collapsedSteps[key]?'none':'';btn.textContent=_collapsedSteps[key]?'▶':'▼';};
+      btn.onclick=e=>{e.stopPropagation();e.preventDefault();const key='armf-'+btn.dataset.armfCollapse;const ch=btn.parentElement?.nextElementSibling;const nowCollapsed=ch&&ch.style.display==='none';_collapsedSteps[key]=!nowCollapsed;if(ch)ch.style.display=nowCollapsed?'':'none';btn.textContent=nowCollapsed?'▼':'▶';};
+    });
+    // Wire floor checkboxes — cascade to all group and zone switches on floor
+    _panelEl?.querySelectorAll('[data-armf-cb]').forEach(flCb=>{
+      flCb.onchange=()=>{
+        const fid=flCb.value;
+        const tree=zoneGroupTree();
+        const floorNode=tree.find(n=>n.type==='floor'&&n.id===fid);
+        if(!floorNode)return;
+        const eids=[
+          ...(floorNode.groups||[]).map(g=>'switch.overwatch_zone_group_'+(nameSlug(g.name)||g.id)),
+          ...(floorNode.ungrouped||[]).map(z=>'switch.overwatch_zone_'+(nameSlug(z.name)||z.id)),
+        ];
+        const armBox2=_panelEl?.querySelector(`#act-arm-zones-${a.id}`);
+        if(armBox2) eids.forEach(eid=>{const cb=armBox2.querySelector(`[data-arm-cb][value="${CSS.escape(eid)}"]`);if(cb)cb.checked=flCb.checked;});
+        a.entity_ids=[...(armBox2?.querySelectorAll('[data-arm-cb]:checked')||[])].map(c=>c.value);
+      };
     });
     const armBox=_panelEl?.querySelector(`#act-arm-zones-${a.id}`);
     if(armBox) {
@@ -1640,12 +1669,24 @@ function wireActionFields(a) {
     wireSelect(`act-arm-svc-${a.id}`,v=>a.service=v);
   }
   if (a.type==='camera_view') {
+    // Wire floor "select all" checkboxes
+    _panelEl?.querySelectorAll('[data-cvfall-cb]').forEach(flCb=>{
+      flCb.onchange=()=>{
+        const camviewBox=_panelEl?.querySelector(`#act-camview-zones-${a.id}`);
+        if(!camviewBox)return;
+        // Check/uncheck all camview-cb checkboxes under this floor
+        const flId=flCb.dataset.cvfallCb;
+        const chDiv=camviewBox.querySelector(`[data-ow-children="cvf-${CSS.escape(flId)}"]`);
+        if(chDiv) chDiv.querySelectorAll('[data-camview-cb]').forEach(cb=>cb.checked=flCb.checked);
+        a.entity_ids=[...camviewBox.querySelectorAll('[data-camview-cb]:checked')].map(c=>c.value);
+      };
+    });
     // Wire floor AND group collapse buttons
     _panelEl?.querySelectorAll('[data-cvf-collapse]').forEach(btn=>{
-      btn.onclick=e=>{e.stopPropagation();e.preventDefault();const key='cvf-'+btn.dataset.cvfCollapse;_collapsedSteps[key]=!_collapsedSteps[key];const ch=btn.closest('div').querySelector('[data-ow-children="'+key+'"]');if(ch)ch.style.display=_collapsedSteps[key]?'none':'';btn.textContent=_collapsedSteps[key]?'▶':'▼';};
+      btn.onclick=e=>{e.stopPropagation();e.preventDefault();const key='cvf-'+btn.dataset.cvfCollapse;const ch=btn.parentElement?.nextElementSibling;const nowCollapsed=ch&&ch.style.display==='none';_collapsedSteps[key]=!nowCollapsed;if(ch)ch.style.display=nowCollapsed?'':'none';btn.textContent=nowCollapsed?'▼':'▶';};
     });
     _panelEl?.querySelectorAll('[data-cvg-collapse]').forEach(btn=>{
-      btn.onclick=e=>{e.stopPropagation();e.preventDefault();const key='cvg-'+btn.dataset.cvgCollapse;_collapsedSteps[key]=!_collapsedSteps[key];const ch=btn.closest('div').parentElement?.querySelector('[data-ow-children="'+key+'"]');if(ch)ch.style.display=_collapsedSteps[key]?'none':'';btn.textContent=_collapsedSteps[key]?'▶':'▼';};
+      btn.onclick=e=>{e.stopPropagation();e.preventDefault();const key='cvg-'+btn.dataset.cvgCollapse;const ch=btn.parentElement?.nextElementSibling;const nowCollapsed=ch&&ch.style.display==='none';_collapsedSteps[key]=!nowCollapsed;if(ch)ch.style.display=nowCollapsed?'':'none';btn.textContent=nowCollapsed?'▼':'▶';};
     });
     // Wire all camview checkboxes
     const camviewBox=_panelEl?.querySelector(`#act-camview-zones-${a.id}`);
