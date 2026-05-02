@@ -393,6 +393,7 @@ function addTrigger(type) {
     person:   {entity_ids:[],state:'home',for_duration:null},
     device:   {entity_ids:[],state:'home',for_duration:null},
     sensor:   {entity_ids:[],state:'on',for_duration:null},
+    door:     {entity_ids:[],state:'on',for_duration:null},
     entity:   {entity_id:'',to:'on',for_duration:null},
   };
   _draft.triggers.push({id:uid(),type,...(defaults[type]||{for_duration:null})});
@@ -577,6 +578,7 @@ function renderEditor() {
         `<button class="ow-add-btn" data-add-trigger="zone">+ Zone event</button>
          <button class="ow-add-btn" data-add-trigger="zone_arm">+ Zone arm/disarm</button>
          <button class="ow-add-btn" data-add-trigger="sensor">+ Sensor</button>
+         <button class="ow-add-btn" data-add-trigger="door">+ Door / Window</button>
          <button class="ow-add-btn" data-add-trigger="person">+ Person</button>
          <button class="ow-add-btn" data-add-trigger="device">+ Device tracker</button>
          <button class="ow-add-btn" data-add-trigger="entity">+ Any entity</button>`
@@ -718,15 +720,20 @@ function triggerCard(t) {
       ${forField}`;
   }
 
-  if (t.type === 'sensor') {
+  if (t.type === 'sensor' || t.type === 'door') {
+    const isDoor = t.type === 'door';
+    // For door type, filter sensor selector to only show contact/door/window sensors
+    // We do this by passing a filtered selectedIds and letting the selector show all,
+    // but labelling it appropriately. The filtering is in wireSensorHierarchicalSelector.
     inner = `
       <div style="margin-bottom:10px;">
-        <label style="${labelStyle}">Sensors from zones</label>
-        ${sensorsHierarchicalSelector(t.entity_ids||[], `trig-sensor-${t.id}`)}
+        <label style="${labelStyle}">${isDoor ? 'Door / Window sensors from zones' : 'Sensors from zones'}</label>
+        ${sensorsHierarchicalSelector(t.entity_ids||[], isDoor ? `trig-door-${t.id}` : `trig-sensor-${t.id}`)}
+        ${isDoor ? `<div style="font-size:11px;color:#555;margin-top:4px;">💡 Tip: shows all sensors — filter by name to find door/window contacts.</div>` : ''}
       </div>
       <div>
         <label style="${labelStyle}">State</label>
-        <select id="trig-sensorstate-${t.id}" style="${selectStyle}">
+        <select id="trig-${isDoor?'door':'sensor'}state-${t.id}" style="${selectStyle}">
           <option value="on"  ${t.state==='on' ?'selected':''}>Triggered / Open / Active</option>
           <option value="off" ${t.state==='off'?'selected':''}>Clear / Closed / Inactive</option>
         </select>
@@ -781,7 +788,7 @@ function triggerCard(t) {
       ${forField}`;
   }
 
-  const labels={zone:'Zone Event',zone_arm:'Zone Arm/Disarm',sensor:'Sensor',person:'Person',device:'Device Tracker',entity:'Entity State'};
+  const labels={zone:'Zone Event',zone_arm:'Zone Arm/Disarm',sensor:'Sensor',door:'Door / Window',person:'Person',device:'Device Tracker',entity:'Entity State'};
   return stepCard(t.id, labels[t.type]||t.type, inner, 'trigger');
 }
 
@@ -805,7 +812,7 @@ function zoneGroupSelector(t, id) {
           node.groups.map(g => zoneGroupBlock(g, selZones, selGroups, showSensors)).join('') +
           node.ungrouped.map(z => zoneRow(z, selZones, selGroups, null, showSensors)).join('') +
           '</div>';
-        return '<div data-scbl-item data-scbl-label="' + escH(node.name) + '">' +
+        return '<div data-zg-floor="' + escH(node.id) + '" data-scbl-item data-scbl-label="' + escH(node.name) + '">' +
           '<div style="display:flex;align-items:center;padding:5px 6px;gap:5px;background:rgba(255,255,255,0.03);border-radius:5px;margin-bottom:2px;">' +
           '<button data-flo-collapse="' + escH(node.id) + '" style="background:none;border:none;color:#666;cursor:pointer;font-size:10px;padding:0 2px;">' + (fCollapsed?'▶':'▼') + '</button>' +
           '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;">' +
@@ -840,7 +847,7 @@ function zoneGroupBlock(g, selZones, selGroups, showSensors) {
   const children = '<div data-ow-children="zg-' + gId + '" style="padding-left:16px;' + (gCollapsed?'display:none;':'') + '">' +
     g.zones.map(z => zoneRow(z, selZones, selGroups, g.id, showSensors)).join('') +
     '</div>';
-  return '<div data-scbl-item data-scbl-label="' + escH(g.name) + '">' +
+  return '<div data-zg-group="' + gId + '" data-scbl-item data-scbl-label="' + escH(g.name) + '">' +
     '<div style="display:flex;align-items:center;padding:4px 6px;gap:6px;">' +
     '<button data-grp-collapse="' + gId + '" style="background:none;border:none;color:#555;cursor:pointer;font-size:10px;padding:0 2px;flex-shrink:0;">' + (gCollapsed?'▶':'▼') + '</button>' +
     '<label style="display:flex;align-items:center;gap:7px;cursor:pointer;flex:1;">' +
@@ -871,7 +878,7 @@ function zoneRow(z, selZones, selGroups, groupId, showSensors) {
         (st !== undefined ? stateBadge(st==='on', null, 'small') : '') +
         '</label>';
     }).join('') + '</div>' : '';
-  return '<div data-scbl-item data-scbl-label="' + escH(z.name||z.id) + '">' +
+  return '<div data-zg-zone="' + zId + '" data-scbl-item data-scbl-label="' + escH(z.name||z.id) + '">' +
     '<div style="display:flex;align-items:center;padding:4px 6px;gap:6px;">' +
     expandBtn +
     '<label style="display:flex;align-items:center;gap:7px;cursor:pointer;flex:1;">' +
@@ -885,130 +892,137 @@ function wireZoneGroupSelector(t, id) {
   const el = _panelEl?.querySelector(`#${CSS.escape(id)}`);
   if (!el) return;
 
-  // Floor checkboxes — cascade to all groups and zones on floor
-  el.querySelectorAll('[data-flo-cb]').forEach(cb=>{
-    cb.onchange=()=>{
-      const fid=cb.dataset.floCb;
-      const floorNode=zoneGroupTree().find(n=>n.type==='floor'&&n.id===fid);
-      if(!floorNode)return;
-      const allZoneIds=[...(floorNode.groups||[]).flatMap(g=>g.zones.map(z=>z.id)), ...(floorNode.ungrouped||[]).map(z=>z.id)];
-      allZoneIds.forEach(zid=>{
-        const zCb=el.querySelector(`[data-zone-cb="${CSS.escape(zid)}"]`);
-        if(zCb){zCb.checked=cb.checked; el.querySelectorAll(`[data-sensor-cb][data-zone-id="${CSS.escape(zid)}"]`).forEach(scb=>scb.checked=cb.checked);}
-      });
-      el.querySelectorAll('[data-grp-cb]').forEach(gCb=>gCb.checked=cb.checked);
-      collectSelections();
-      updateIndeterminateStates(el);
-    };
-  });
-
-  // Floor collapse
   el.querySelectorAll('[data-flo-collapse]').forEach(btn=>{
-    btn.onclick=e=>{e.stopPropagation();e.preventDefault();const fid=btn.dataset.floCollapse;const key='zf-'+fid;const ch=btn.parentElement?.nextElementSibling;const nowCollapsed=ch&&ch.style.display==='none';_collapsedSteps[key]=!nowCollapsed;if(ch)ch.style.display=nowCollapsed?'':'none';btn.textContent=nowCollapsed?'▼':'▶';};
+    btn.onclick=e=>{e.stopPropagation();e.preventDefault();const key='zf-'+btn.dataset.floCollapse;const ch=btn.parentElement?.nextElementSibling;const nowC=ch&&ch.style.display==='none';_collapsedSteps[key]=!nowC;if(ch)ch.style.display=nowC?'':'none';btn.textContent=nowC?'▼':'▶';};
   });
-  // Group collapse
   el.querySelectorAll('[data-grp-collapse]').forEach(btn=>{
-    btn.onclick=e=>{e.stopPropagation();e.preventDefault();const gid=btn.dataset.grpCollapse;const key='zg-'+gid;const ch=btn.parentElement?.nextElementSibling;const nowCollapsed=ch&&ch.style.display==='none';_collapsedSteps[key]=!nowCollapsed;if(ch)ch.style.display=nowCollapsed?'':'none';btn.textContent=nowCollapsed?'▼':'▶';};
+    btn.onclick=e=>{e.stopPropagation();e.preventDefault();const key='zg-'+btn.dataset.grpCollapse;const ch=btn.parentElement?.nextElementSibling;const nowC=ch&&ch.style.display==='none';_collapsedSteps[key]=!nowC;if(ch)ch.style.display=nowC?'':'none';btn.textContent=nowC?'▼':'▶';};
   });
-  // Zone sensor expand
   el.querySelectorAll('[data-zone-sensor-collapse]').forEach(btn=>{
-    btn.onclick=e=>{e.stopPropagation();e.preventDefault();const zid=btn.dataset.zoneSensorCollapse;const key='zzr-'+zid;const ch=btn.parentElement?.nextElementSibling;const nowCollapsed=ch&&ch.style.display==='none';_collapsedSteps[key]=!nowCollapsed;if(ch)ch.style.display=nowCollapsed?'':'none';btn.textContent=nowCollapsed?'▼':'▶';};
+    btn.onclick=e=>{e.stopPropagation();e.preventDefault();const key='zzr-'+btn.dataset.zoneSensorCollapse;const ch=btn.parentElement?.nextElementSibling;const nowC=ch&&ch.style.display==='none';_collapsedSteps[key]=!nowC;if(ch)ch.style.display=nowC?'':'none';btn.textContent=nowC?'▼':'▶';};
   });
 
+  function allZoneCbsIn(c) { return [...c.querySelectorAll('[data-zone-cb]')]; }
   function collectSelections() {
-    t.zone_ids = [...el.querySelectorAll('[data-zone-cb]:checked')].map(cb=>cb.dataset.zoneCb);
-    t.group_ids = [...el.querySelectorAll('[data-grp-cb]:checked')].map(cb=>cb.dataset.grpCb)
-      .filter(gid=>{
-        const grp=groups().find(g=>g.id===gid);
-        return grp && (grp.zone_ids||[]).every(zid=>t.zone_ids.includes(zid));
-      });
+    t.zone_ids  = [...el.querySelectorAll('[data-zone-cb]:checked')].map(cb=>cb.dataset.zoneCb);
+    t.group_ids = [...el.querySelectorAll('[data-grp-cb]:checked')]
+      .filter(cb=>!cb.indeterminate).map(cb=>cb.dataset.grpCb)
+      .filter(gid=>{ const grp=groups().find(g=>g.id===gid); return grp&&(grp.zone_ids||[]).every(zid=>t.zone_ids.includes(zid)); });
   }
-
-  // Zone checkboxes — also update sensor checkboxes within the zone
-  el.querySelectorAll('[data-zone-cb]').forEach(cb=>{
-    cb.onchange=()=>{
-      // Cascade to sensor checkboxes in this zone
-      el.querySelectorAll(`[data-sensor-cb][data-zone-id="${CSS.escape(cb.dataset.zoneCb)}"]`).forEach(scb=>scb.checked=cb.checked);
-      collectSelections();
-      updateIndeterminateStates(el);
-      // Update parent group checkbox
-      const gid=cb.dataset.groupId;
-      if (gid) {
-        const grp=groups().find(g=>g.id===gid);
-        if (grp) {
-          const grpCb=el.querySelector(`[data-grp-cb="${CSS.escape(gid)}"]`);
-          if(grpCb) grpCb.checked=(grp.zone_ids||[]).every(zid=>t.zone_ids.includes(zid));
-        }
-      }
+  function updateParentsZG(zoneCb) {
+    const grpDiv=zoneCb.closest('[data-zg-group]');
+    if(grpDiv){const grpCb=grpDiv.querySelector('[data-grp-cb]');if(grpCb){const zc=allZoneCbsIn(grpDiv);const n=zc.filter(c=>c.checked).length;grpCb.indeterminate=n>0&&n<zc.length;if(!grpCb.indeterminate)grpCb.checked=(n===zc.length);}}
+    const flDiv=zoneCb.closest('[data-zg-floor]');
+    if(flDiv){const flCb=flDiv.querySelector('[data-flo-cb]');if(flCb){const zc=allZoneCbsIn(flDiv);const n=zc.filter(c=>c.checked).length;flCb.indeterminate=n>0&&n<zc.length;if(!flCb.indeterminate)flCb.checked=(n===zc.length);}}
+  }
+  el.querySelectorAll('[data-flo-cb]').forEach(flCb=>{
+    flCb.onchange=()=>{
+      const flDiv=flCb.closest('[data-zg-floor]');
+      if(flDiv){allZoneCbsIn(flDiv).forEach(zc=>zc.checked=flCb.checked);flDiv.querySelectorAll('[data-grp-cb]').forEach(gc=>{gc.checked=flCb.checked;gc.indeterminate=false;});flDiv.querySelectorAll('[data-sensor-cb]').forEach(sc=>sc.checked=flCb.checked);}
+      flCb.indeterminate=false;collectSelections();
     };
   });
-
-  // Sensor checkboxes — individual sensor check means the zone is "partially" selected
-  // For now: checking a sensor selects its zone; unchecking doesn't deselect the zone
-  // (zone still selected, just that one sensor will be tracked via the zone entity anyway)
-  // This is display feedback only — what goes to HA is zone entities, not individual sensors
+  el.querySelectorAll('[data-grp-cb]').forEach(grpCb=>{
+    grpCb.onchange=()=>{
+      const grpDiv=grpCb.closest('[data-zg-group]');
+      if(grpDiv){allZoneCbsIn(grpDiv).forEach(zc=>zc.checked=grpCb.checked);grpDiv.querySelectorAll('[data-sensor-cb]').forEach(sc=>sc.checked=grpCb.checked);}
+      grpCb.indeterminate=false;
+      const flDiv=grpCb.closest('[data-zg-floor]');
+      if(flDiv){const flCb=flDiv.querySelector('[data-flo-cb]');if(flCb){const zc=allZoneCbsIn(flDiv);const n=zc.filter(c=>c.checked).length;flCb.indeterminate=n>0&&n<zc.length;if(!flCb.indeterminate)flCb.checked=(n===zc.length);}}
+      collectSelections();
+    };
+  });
+  el.querySelectorAll('[data-zone-cb]').forEach(zoneCb=>{
+    zoneCb.onchange=()=>{
+      el.querySelectorAll(`[data-sensor-cb][data-zone-id="${CSS.escape(zoneCb.dataset.zoneCb)}"]`).forEach(sc=>sc.checked=zoneCb.checked);
+      updateParentsZG(zoneCb);collectSelections();
+    };
+  });
   el.querySelectorAll('[data-sensor-cb]').forEach(scb=>{
     scb.onchange=()=>{
-      if (scb.checked) {
-        // Ensure parent zone checkbox is checked
-        const zCb=el.querySelector(`[data-zone-cb="${CSS.escape(scb.dataset.zoneId)}"]`);
-        if(zCb&&!zCb.checked){zCb.checked=true;}
-        collectSelections();
-      }
-    };
-  });
-
-  // Group checkboxes — cascade to zones
-  el.querySelectorAll('[data-grp-cb]').forEach(cb=>{
-    cb.onchange=()=>{
-      const gid=cb.dataset.grpCb;
-      const grp=groups().find(g=>g.id===gid);
-      if (grp) {
-        (grp.zone_ids||[]).forEach(zid=>{
-          const zCb=el.querySelector(`[data-zone-cb="${CSS.escape(zid)}"]`);
-          if (zCb) { zCb.checked=cb.checked; el.querySelectorAll(`[data-sensor-cb][data-zone-id="${CSS.escape(zid)}"]`).forEach(scb=>scb.checked=cb.checked); }
-        });
-      }
+      const zid=scb.dataset.zoneId;
+      const zoneCb=el.querySelector(`[data-zone-cb="${CSS.escape(zid)}"]`);
+      if(zoneCb){const s=[...el.querySelectorAll(`[data-sensor-cb][data-zone-id="${CSS.escape(zid)}"]`)];const n=s.filter(c=>c.checked).length;zoneCb.indeterminate=n>0&&n<s.length;if(!zoneCb.indeterminate)zoneCb.checked=n===s.length;updateParentsZG(zoneCb);}
       collectSelections();
-      updateIndeterminateStates(el);
     };
   });
+  el.querySelectorAll('[data-zone-cb]:checked').forEach(zc=>updateParentsZG(zc));
 }
 
-/* ── Sensor hierarchical selector ──────────────────────────── */
+
 function sensorsHierarchicalSelector(selectedIds, id) {
   const tree = zoneGroupTree();
+
+  function allSensorsIn(node) {
+    if (node.sensors) return node.sensors;
+    if (node.type === 'group' || node.zones) return (node.zones||[]).flatMap(z=>z.sensors||[]);
+    return [
+      ...(node.groups||[]).flatMap(g=>(g.zones||[]).flatMap(z=>z.sensors||[])),
+      ...(node.ungrouped||[]).flatMap(z=>z.sensors||[])
+    ];
+  }
+  function isFullS(node) { const a=allSensorsIn(node); return a.length>0 && a.every(e=>selectedIds.includes(e)); }
+
+  function renderSensorZone(z, indent) {
+    const zCollapsed = _collapsedSteps['sz-'+z.id] !== false;
+    const sensors = z.sensors||[];
+    if (!sensors.length) return '';
+    const allSel = sensors.every(e=>selectedIds.includes(e));
+    return '<div data-sg-zone="' + escH(z.id) + '" data-scbl-item data-scbl-label="' + escH(z.name||z.id) + '">' +
+      '<div style="display:flex;align-items:center;padding:3px 6px;gap:5px;padding-left:' + indent + 'px;">' +
+      '<button data-sz-collapse="' + escH(z.id) + '" style="background:none;border:none;color:#444;cursor:pointer;font-size:9px;padding:0 2px;flex-shrink:0;">' + (zCollapsed?'▶':'▼') + '</button>' +
+      '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;">' +
+      '<input type="checkbox" data-sz-zone-cb="' + escH(z.id) + '" ' + (allSel?'checked':'') + ' style="accent-color:#0064d2;flex-shrink:0;">' +
+      '<span style="font-size:11px;font-weight:600;color:#bbb;">' + escH(z.name||z.id) + '</span>' +
+      stateBadge(zoneTriggered(z), zoneArmed(z)) + '</label></div>' +
+      '<div data-ow-children="sz-' + escH(z.id) + '"' + (zCollapsed?' style="display:none"':'') + ' style="padding-left:' + (indent+14) + 'px;">' +
+      sensors.map(eid => {
+        const st = haStates()[eid]?.state;
+        const fn = haStates()[eid]?.attributes?.friendly_name || eid.split('.').pop().replace(/_/g,' ');
+        return '<label data-scbl-item data-scbl-label="' + escH(fn+' '+eid) + '" style="display:flex;align-items:center;gap:7px;padding:3px 4px;cursor:pointer;border-radius:4px;">' +
+          '<input type="checkbox" data-sensor-eid="' + escH(eid) + '" ' + (selectedIds.includes(eid)?'checked':'') + ' style="accent-color:#0064d2;flex-shrink:0;">' +
+          '<span style="flex:1;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + escH(fn) + '</span>' +
+          (st!==undefined ? stateBadge(st==='on',null,'small') : '') + '</label>';
+      }).join('') +
+      '</div></div>';
+  }
 
   function renderSensorGroup(g, indent) {
     const gZones = g.zones.filter(z=>z.sensors?.length);
     if (!gZones.length) return '';
-    const gCollapsed = _collapsedSteps['sg-' + g.id] !== false; // collapsed by default
-    return '<div data-scbl-item data-scbl-label="' + escH(g.name) + '">' +
-      '<div style="display:flex;align-items:center;padding:4px 6px;gap:6px;padding-left:' + indent + 'px;">' +
-      '<button data-sg-collapse="' + escH(g.id) + '" style="background:none;border:none;color:#555;cursor:pointer;font-size:10px;padding:0 2px;">' + (gCollapsed?'▶':'▼') + '</button>' +
+    const gCollapsed = _collapsedSteps['sg-'+g.id] !== false;
+    const full = isFullS(g);
+    return '<div data-sg-group="' + escH(g.id) + '" data-scbl-item data-scbl-label="' + escH(g.name) + '">' +
+      '<div style="display:flex;align-items:center;padding:4px 6px;gap:5px;padding-left:' + indent + 'px;">' +
+      '<button data-sg-collapse="' + escH(g.id) + '" style="background:none;border:none;color:#555;cursor:pointer;font-size:10px;padding:0 2px;flex-shrink:0;">' + (gCollapsed?'▶':'▼') + '</button>' +
+      '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;">' +
+      '<input type="checkbox" data-sg-grp-cb="' + escH(g.id) + '" ' + (full?'checked':'') + ' style="accent-color:#0064d2;flex-shrink:0;">' +
       '<span style="font-size:12px;font-weight:600;color:#ccc;">' + escH(g.name) + '</span>' +
-      stateBadge(g.triggered, g.armed) + '</div>' +
-      '<div data-ow-children="sg-' + escH(g.id) + '"' + (gCollapsed?' style="display:none"':'') + '>' + gZones.map(z=>sensorZoneBlock(z, g.id, selectedIds, indent+16)).join('') + '</div>' +
-      '</div>';
+      stateBadge(g.triggered, g.armed) + '</label></div>' +
+      '<div data-ow-children="sg-' + escH(g.id) + '"' + (gCollapsed?' style="display:none"':'') + '>' +
+      gZones.map(z=>renderSensorZone(z, indent+16)).join('') +
+      '</div></div>';
   }
 
   const body = tree.map(node => {
     if (node.type === 'floor') {
-      const fCollapsed = !!_collapsedSteps['sf-' + node.id];
-      const childContent =
-        (node.groups||[]).map(g=>renderSensorGroup(g, 12)).join('') +
-        (node.ungrouped||[]).filter(z=>z.sensors?.length).map(z=>sensorZoneBlock(z, null, selectedIds, 8)).join('');
-      const children = '<div data-ow-children="sf-' + escH(node.id) + '"' + (fCollapsed?' style="display:none"':'') + '>' + childContent + '</div>';
-      return '<div data-scbl-item data-scbl-label="' + escH(node.name) + '">' +
+      const fCollapsed = !!_collapsedSteps['sf-'+node.id];
+      const flGrps = (node.groups||[]).filter(g=>g.zones.some(z=>z.sensors?.length));
+      const flUng  = (node.ungrouped||[]).filter(z=>z.sensors?.length);
+      if (!flGrps.length && !flUng.length) return '';
+      const full = isFullS(node);
+      const childHtml = flGrps.map(g=>renderSensorGroup(g,12)).join('') + flUng.map(z=>renderSensorZone(z,8)).join('');
+      return '<div data-sg-floor="' + escH(node.id) + '" data-scbl-item data-scbl-label="' + escH(node.name) + '">' +
         '<div style="display:flex;align-items:center;padding:5px 6px;gap:5px;background:rgba(255,255,255,0.03);border-radius:4px;margin-bottom:2px;">' +
-        '<button data-sf-collapse="' + escH(node.id) + '" style="background:none;border:none;color:#666;cursor:pointer;font-size:10px;padding:0 2px;">' + (fCollapsed?'▶':'▼') + '</button>' +
-        '<span style="font-size:11px;font-weight:700;color:#aaa;text-transform:uppercase;letter-spacing:0.06em;flex:1;">' + escH(node.name) + '</span>' +
-        '</div>' + children + '</div>';
+        '<button data-sf-collapse="' + escH(node.id) + '" style="background:none;border:none;color:#666;cursor:pointer;font-size:10px;padding:0 2px;flex-shrink:0;">' + (fCollapsed?'▶':'▼') + '</button>' +
+        '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;">' +
+        '<input type="checkbox" data-sf-cb="' + escH(node.id) + '" ' + (full?'checked':'') + ' style="accent-color:#0064d2;flex-shrink:0;">' +
+        '<span style="font-size:11px;font-weight:700;color:#aaa;text-transform:uppercase;letter-spacing:0.06em;">' + escH(node.name) + '</span>' +
+        '</label></div>' +
+        '<div data-ow-children="sf-' + escH(node.id) + '"' + (fCollapsed?' style="display:none"':'') + '>' + childHtml + '</div></div>';
     }
-    if (node.type === 'group') return renderSensorGroup(node, 6);
-    if (node.type === 'ungrouped') {
-      return (node.zones||[]).filter(z=>z.sensors?.length).map(z=>sensorZoneBlock(z,null,selectedIds,6)).join('');
-    }
+    if (node.type === 'group')     return renderSensorGroup(node, 6);
+    if (node.type === 'ungrouped') return (node.zones||[]).filter(z=>z.sensors?.length).map(z=>renderSensorZone(z,6)).join('');
     return '';
   }).join('');
 
@@ -1023,66 +1037,96 @@ function sensorsHierarchicalSelector(selectedIds, id) {
   </div>`;
 }
 
-function sensorZoneBlock(z, groupId, selectedIds, indent) {
-  indent = indent || 6;
-  const zCollapsed = _collapsedSteps['sz-' + z.id] !== false; // collapsed by default
-  const sensors = z.sensors||[];
-  if (!sensors.length) return '';
-  const allSel = sensors.every(e=>selectedIds.includes(e));
-  return '<div data-scbl-item data-scbl-label="' + escH(z.name||z.id) + '">' +
-    '<div style="display:flex;align-items:center;padding:4px 6px;gap:6px;padding-left:' + indent + 'px;">' +
-    '<button data-sz-collapse="' + escH(z.id) + '" style="background:none;border:none;color:#444;cursor:pointer;font-size:9px;padding:0 2px;">' + (zCollapsed?'▶':'▼') + '</button>' +
-    '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;">' +
-    '<input type="checkbox" data-sz-zone-cb="' + escH(z.id) + '" ' + (allSel?'checked':'') + ' style="accent-color:#0064d2;">' +
-    '<span style="font-size:11px;font-weight:600;color:#bbb;">' + escH(z.name||z.id) + '</span>' +
-    stateBadge(zoneTriggered(z), zoneArmed(z)) + '</label></div>' +
-    '<div data-ow-children="sz-' + escH(z.id) + '" style="padding-left:' + (indent+16) + 'px;' + (zCollapsed?'display:none;':'') + '">' + sensors.map(eid=>{
-        const st = haStates()[eid]?.state;
-        const fn = haStates()[eid]?.attributes?.friendly_name||eid.split('.').pop().replace(/_/g,' ');
-        return '<label data-scbl-item data-scbl-label="' + escH(fn+' '+eid) + '" style="display:flex;align-items:center;gap:7px;padding:3px 4px;cursor:pointer;border-radius:4px;">' +
-          '<input type="checkbox" value="' + escH(eid) + '" ' + (selectedIds.includes(eid)?'checked':'') + ' style="accent-color:#0064d2;flex-shrink:0;">' +
-          '<span style="flex:1;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + escH(fn) + '</span>' +
-          (st!==undefined ? stateBadge(st==='on',null,'small') : '') + '</label>';
-      }).join('') + '</div>' +
-    '</div>';
-}
-
 function wireSensorHierarchicalSelector(id, fn) {
-  const el=_panelEl?.querySelector(`#${CSS.escape(id)}`);
+  const el = _panelEl?.querySelector(`#${CSS.escape(id)}`);
   if (!el) return;
-  el.querySelectorAll('[data-sf-collapse]').forEach(btn=>{
-    btn.onclick=e=>{e.stopPropagation();e.preventDefault();const key='sf-'+btn.dataset.sfCollapse;const ch=btn.parentElement?.nextElementSibling;const nowCollapsed=ch&&ch.style.display==='none';_collapsedSteps[key]=!nowCollapsed;if(ch)ch.style.display=nowCollapsed?'':'none';btn.textContent=nowCollapsed?'▼':'▶';};
+
+  // ── Collapse buttons ──────────────────────────────────────
+  [['[data-sf-collapse]','sf-'],['[data-sg-collapse]','sg-'],['[data-sz-collapse]','sz-']].forEach(([sel,pfx])=>{
+    el.querySelectorAll(sel).forEach(btn=>{
+      btn.onclick=e=>{
+        e.stopPropagation();e.preventDefault();
+        const rawId=btn.dataset.sfCollapse||btn.dataset.sgCollapse||btn.dataset.szCollapse;
+        const key=pfx+rawId;
+        const ch=btn.parentElement?.nextElementSibling;
+        const nowC=ch&&ch.style.display==='none';
+        _collapsedSteps[key]=!nowC;
+        if(ch)ch.style.display=nowC?'':'none';
+        btn.textContent=nowC?'▼':'▶';
+      };
+    });
   });
-  el.querySelectorAll('[data-sg-collapse]').forEach(btn=>{
-    btn.onclick=e=>{e.stopPropagation();e.preventDefault();const key='sg-'+btn.dataset.sgCollapse;const ch=btn.parentElement?.nextElementSibling;const nowCollapsed=ch&&ch.style.display==='none';_collapsedSteps[key]=!nowCollapsed;if(ch)ch.style.display=nowCollapsed?'':'none';btn.textContent=nowCollapsed?'▼':'▶';};
-  });
-  el.querySelectorAll('[data-sz-collapse]').forEach(btn=>{
-    btn.onclick=e=>{e.stopPropagation();e.preventDefault();const key='sz-'+btn.dataset.szCollapse;const ch=btn.parentElement?.nextElementSibling;const nowCollapsed=ch&&ch.style.display==='none';_collapsedSteps[key]=!nowCollapsed;if(ch)ch.style.display=nowCollapsed?'':'none';btn.textContent=nowCollapsed?'▼':'▶';};
-  });
-  function collect() { return [...el.querySelectorAll('input[value]:checked')].map(cb=>cb.value); }
-  el.querySelectorAll('[data-sz-zone-cb]').forEach(zoneCb=>{
-    const zid=zoneCb.dataset.szZoneCb;
-    zoneCb.onchange=()=>{
-      const z=zones().find(z=>z.id===zid);
-      if(!z)return;
-      (z.sensors||[]).forEach(eid=>{const cb=el.querySelector(`input[value="${CSS.escape(eid)}"]`);if(cb)cb.checked=zoneCb.checked;});
-      fn(collect());
-    };
-  });
-  el.querySelectorAll('input[value]').forEach(cb=>{
-    cb.onchange=()=>{
-      fn(collect());
-      updateIndeterminateStates(el);
-      const zone=zones().find(z=>(z.sensors||[]).includes(cb.value));
-      if (zone) {
-        const zCb=el.querySelector(`[data-sz-zone-cb="${CSS.escape(zone.id)}"]`);
-        if(zCb) zCb.checked=(zone.sensors||[]).every(e=>el.querySelector(`input[value="${CSS.escape(e)}"]`)?.checked);
+
+  // ── Helpers ───────────────────────────────────────────────
+  function collect() { return [...el.querySelectorAll('input[data-sensor-eid]:checked')].map(c=>c.dataset.sensorEid); }
+
+  function updateParentsS(startEl) {
+    const zDiv  = startEl.closest('[data-sg-zone]');
+    const gDiv  = startEl.closest('[data-sg-group]');
+    const fDiv  = startEl.closest('[data-sg-floor]');
+    [
+      [zDiv,  '[data-sz-zone-cb]'],
+      [gDiv,  '[data-sg-grp-cb]'],
+      [fDiv,  '[data-sf-cb]'],
+    ].forEach(([div, cbSel]) => {
+      if (!div) return;
+      const cb = div.querySelector(cbSel);
+      if (!cb) return;
+      const total = [...div.querySelectorAll('input[data-sensor-eid]')].length;
+      const n     = [...div.querySelectorAll('input[data-sensor-eid]:checked')].length;
+      cb.indeterminate = n > 0 && n < total;
+      if (!cb.indeterminate) cb.checked = (n === total);
+    });
+  }
+
+  // ── Floor ─────────────────────────────────────────────────
+  el.querySelectorAll('[data-sf-cb]').forEach(flCb=>{
+    flCb.onchange=()=>{
+      const fDiv=flCb.closest('[data-sg-floor]');
+      if(fDiv) {
+        fDiv.querySelectorAll('input[data-sensor-eid]').forEach(c=>c.checked=flCb.checked);
+        fDiv.querySelectorAll('[data-sg-grp-cb],[data-sz-zone-cb]').forEach(c=>{c.checked=flCb.checked;c.indeterminate=false;});
       }
+      flCb.indeterminate=false;
+      fn(collect());
     };
   });
+
+  // ── Group ─────────────────────────────────────────────────
+  el.querySelectorAll('[data-sg-grp-cb]').forEach(grpCb=>{
+    grpCb.onchange=()=>{
+      const gDiv=grpCb.closest('[data-sg-group]');
+      if(gDiv) {
+        gDiv.querySelectorAll('input[data-sensor-eid]').forEach(c=>c.checked=grpCb.checked);
+        gDiv.querySelectorAll('[data-sz-zone-cb]').forEach(c=>{c.checked=grpCb.checked;c.indeterminate=false;});
+      }
+      grpCb.indeterminate=false;
+      updateParentsS(grpCb);
+      fn(collect());
+    };
+  });
+
+  // ── Zone ──────────────────────────────────────────────────
+  el.querySelectorAll('[data-sz-zone-cb]').forEach(zCb=>{
+    zCb.onchange=()=>{
+      const zDiv=zCb.closest('[data-sg-zone]');
+      if(zDiv) zDiv.querySelectorAll('input[data-sensor-eid]').forEach(c=>c.checked=zCb.checked);
+      zCb.indeterminate=false;
+      updateParentsS(zCb);
+      fn(collect());
+    };
+  });
+
+  // ── Individual sensor ─────────────────────────────────────
+  el.querySelectorAll('input[data-sensor-eid]').forEach(sCb=>{
+    sCb.onchange=()=>{ updateParentsS(sCb); fn(collect()); };
+  });
+
+  // Initial indeterminate
+  el.querySelectorAll('input[data-sensor-eid]:checked').forEach(c=>updateParentsS(c));
 }
 
-/* ── Stat badge ─────────────────────────────────────────────── */
+
 function stateBadge(triggered, armed, size='normal') {
   const parts=[];
   if (triggered) parts.push(`<span style="font-size:${size==='small'?'9':'10'}px;padding:1px 4px;border-radius:3px;background:rgba(255,59,48,0.2);color:#ff6b6b;">triggered</span>`);
@@ -1671,6 +1715,7 @@ function wireTriggerFields(t) {
     else wireSelect(`trig-armstate-${t.id}`,v=>t.state=v);
   }
   if (t.type==='sensor') { wireSensorHierarchicalSelector(`trig-sensor-${t.id}`,ids=>t.entity_ids=ids); wireSelect(`trig-sensorstate-${t.id}`,v=>t.state=v); }
+  if (t.type==='door')   { wireSensorHierarchicalSelector(`trig-door-${t.id}`,ids=>t.entity_ids=ids);   wireSelect(`trig-doorstate-${t.id}`,v=>t.state=v); }
   if (t.type==='person') { wireSelect(`trig-personstate-${t.id}`,v=>t.state=v); wireSearchableCheckbox(`trig-person-${t.id}`,ids=>t.entity_ids=ids); wireAutocomplete(`trig-person-ac-${t.id}`,v=>t.entity_ids=v?[v]:[]); }
   if (t.type==='device') { wireSelect(`trig-devicestate-${t.id}`,v=>t.state=v); wireSearchableCheckbox(`trig-device-${t.id}`,ids=>t.entity_ids=ids); wireAutocomplete(`trig-device-ac-${t.id}`,v=>t.entity_ids=v?[v]:[]); }
   if (t.type==='entity') { wireAutocomplete(`trig-entity-ac-${t.id}`,v=>t.entity_id=v); wireInput(`trig-to-${t.id}`,v=>t.to=v); }
@@ -1773,7 +1818,7 @@ function wireActionFields(a) {
         return [...new Set([...grpIds,...zoneIds,...masterIds])];
       }
       function updateArmIndeterminate() {
-        // For each group: check if some but not all zone checkboxes are checked
+        // Group level: check if some but not all zone checkboxes are checked
         armBox.querySelectorAll('[data-arm-group]').forEach(grpDiv=>{
           const gid=grpDiv.dataset.armGroup;
           const grpCb=grpDiv.querySelector(`[data-arm-grp-cb="${CSS.escape(gid)}"]`);
@@ -1783,6 +1828,20 @@ function wireActionFields(a) {
           const checked=zoneCbs.filter(c=>c.checked).length;
           grpCb.indeterminate = checked>0 && checked<zoneCbs.length;
           if(!grpCb.indeterminate) grpCb.checked = checked===zoneCbs.length;
+        });
+        // Floor level: check if some but not all group+zone checkboxes are checked
+        armBox.querySelectorAll('[data-armf-cb]').forEach(flCb=>{
+          const fid=flCb.value;
+          const flDiv=armBox.querySelector(`[data-ow-children="${CSS.escape('armf-'+fid)}"]`);
+          if(!flDiv)return;
+          const allGrpCbs=[...flDiv.querySelectorAll('[data-arm-grp-cb]')];
+          const allZoneCbs=[...flDiv.querySelectorAll('[data-arm-zone-cb]')];
+          const allCbs=[...allGrpCbs,...allZoneCbs];
+          if(!allCbs.length)return;
+          const checkedCount=allCbs.filter(c=>c.checked).length;
+          const hasIndeterminate=allGrpCbs.some(c=>c.indeterminate);
+          flCb.indeterminate = hasIndeterminate || (checkedCount>0 && checkedCount<allCbs.length);
+          if(!flCb.indeterminate) flCb.checked = checkedCount===allCbs.length;
         });
       }
 
@@ -1830,30 +1889,61 @@ function wireActionFields(a) {
     wireSelect(`act-arm-svc-${a.id}`,v=>a.service=v);
   }
   if (a.type==='camera_view') {
-    // Wire floor "select all" checkboxes
-    _panelEl?.querySelectorAll('[data-cvfall-cb]').forEach(flCb=>{
-      flCb.onchange=()=>{
-        const camviewBox=_panelEl?.querySelector(`#act-camview-zones-${a.id}`);
-        if(!camviewBox)return;
-        // Check/uncheck all camview-cb checkboxes under this floor
-        const flId=flCb.dataset.cvfallCb;
-        const chDiv=camviewBox.querySelector(`[data-ow-children="cvf-${CSS.escape(flId)}"]`);
-        if(chDiv) chDiv.querySelectorAll('[data-camview-cb]').forEach(cb=>cb.checked=flCb.checked);
-        a.entity_ids=[...camviewBox.querySelectorAll('[data-camview-cb]:checked')].map(c=>c.value);
-      };
-    });
-    // Wire floor AND group collapse buttons
+    // Collapse buttons
     _panelEl?.querySelectorAll('[data-cvf-collapse]').forEach(btn=>{
-      btn.onclick=e=>{e.stopPropagation();e.preventDefault();const key='cvf-'+btn.dataset.cvfCollapse;const ch=btn.parentElement?.nextElementSibling;const nowCollapsed=ch&&ch.style.display==='none';_collapsedSteps[key]=!nowCollapsed;if(ch)ch.style.display=nowCollapsed?'':'none';btn.textContent=nowCollapsed?'▼':'▶';};
+      btn.onclick=e=>{e.stopPropagation();e.preventDefault();const key='cvf-'+btn.dataset.cvfCollapse;const ch=btn.parentElement?.nextElementSibling;const nowC=ch&&ch.style.display==='none';_collapsedSteps[key]=!nowC;if(ch)ch.style.display=nowC?'':'none';btn.textContent=nowC?'▼':'▶';};
     });
     _panelEl?.querySelectorAll('[data-cvg-collapse]').forEach(btn=>{
-      btn.onclick=e=>{e.stopPropagation();e.preventDefault();const key='cvg-'+btn.dataset.cvgCollapse;const ch=btn.parentElement?.nextElementSibling;const nowCollapsed=ch&&ch.style.display==='none';_collapsedSteps[key]=!nowCollapsed;if(ch)ch.style.display=nowCollapsed?'':'none';btn.textContent=nowCollapsed?'▼':'▶';};
+      btn.onclick=e=>{e.stopPropagation();e.preventDefault();const key='cvg-'+btn.dataset.cvgCollapse;const ch=btn.parentElement?.nextElementSibling;const nowC=ch&&ch.style.display==='none';_collapsedSteps[key]=!nowC;if(ch)ch.style.display=nowC?'':'none';btn.textContent=nowC?'▼':'▶';};
     });
-    // Wire all camview checkboxes
+
     const camviewBox=_panelEl?.querySelector(`#act-camview-zones-${a.id}`);
     if(camviewBox) {
+      function collectCVIds() {
+        return [...camviewBox.querySelectorAll('[data-camview-cb]:checked')].map(c=>c.value);
+      }
+
+      // Find all camview-cb checkboxes in a container
+      function cvCbsIn(container) {
+        return [...container.querySelectorAll('[data-camview-cb]')];
+      }
+
+      // Update floor "select all" checkbox based on children
+      function updateCVFloor(startEl) {
+        const floorHeader = startEl.closest('[data-sg-floor],[data-dl-floor]');
+        if (!floorHeader) {
+          // Use data-ow-children approach — find the floor via cvfall-cb
+          // The floor checkbox is data-cvfall-cb, find its ow-children sibling
+          camviewBox.querySelectorAll('[data-cvfall-cb]').forEach(flCb=>{
+            const flId = flCb.dataset.cvfallCb;
+            const chDiv = camviewBox.querySelector(`[data-ow-children="cvf-${CSS.escape(flId)}"]`);
+            if (!chDiv) return;
+            if (!chDiv.contains(startEl)) return;
+            const all = cvCbsIn(chDiv);
+            const n = all.filter(c=>c.checked).length;
+            flCb.indeterminate = n > 0 && n < all.length;
+            if (!flCb.indeterminate) flCb.checked = (n === all.length);
+          });
+        }
+      }
+
+      // Floor "select all" checkbox — cascade all
+      camviewBox.querySelectorAll('[data-cvfall-cb]').forEach(flCb=>{
+        flCb.onchange=()=>{
+          const flId=flCb.dataset.cvfallCb;
+          const chDiv=camviewBox.querySelector(`[data-ow-children="cvf-${CSS.escape(flId)}"]`);
+          if(chDiv) cvCbsIn(chDiv).forEach(cb=>cb.checked=flCb.checked);
+          flCb.indeterminate=false;
+          a.entity_ids=collectCVIds();
+        };
+      });
+
+      // All individual camview checkboxes — update parent floor
       camviewBox.querySelectorAll('[data-camview-cb]').forEach(cb=>{
-        cb.onchange=()=>{ a.entity_ids=[...camviewBox.querySelectorAll('[data-camview-cb]:checked')].map(c=>c.value); };
+        cb.onchange=()=>{
+          updateCVFloor(cb);
+          a.entity_ids=collectCVIds();
+        };
       });
     }
     wireSelect(`act-camview-svc-${a.id}`,v=>a.service=v);
