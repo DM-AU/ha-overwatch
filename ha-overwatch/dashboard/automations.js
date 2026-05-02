@@ -10,6 +10,7 @@
 let _panelEl        = null;
 let _open           = false;
 let _automations    = [];        // [{draft, warnings, ha_id}]
+let _doorPins       = [];        // [{id, zone_id, sensor_entity, name, ...}]
 let _editing        = null;      // automation id or 'new'
 let _draft          = null;
 let _haEntities     = [];
@@ -59,6 +60,18 @@ function groupArmed(group) {
 }
 
 /* ── HA Entity / Service Discovery ─────────────────────────── */
+async function loadDoorPins() {
+  try {
+    const r = await fetch(apiPath('ow/door-pins') + '?v=' + Date.now());
+    if (r.ok) _doorPins = await r.json();
+  } catch { _doorPins = []; }
+}
+
+// Get door sensor entity IDs for a zone (from doorPins)
+function doorSensorsForZone(zoneId) {
+  return _doorPins.filter(p => p.zone_id === zoneId && p.sensor_entity).map(p => p.sensor_entity);
+}
+
 async function loadHAEntities() {
   const states = haStates();
   if (Object.keys(states).length > 0) {
@@ -450,7 +463,7 @@ async function open() {
   if (!isAdmin()) return;
   _open=true; mountPanel();
   // Load from HA as source of truth
-  await Promise.all([loadFromHA(), loadHAEntities()]);
+  await Promise.all([loadFromHA(), loadHAEntities(), loadDoorPins()]);
   // Pre-fetch camera services
   loadHAServices('camera');
   document.getElementById('automationsBtn')?.classList.add('active');
@@ -750,8 +763,12 @@ function triggerCard(t) {
     inner = `
       <div style="margin-bottom:10px;">
         <label style="${labelStyle}">${isDoor ? 'Door / Window sensors from zones' : 'Sensors from zones'}</label>
-        ${isDoor ? `<div style="font-size:11px;color:#555;margin-bottom:4px;">Use the filter box below to search for door, window, contact, gate etc.</div>` : ''}
-        ${sensorsHierarchicalSelector(t.entity_ids||[], isDoor ? `trig-door-${t.id}` : `trig-sensor-${t.id}`)}
+        ${isDoor ? `<div style="font-size:11px;color:#555;margin-bottom:4px;">Shows door sensors from zone door pins, plus all sensors. Use the filter to narrow down.</div>` : ''}
+        ${sensorsHierarchicalSelector(
+          t.entity_ids||[],
+          isDoor ? `trig-door-${t.id}` : `trig-sensor-${t.id}`,
+          isDoor ? doorSensorsForZone : null
+        )}
       </div>
       <div>
         <label style="${labelStyle}">State</label>
@@ -972,22 +989,31 @@ function wireZoneGroupSelector(t, id) {
 }
 
 
-function sensorsHierarchicalSelector(selectedIds, id) {
+function sensorsHierarchicalSelector(selectedIds, id, extraSensorsFn) {
   const tree = zoneGroupTree();
+  // extraSensorsFn: optional (zoneId) => [entityId, ...] — supplements z.sensors
+  // Used by door trigger to inject doorPin sensor entities
 
   function allSensorsIn(node) {
-    if (node.sensors) return node.sensors;
-    if (node.type === 'group' || node.zones) return (node.zones||[]).flatMap(z=>z.sensors||[]);
+    function zoneSensors(z) {
+      const base = z.sensors||[];
+      const extra = extraSensorsFn ? extraSensorsFn(z.id).filter(e=>!base.includes(e)) : [];
+      return [...base, ...extra];
+    }
+    if (node.sensors) return zoneSensors(node); // bare zone
+    if (node.type === 'group' || node.zones) return (node.zones||[]).flatMap(z=>zoneSensors(z));
     return [
-      ...(node.groups||[]).flatMap(g=>(g.zones||[]).flatMap(z=>z.sensors||[])),
-      ...(node.ungrouped||[]).flatMap(z=>z.sensors||[])
+      ...(node.groups||[]).flatMap(g=>(g.zones||[]).flatMap(z=>zoneSensors(z))),
+      ...(node.ungrouped||[]).flatMap(z=>zoneSensors(z))
     ];
   }
   function isFullS(node) { const a=allSensorsIn(node); return a.length>0 && a.every(e=>selectedIds.includes(e)); }
 
   function renderSensorZone(z, indent) {
     const zCollapsed = _collapsedSteps['sz-'+z.id] !== false;
-    const sensors = z.sensors||[];
+    const baseSensors = z.sensors||[];
+    const extraSensors = extraSensorsFn ? extraSensorsFn(z.id).filter(e=>!baseSensors.includes(e)) : [];
+    const sensors = [...baseSensors, ...extraSensors];
     if (!sensors.length) return '';
     const allSel = sensors.every(e=>selectedIds.includes(e));
     return '<div data-sg-zone="' + escH(z.id) + '" data-scbl-item data-scbl-label="' + escH(z.name||z.id) + '">' +
