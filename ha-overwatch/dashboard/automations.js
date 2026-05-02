@@ -728,7 +728,11 @@ function triggerCard(t) {
     inner = `
       <div style="margin-bottom:10px;">
         <label style="${labelStyle}">${isDoor ? 'Door / Window sensors from zones' : 'Sensors from zones'}</label>
-        ${sensorsHierarchicalSelector(t.entity_ids||[], isDoor ? `trig-door-${t.id}` : `trig-sensor-${t.id}`)}
+        ${sensorsHierarchicalSelector(t.entity_ids||[], isDoor ? `trig-door-${t.id}` : `trig-sensor-${t.id}`,
+          isDoor ? (eid, fn) => {
+            const l = (eid + ' ' + fn).toLowerCase();
+            return l.includes('door') || l.includes('window') || l.includes('contact') || l.includes('entry') || l.includes('gate');
+          } : null)}
         ${isDoor ? `<div style="font-size:11px;color:#555;margin-top:4px;">💡 Tip: shows all sensors — filter by name to find door/window contacts.</div>` : ''}
       </div>
       <div>
@@ -950,8 +954,10 @@ function wireZoneGroupSelector(t, id) {
 }
 
 
-function sensorsHierarchicalSelector(selectedIds, id) {
+function sensorsHierarchicalSelector(selectedIds, id, filterFn) {
   const tree = zoneGroupTree();
+  // filterFn: optional (eid, friendlyName) => boolean to filter which sensors show
+  const sensorFilter = filterFn || (() => true);
 
   function allSensorsIn(node) {
     if (node.sensors) return node.sensors;
@@ -965,7 +971,12 @@ function sensorsHierarchicalSelector(selectedIds, id) {
 
   function renderSensorZone(z, indent) {
     const zCollapsed = _collapsedSteps['sz-'+z.id] !== false;
-    const sensors = z.sensors||[];
+    const allSensors = z.sensors||[];
+    // Apply filter
+    const sensors = allSensors.filter(eid => {
+      const fn = haStates()[eid]?.attributes?.friendly_name || eid.split('.').pop().replace(/_/g,' ');
+      return sensorFilter(eid, fn);
+    });
     if (!sensors.length) return '';
     const allSel = sensors.every(e=>selectedIds.includes(e));
     return '<div data-sg-zone="' + escH(z.id) + '" data-scbl-item data-scbl-label="' + escH(z.name||z.id) + '">' +
@@ -975,7 +986,7 @@ function sensorsHierarchicalSelector(selectedIds, id) {
       '<input type="checkbox" data-sz-zone-cb="' + escH(z.id) + '" ' + (allSel?'checked':'') + ' style="accent-color:#0064d2;flex-shrink:0;">' +
       '<span style="font-size:11px;font-weight:600;color:#bbb;">' + escH(z.name||z.id) + '</span>' +
       stateBadge(zoneTriggered(z), zoneArmed(z)) + '</label></div>' +
-      '<div data-ow-children="sz-' + escH(z.id) + '"' + (zCollapsed?' style="display:none"':'') + ' style="padding-left:' + (indent+14) + 'px;">' +
+      '<div data-ow-children="sz-' + escH(z.id) + '" style="padding-left:' + (indent+14) + 'px;' + (zCollapsed?'display:none;':'') + '">' +
       sensors.map(eid => {
         const st = haStates()[eid]?.state;
         const fn = haStates()[eid]?.attributes?.friendly_name || eid.split('.').pop().replace(/_/g,' ');
@@ -1011,7 +1022,7 @@ function sensorsHierarchicalSelector(selectedIds, id) {
       const flUng  = (node.ungrouped||[]).filter(z=>z.sensors?.length);
       if (!flGrps.length && !flUng.length) return '';
       const full = isFullS(node);
-      const childHtml = flGrps.map(g=>renderSensorGroup(g,12)).join('') + flUng.map(z=>renderSensorZone(z,8)).join('');
+      const childHtml = flGrps.map(g=>renderSensorGroup(g,16)).join('') + flUng.map(z=>renderSensorZone(z,16)).join('');
       return '<div data-sg-floor="' + escH(node.id) + '" data-scbl-item data-scbl-label="' + escH(node.name) + '">' +
         '<div style="display:flex;align-items:center;padding:5px 6px;gap:5px;background:rgba(255,255,255,0.03);border-radius:4px;margin-bottom:2px;">' +
         '<button data-sf-collapse="' + escH(node.id) + '" style="background:none;border:none;color:#666;cursor:pointer;font-size:10px;padding:0 2px;flex-shrink:0;">' + (fCollapsed?'▶':'▼') + '</button>' +
@@ -1021,8 +1032,8 @@ function sensorsHierarchicalSelector(selectedIds, id) {
         '</label></div>' +
         '<div data-ow-children="sf-' + escH(node.id) + '"' + (fCollapsed?' style="display:none"':'') + '>' + childHtml + '</div></div>';
     }
-    if (node.type === 'group')     return renderSensorGroup(node, 6);
-    if (node.type === 'ungrouped') return (node.zones||[]).filter(z=>z.sensors?.length).map(z=>renderSensorZone(z,6)).join('');
+    if (node.type === 'group')     return renderSensorGroup(node, 16);
+    if (node.type === 'ungrouped') return (node.zones||[]).filter(z=>z.sensors?.length).map(z=>renderSensorZone(z,16)).join('');
     return '';
   }).join('');
 
@@ -1320,34 +1331,35 @@ function actionCard(a, idx, total) {
             '<input type="checkbox" data-armf-cb value="' + escH(node.id) + '" ' + (fAllSel?'checked':'') + ' style="accent-color:#0064d2;flex-shrink:0;">' +
             '<span style="font-size:11px;font-weight:700;color:#aaa;text-transform:uppercase;letter-spacing:0.06em;">' + escH(node.name) + '</span>' +
             '</label></div>';
-          const armFlCh = (node.groups||[]).map(g=>buildGroupArmRow(g,12)).join('')+(node.ungrouped||[]).map(z=>buildZoneArmRow(z,12)).join('');
+          const armFlCh = (node.groups||[]).map(g=>buildGroupArmRow(g,12,node.id)).join('')+(node.ungrouped||[]).map(z=>buildZoneArmRow(z,12)).join('');
           rows += '<div data-ow-children="armf-' + escH(node.id) + '"' + (fCollapsed?' style="display:none"':'') + '>' + armFlCh + '</div>';
           rows += '</div>';
         } else if (node.type==='group') {
-          rows += buildGroupArmRow(node, 6);
+          rows += buildGroupArmRow(node, 6, null);
         } else if (node.type==='ungrouped') {
           (node.ungrouped||node.zones||[]).forEach(z=>{ rows += buildZoneArmRow(z, 6); });
         }
       });
       return rows;
     }
-    function buildGroupArmRow(g, indent) {
+    function buildGroupArmRow(g, indent, floorId) {
       indent = indent || 6;
       const slug = nameSlug(g.name)||g.id;
       const geid = 'switch.overwatch_zone_group_' + slug;
       const isSel = (a.entity_ids||[]).includes(geid);
-      const gKey = 'armg-'+g.id;
+      const gKey = 'armg-'+g.id+(floorId?'-'+floorId:'');
+      const armGroupKey = g.id+(floorId?'-'+floorId:'');
       const gC = _collapsedSteps[gKey] !== false; // collapsed by default
       const memberZones = (g.zones||[]);
       // Compute partial: some zones checked but not group switch itself
       const zoneEids = memberZones.map(z=>'switch.overwatch_zone_'+(nameSlug(z.name)||z.id));
       const checkedZones = zoneEids.filter(e=>(a.entity_ids||[]).includes(e)).length;
-      const zoneRows = memberZones.map(z=>buildZoneArmRow(z, indent, g.id)).join('');
-      return '<div data-arm-group="'+escH(g.id)+'">' +
+      const zoneRows = memberZones.map(z=>buildZoneArmRow(z, indent, armGroupKey)).join('');
+      return '<div data-arm-group="'+escH(armGroupKey)+'">' +
         '<div style="display:flex;align-items:center;gap:5px;padding:3px 6px;padding-left:'+indent+'px;">' +
         (memberZones.length ? '<button data-armg-collapse="'+escH(gKey)+'" style="background:none;border:none;color:#555;cursor:pointer;font-size:9px;padding:0 2px;">'+(gC?'▶':'▼')+'</button>' : '<span style="width:14px;flex-shrink:0;"></span>') +
         '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;">' +
-        '<input type="checkbox" data-arm-grp-cb="'+escH(g.id)+'" data-arm-grp-eid="'+escH(geid)+'" '+( isSel?'checked':'')+' style="accent-color:#0064d2;flex-shrink:0;">' +
+        '<input type="checkbox" data-arm-grp-cb="'+escH(armGroupKey)+'" data-arm-grp-eid="'+escH(geid)+'" '+( isSel?'checked':'')+' style="accent-color:#0064d2;flex-shrink:0;">' +
         '<span style="font-size:12px;font-weight:600;color:#ccc;">' + escH(g.name) + '</span>' +
         stateBadge(g.triggered, g.armed) +
         '</label></div>' +
