@@ -801,8 +801,7 @@ function zoneGroupSelector(t, id) {
         const fCollapsed = !!_collapsedSteps['zf-' + node.id];
         const fTriggered = node.groups.some(g=>g.triggered) || node.ungrouped.some(z=>zoneTriggered(z));
         const fArmed = node.groups.some(g=>g.armed) || node.ungrouped.some(z=>zoneArmed(z));
-        const children = fCollapsed ? '' :
-          '<div data-ow-children="zf-' + escH(node.id) + '" style="padding-left:8px;">' +
+        const children = '<div data-ow-children="zf-' + escH(node.id) + '" style="padding-left:8px;' + (fCollapsed?'display:none;':'') + '">' +
           node.groups.map(g => zoneGroupBlock(g, selZones, selGroups, showSensors)).join('') +
           node.ungrouped.map(z => zoneRow(z, selZones, selGroups, null, showSensors)).join('') +
           '</div>';
@@ -838,8 +837,7 @@ function zoneGroupBlock(g, selZones, selGroups, showSensors) {
   const hasSelection = g.zones.some(z=>selZones.includes(z.id)) || selGroups.includes(g.id);
   const gCollapsed = !hasSelection && (_collapsedSteps['zg-' + g.id] !== false);
   const someSelected = hasSelection;
-  const children = gCollapsed ? '' :
-    '<div data-ow-children="zg-' + gId + '" style="padding-left:16px;">' +
+  const children = '<div data-ow-children="zg-' + gId + '" style="padding-left:16px;' + (gCollapsed?'display:none;':'') + '">' +
     g.zones.map(z => zoneRow(z, selZones, selGroups, g.id, showSensors)).join('') +
     '</div>';
   return '<div data-scbl-item data-scbl-label="' + escH(g.name) + '">' +
@@ -863,8 +861,8 @@ function zoneRow(z, selZones, selGroups, groupId, showSensors) {
   const expandBtn = hasSensors
     ? '<button data-zone-sensor-collapse="' + zId + '" style="background:none;border:none;color:#444;cursor:pointer;font-size:9px;padding:0 2px;flex-shrink:0;">' + (zCollapsed?'▶':'▼') + '</button>'
     : '<span style="width:14px;flex-shrink:0;"></span>';
-  const sensorRows = (!zCollapsed && hasSensors) ?
-    '<div data-ow-children="zzr-' + zId + '" style="padding-left:20px;border-left:2px solid rgba(255,255,255,0.06);margin-left:6px;">' + sensors.map(eid => {
+  const sensorRows = hasSensors ?
+    '<div data-ow-children="zzr-' + zId + '" style="padding-left:20px;border-left:2px solid rgba(255,255,255,0.06);margin-left:6px;' + (zCollapsed?'display:none;':'') + '">' + sensors.map(eid => {
       const fn = (haStates()[eid]?.attributes?.friendly_name) || eid.split('.').pop().replace(/_/g,' ');
       const st = haStates()[eid]?.state;
       return '<label style="display:flex;align-items:center;gap:7px;padding:2px 4px;cursor:pointer;border-radius:4px;" onmouseenter="this.style.background=\'rgba(255,255,255,0.04)\'" onmouseleave="this.style.background=\'\'">' +
@@ -990,16 +988,17 @@ function sensorsHierarchicalSelector(selectedIds, id) {
       '<button data-sg-collapse="' + escH(g.id) + '" style="background:none;border:none;color:#555;cursor:pointer;font-size:10px;padding:0 2px;">' + (gCollapsed?'▶':'▼') + '</button>' +
       '<span style="font-size:12px;font-weight:600;color:#ccc;">' + escH(g.name) + '</span>' +
       stateBadge(g.triggered, g.armed) + '</div>' +
-      (gCollapsed ? '<div data-ow-children="sg-' + escH(g.id) + '" style="display:none"></div>' : '<div data-ow-children="sg-' + escH(g.id) + '">' + gZones.map(z=>sensorZoneBlock(z, g.id, selectedIds, indent+16)).join('') + '</div>') +
+      '<div data-ow-children="sg-' + escH(g.id) + '"' + (gCollapsed?' style="display:none"':'') + '>' + gZones.map(z=>sensorZoneBlock(z, g.id, selectedIds, indent+16)).join('') + '</div>' +
       '</div>';
   }
 
   const body = tree.map(node => {
     if (node.type === 'floor') {
       const fCollapsed = !!_collapsedSteps['sf-' + node.id];
-      const children = fCollapsed ? '' :
+      const childContent =
         (node.groups||[]).map(g=>renderSensorGroup(g, 12)).join('') +
         (node.ungrouped||[]).filter(z=>z.sensors?.length).map(z=>sensorZoneBlock(z, null, selectedIds, 8)).join('');
+      const children = '<div data-ow-children="sf-' + escH(node.id) + '"' + (fCollapsed?' style="display:none"':'') + '>' + childContent + '</div>';
       return '<div data-scbl-item data-scbl-label="' + escH(node.name) + '">' +
         '<div style="display:flex;align-items:center;padding:5px 6px;gap:5px;background:rgba(255,255,255,0.03);border-radius:4px;margin-bottom:2px;">' +
         '<button data-sf-collapse="' + escH(node.id) + '" style="background:none;border:none;color:#666;cursor:pointer;font-size:10px;padding:0 2px;">' + (fCollapsed?'▶':'▼') + '</button>' +
@@ -1037,14 +1036,14 @@ function sensorZoneBlock(z, groupId, selectedIds, indent) {
     '<input type="checkbox" data-sz-zone-cb="' + escH(z.id) + '" ' + (allSel?'checked':'') + ' style="accent-color:#0064d2;">' +
     '<span style="font-size:11px;font-weight:600;color:#bbb;">' + escH(z.name||z.id) + '</span>' +
     stateBadge(zoneTriggered(z), zoneArmed(z)) + '</label></div>' +
-    (zCollapsed ? '<div data-ow-children="sz-' + escH(z.id) + '" style="display:none"></div>' : '<div data-ow-children="sz-' + escH(z.id) + '" style="padding-left:' + (indent+16) + 'px;">' + sensors.map(eid=>{
+    '<div data-ow-children="sz-' + escH(z.id) + '" style="padding-left:' + (indent+16) + 'px;' + (zCollapsed?'display:none;':'') + '">' + sensors.map(eid=>{
         const st = haStates()[eid]?.state;
         const fn = haStates()[eid]?.attributes?.friendly_name||eid.split('.').pop().replace(/_/g,' ');
         return '<label data-scbl-item data-scbl-label="' + escH(fn+' '+eid) + '" style="display:flex;align-items:center;gap:7px;padding:3px 4px;cursor:pointer;border-radius:4px;">' +
           '<input type="checkbox" value="' + escH(eid) + '" ' + (selectedIds.includes(eid)?'checked':'') + ' style="accent-color:#0064d2;flex-shrink:0;">' +
           '<span style="flex:1;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + escH(fn) + '</span>' +
           (st!==undefined ? stateBadge(st==='on',null,'small') : '') + '</label>';
-      }).join('') + '</div>') +
+      }).join('') + '</div>' +
     '</div>';
 }
 
@@ -1194,9 +1193,13 @@ function actionCard(a, idx, total) {
     });
     inner = `
       ${tree.length ? deviceActionTree(tree, a.entity_ids_zone||[], `act-light-${a.id}`) : ''}
-      ${otherLights.length ? `<div style="margin-bottom:10px;"><label style="${labelStyle}">Other lights from HA</label>${searchableCheckboxList(
-          [...new Set([...(a.entity_ids_other||[]), ...(a.entity_ids_zone||[]).filter(id=>otherLights.some(l=>l.entity_id===id))])],
-          otherLights,`act-light-other-${a.id}`)}</div>` : ''}
+      ${otherLights.length ? '<div style="margin-bottom:10px;">' +
+        '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">' +
+        '<button id="act-light-other-toggle-' + escH(a.id) + '" style="background:none;border:1px solid rgba(255,255,255,0.1);border-radius:5px;color:#555;cursor:pointer;font-size:11px;padding:2px 8px;">▶ Other lights from HA (' + otherLights.length + ')</button>' +
+        '</div>' +
+        '<div id="act-light-other-wrap-' + escH(a.id) + '" style="display:none;max-height:180px;overflow-y:auto;border-radius:8px;">' +
+        searchableCheckboxList([...new Set([...(a.entity_ids_other||[]), ...(a.entity_ids_zone||[]).filter(id=>otherLights.some(l=>l.entity_id===id))])], otherLights, 'act-light-other-' + a.id) +
+        '</div></div>' : ''}
       ${!tree.length&&!otherLights.length?`<div style="color:#555;font-size:11px;margin-bottom:8px;">No lights found in zones.</div>`:''}
       <div><label style="${labelStyle}">Action</label>
         <select id="act-light-svc-${a.id}" style="${selectStyle}">
@@ -1345,23 +1348,29 @@ function actionCard(a, idx, total) {
           ${masterSw ? `<label style="display:flex;align-items:center;gap:8px;padding:4px 6px;cursor:pointer;border-radius:4px;background:rgba(255,255,255,0.04);margin-bottom:4px;"><input type="checkbox" data-camview-cb value="${escH(masterSw.entity_id)}" ${(a.entity_ids||[]).includes(masterSw.entity_id)?'checked':''} style="accent-color:#0064d2;"><span style="font-size:12px;font-weight:600;color:#ccc;">All cameras (master)</span></label>` : ''}
           ${camViewByFloor.map(fl=>{
             const fCollapsed=!!_collapsedSteps['cvf-'+fl.id];
+            const flSwEntity=fl.sw?.entity_id;
+            const fAllSel=flSwEntity&&(a.entity_ids||[]).includes(flSwEntity);
+            const groupsHtml=fl.groups.map(g=>{
+              const gSel=(a.entity_ids||[]).includes(g.sw?.entity_id);
+              const gC=_collapsedSteps['cvg-'+fl.id+'-'+g.id]!==false;
+              const zonesSw=g.zones.map(z=>{
+                const zSw=camViewAll.find(e=>e.entity_id==='switch.overwatch_camera_zone_'+(nameSlug(z.name)||z.id));
+                const zSel=(a.entity_ids||[]).includes(zSw?.entity_id);
+                return zSw?'<label style="display:flex;align-items:center;gap:6px;padding:2px 6px 2px 30px;cursor:pointer;"><input type="checkbox" data-camview-cb value="'+escH(zSw.entity_id)+'" '+(zSel?'checked':'')+' style="accent-color:#0064d2;"><span style="font-size:11px;color:#bbb;">'+escH(z.name||z.id)+'</span></label>':'';
+              }).join('');
+              return '<div>' +
+                '<div style="display:flex;align-items:center;gap:5px;padding:2px 6px 2px 12px;">' +
+                (g.zones.length?'<button data-cvg-collapse="'+escH(fl.id+'-'+g.id)+'" style="background:none;border:none;color:#555;cursor:pointer;font-size:9px;padding:0 2px;">'+(gC?'▶':'▼')+'</button>':'<span style="width:12px;"></span>')+
+                '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;">'+(g.sw?'<input type="checkbox" data-camview-cb value="'+escH(g.sw.entity_id)+'" '+(gSel?'checked':'')+' style="accent-color:#0064d2;">':'')+
+                '<span style="font-size:11px;font-weight:600;color:#ccc;">'+escH(g.name)+'</span></label></div>' +
+                '<div data-ow-children="cvg-'+escH(fl.id+'-'+g.id)+'"'+(gC?' style="display:none"':'')+'>' + zonesSw + '</div></div>';
+            }).join('');
             return '<div>' +
               '<div style="display:flex;align-items:center;gap:5px;padding:3px 6px;background:rgba(255,255,255,0.03);border-radius:4px;margin-bottom:2px;">' +
               '<button data-cvf-collapse="'+escH(fl.id)+'" style="background:none;border:none;color:#666;cursor:pointer;font-size:10px;padding:0 2px;">'+(fCollapsed?'▶':'▼')+'</button>' +
-              (fl.sw?'<label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;"><input type="checkbox" data-camview-cb value="'+escH(fl.sw.entity_id)+'" '+(a.entity_ids||[]).includes(fl.sw.entity_id?'checked':'')+' style="accent-color:#0064d2;"></label>':'') +
-              '<span style="font-size:11px;font-weight:700;color:#aaa;text-transform:uppercase;letter-spacing:0.06em;">' + escH(fl.name) + '</span>' +
-              '</div>' +
-              (fCollapsed?'':fl.groups.map(g=>{
-                const gSel=(a.entity_ids||[]).includes(g.sw?.entity_id);
-                return '<div style="padding-left:12px;">' +
-                  '<label style="display:flex;align-items:center;gap:6px;padding:3px 6px;cursor:pointer;">' +
-                  (g.sw?'<input type="checkbox" data-camview-cb value="'+escH(g.sw.entity_id)+'" '+(gSel?'checked':'')+' style="accent-color:#0064d2;">':'') +
-                  '<span style="font-size:11px;font-weight:600;color:#ccc;">'+escH(g.name)+'</span>' +
-                  '</label>' +
-                  '</div>';
-                  '</div>';
-              }).join('')) +
-              '</div>';
+              '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;">'+(flSwEntity?'<input type="checkbox" data-camview-cb value="'+escH(flSwEntity)+'" '+(fAllSel?'checked':'')+' style="accent-color:#0064d2;">':'')+
+              '<span style="font-size:11px;font-weight:700;color:#aaa;text-transform:uppercase;letter-spacing:0.06em;">'+escH(fl.name)+'</span></label></div>' +
+              '<div data-ow-children="cvf-'+escH(fl.id)+'"'+(fCollapsed?' style="display:none"':'')+'>' + groupsHtml + '</div></div>';
           }).join('')}
           ${!camViewByFloor.length && !masterSw ? '<div style="color:#555;font-size:11px;">No OW camera view switches found.</div>' : ''}
         </div>
@@ -1403,24 +1412,26 @@ function deviceActionTree(tree, selectedIds, baseId) {
     const pad = depth * 12;
     if (node.type === 'floor') {
       const fCollapsed = !!_collapsedSteps['dlf-' + node.id];
-      const children = fCollapsed ? '' :
-        '<div data-ow-children="dlf-' + escH(node.id) + '" style="padding-left:' + pad + 'px;">' +
+      const children = '<div data-ow-children="dlf-' + escH(node.id) + '" style="padding-left:' + pad + 'px;' + (fCollapsed?'display:none;':'') + '">' +
         (node.groups||[]).map(g => renderNode(g, depth+1)).join('') +
         (node.ungrouped||[]).map(z => renderNode(z, depth+1)).join('') +
         '</div>';
+      const fAllSel = (node.groups||[]).every(g=>(g.zones||[]).every(z=>(z.devices||[]).every(d=>selectedIds.includes(d.entity_id)))) &&
+        (node.ungrouped||[]).every(z=>(z.devices||[]).every(d=>selectedIds.includes(d.entity_id)));
       return '<div>' +
         '<div style="display:flex;align-items:center;gap:5px;padding:4px 6px;background:rgba(255,255,255,0.03);border-radius:4px;margin-bottom:2px;">' +
         '<button data-dlf-collapse="' + escH(node.id) + '" data-base-id="' + escH(baseId) + '" style="background:none;border:none;color:#666;cursor:pointer;font-size:10px;padding:0 2px;">' + (fCollapsed?'▶':'▼') + '</button>' +
-        '<span style="font-size:11px;font-weight:700;color:#aaa;text-transform:uppercase;letter-spacing:0.06em;flex:1;">' + escH(node.name) + '</span>' +
+        '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;">' +
+        '<input type="checkbox" data-dlf-cb="' + escH(node.id) + '" data-base-id="' + escH(baseId) + '" ' + (fAllSel?'checked':'') + ' style="accent-color:#0064d2;flex-shrink:0;">' +
+        '<span style="font-size:11px;font-weight:700;color:#aaa;text-transform:uppercase;letter-spacing:0.06em;">' + escH(node.name) + '</span>' +
         stateBadge(node.triggered, node.armed) +
-        '</div>' + children + '</div>';
+        '</label></div>' + children + '</div>';
     }
     if (node.type === 'group') {
       const gCollapsed = _collapsedSteps['dlg-' + node.id] !== false; // collapsed unless explicitly expanded
       const allDevIds = node.zones ? node.zones.flatMap(z=>z.devices||[]).map(d=>d.entity_id) : [];
       const allSel = allDevIds.length && allDevIds.every(id=>selectedIds.includes(id));
-      const children = gCollapsed ? '' :
-        '<div data-ow-children="dlg-' + escH(node.id) + '" style="padding-left:' + (pad+8) + 'px;">' +
+      const children = '<div data-ow-children="dlg-' + escH(node.id) + '" style="padding-left:' + (pad+8) + 'px;' + (gCollapsed?'display:none;':'') + '">' +
         (node.zones||[]).map(z => renderNode(z, depth+1)).join('') +
         '</div>';
       return '<div>' +
@@ -1445,7 +1456,7 @@ function deviceActionTree(tree, selectedIds, baseId) {
       '<span style="font-size:11px;color:#bbb;">' + escH(zone.name||zone.id) + '</span>' +
       stateBadge(zoneTriggered(zone), zoneArmed(zone)) +
       '</label></div>' +
-      (zCollapsed ? '<div data-ow-children="dlz-' + escH(zone.id) + '" style="display:none"></div>' : '<div data-ow-children="dlz-' + escH(zone.id) + '" style="padding-left:' + (pad+20) + 'px;">' +
+      ('<div data-ow-children="dlz-' + escH(zone.id) + '" style="padding-left:' + (pad+20) + 'px;' + (zCollapsed?'display:none;':'') + '">' +
         (zone.devices||[]).map(d => {
           const isSel = selectedIds.includes(d.entity_id);
           return '<label style="display:flex;align-items:center;gap:7px;padding:2px 4px;cursor:pointer;border-radius:4px;">' +
@@ -1466,6 +1477,16 @@ function wireDeviceActionTree(selectedIds, onUpdate, baseId) {
   // Floor collapse
   el.querySelectorAll(`[data-dlf-collapse][data-base-id="${CSS.escape(baseId)}"]`).forEach(btn=>{
     btn.onclick=e=>{e.stopPropagation();e.preventDefault();const key='dlf-'+btn.dataset.dlfCollapse;_collapsedSteps[key]=!_collapsedSteps[key];const ch=btn.closest('div').parentElement?.querySelector('[data-ow-children="'+key+'"]');if(ch)ch.style.display=_collapsedSteps[key]?'none':'';btn.textContent=_collapsedSteps[key]?'▶':'▼';};
+  });
+  // Floor checkboxes — cascade to all devices on floor
+  el.querySelectorAll(`[data-dlf-cb][data-base-id="${CSS.escape(baseId)}"]`).forEach(flCb=>{
+    flCb.onchange=()=>{
+      el.querySelectorAll(`[data-dl-cb][data-base-id="${CSS.escape(baseId)}"]`).forEach(devCb=>devCb.checked=flCb.checked);
+      el.querySelectorAll(`[data-dlg-cb][data-base-id="${CSS.escape(baseId)}"]`).forEach(gCb=>gCb.checked=flCb.checked);
+      el.querySelectorAll(`[data-dlz-cb][data-base-id="${CSS.escape(baseId)}"]`).forEach(zCb=>zCb.checked=flCb.checked);
+      onUpdate(collectIds());
+      updateIndeterminateStates(_panelEl);
+    };
   });
   // Group collapse
   el.querySelectorAll(`[data-dlg-collapse][data-base-id="${CSS.escape(baseId)}"]`).forEach(btn=>{
@@ -1565,6 +1586,13 @@ function wireActionFields(a) {
   if (a.type==='light') {
     wireDeviceActionTree(a.entity_ids_zone||[], ids=>a.entity_ids_zone=ids, `act-light-${a.id}`);
     wireSearchableCheckbox(`act-light-other-${a.id}`,ids=>a.entity_ids_other=ids);
+    const otherToggle=_panelEl?.querySelector(`#act-light-other-toggle-${a.id}`);
+    const otherWrap=_panelEl?.querySelector(`#act-light-other-wrap-${a.id}`);
+    if(otherToggle&&otherWrap) otherToggle.onclick=()=>{
+      const open=otherWrap.style.display==='none';
+      otherWrap.style.display=open?'':'none';
+      otherToggle.textContent=(open?'▼':'▶')+' Other lights from HA ('+otherToggle.textContent.replace(/^[▶▼]\s*/,'').replace(/\s*\(.*$/,'')+' ('+otherWrap.querySelectorAll('label').length+')';
+    };
     wireSelect(`act-light-svc-${a.id}`,v=>a.service=v);
   }
   if (a.type==='camera') {
@@ -1612,9 +1640,12 @@ function wireActionFields(a) {
     wireSelect(`act-arm-svc-${a.id}`,v=>a.service=v);
   }
   if (a.type==='camera_view') {
-    // Wire floor collapse buttons
+    // Wire floor AND group collapse buttons
     _panelEl?.querySelectorAll('[data-cvf-collapse]').forEach(btn=>{
       btn.onclick=e=>{e.stopPropagation();e.preventDefault();const key='cvf-'+btn.dataset.cvfCollapse;_collapsedSteps[key]=!_collapsedSteps[key];const ch=btn.closest('div').querySelector('[data-ow-children="'+key+'"]');if(ch)ch.style.display=_collapsedSteps[key]?'none':'';btn.textContent=_collapsedSteps[key]?'▶':'▼';};
+    });
+    _panelEl?.querySelectorAll('[data-cvg-collapse]').forEach(btn=>{
+      btn.onclick=e=>{e.stopPropagation();e.preventDefault();const key='cvg-'+btn.dataset.cvgCollapse;_collapsedSteps[key]=!_collapsedSteps[key];const ch=btn.closest('div').parentElement?.querySelector('[data-ow-children="'+key+'"]');if(ch)ch.style.display=_collapsedSteps[key]?'none':'';btn.textContent=_collapsedSteps[key]?'▶':'▼';};
     });
     // Wire all camview checkboxes
     const camviewBox=_panelEl?.querySelector(`#act-camview-zones-${a.id}`);
@@ -1786,7 +1817,19 @@ function updateIndeterminateStates(root) {
     if (checkedCount === 0) grpCb.checked = false;
   });
 
-  // ── Device action tree (lights/cameras/sirens) ────────────
+  // ── Device action tree floor level ───────────────────────
+  root.querySelectorAll('[data-dlf-cb]').forEach(flCb => {
+    const fid = flCb.dataset.dlfCb;
+    const baseId = flCb.dataset.baseId;
+    const allDevCbs = [...root.querySelectorAll(`[data-dl-cb][data-base-id="${CSS.escape(baseId)}"]`)];
+    if (!allDevCbs.length) return;
+    const n = allDevCbs.filter(c=>c.checked).length;
+    flCb.indeterminate = n > 0 && n < allDevCbs.length;
+    if (n === allDevCbs.length) flCb.checked = true;
+    if (n === 0) flCb.checked = false;
+  });
+
+  // ── Device action tree group level ────────────────────────
   // Zone-level: indeterminate if some but not all devices checked
   root.querySelectorAll('[data-dlz-cb]').forEach(zCb => {
     const zid = zCb.dataset.dlzCb;
