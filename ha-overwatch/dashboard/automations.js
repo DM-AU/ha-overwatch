@@ -1290,34 +1290,40 @@ function actionCard(a, idx, total) {
     function buildGroupArmRow(g, indent) {
       indent = indent || 6;
       const slug = nameSlug(g.name)||g.id;
-      const eid = 'switch.overwatch_zone_group_' + slug;
-      const isSel = (a.entity_ids||[]).includes(eid);
+      const geid = 'switch.overwatch_zone_group_' + slug;
+      const isSel = (a.entity_ids||[]).includes(geid);
       const gKey = 'armg-'+g.id;
       const gC = _collapsedSteps[gKey] !== false; // collapsed by default
-      // Zone members of this group
       const memberZones = (g.zones||[]);
-      const zoneRows = memberZones.map(z=>buildZoneArmRow(z, indent+12)).join('');
-      return '<div>' +
+      // Compute partial: some zones checked but not group switch itself
+      const zoneEids = memberZones.map(z=>'switch.overwatch_zone_'+(nameSlug(z.name)||z.id));
+      const checkedZones = zoneEids.filter(e=>(a.entity_ids||[]).includes(e)).length;
+      const zoneRows = memberZones.map(z=>buildZoneArmRow(z, indent, g.id)).join('');
+      return '<div data-arm-group="'+escH(g.id)+'">' +
         '<div style="display:flex;align-items:center;gap:5px;padding:3px 6px;padding-left:'+indent+'px;">' +
-        (memberZones.length ? '<button data-armg-collapse="'+escH(gKey)+'" style="background:none;border:none;color:#555;cursor:pointer;font-size:9px;padding:0 2px;">'+(gC?'▶':'▼')+'</button>' : '<span style="width:12px;flex-shrink:0;"></span>') +
+        (memberZones.length ? '<button data-armg-collapse="'+escH(gKey)+'" style="background:none;border:none;color:#555;cursor:pointer;font-size:9px;padding:0 2px;">'+(gC?'▶':'▼')+'</button>' : '<span style="width:14px;flex-shrink:0;"></span>') +
         '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;">' +
-        '<input type="checkbox" data-arm-cb value="' + escH(eid) + '" ' + (isSel?'checked':'') + ' style="accent-color:#0064d2;flex-shrink:0;">' +
+        '<input type="checkbox" data-arm-grp-cb="'+escH(g.id)+'" data-arm-grp-eid="'+escH(geid)+'" '+( isSel?'checked':'')+' style="accent-color:#0064d2;flex-shrink:0;">' +
         '<span style="font-size:12px;font-weight:600;color:#ccc;">' + escH(g.name) + '</span>' +
         stateBadge(g.triggered, g.armed) +
         '</label></div>' +
         '<div data-ow-children="'+escH(gKey)+'"' + (gC?' style="display:none"':'') + '>' + zoneRows + '</div>' +
         '</div>';
     }
-    function buildZoneArmRow(z, indent) {
-      indent = indent || 18;
+    function buildZoneArmRow(z, groupIndent, groupId) {
+      // indent: same as group, then add spacer for button + extra step
+      const indent = groupIndent || 6;
       const slug = nameSlug(z.name)||z.id;
       const eid = 'switch.overwatch_zone_' + slug;
       const isSel = (a.entity_ids||[]).includes(eid);
-      return '<label style="display:flex;align-items:center;gap:6px;padding:3px 6px;padding-left:'+indent+'px;cursor:pointer;border-radius:4px;">' +
-        '<input type="checkbox" data-arm-cb value="' + escH(eid) + '" ' + (isSel?'checked':'') + ' style="accent-color:#0064d2;flex-shrink:0;">' +
+      // padding-left = group indent + 14px (button) + 10px (step) = indent+24
+      return '<div style="display:flex;align-items:center;padding:2px 6px;padding-left:'+(indent+14)+'px;">' +
+        '<span style="width:14px;flex-shrink:0;"></span>' +
+        '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;">' +
+        '<input type="checkbox" data-arm-zone-cb="'+escH(eid)+'" data-arm-group-id="'+escH(groupId||'')+'" '+( isSel?'checked':'')+' style="accent-color:#0064d2;flex-shrink:0;">' +
         '<span style="font-size:11px;color:#bbb;">' + escH(z.name||z.id) + '</span>' +
         stateBadge(zoneTriggered(z), zoneArmed(z)) +
-        '</label>';
+        '</label></div>';
     }
 
     inner = `
@@ -1654,29 +1660,70 @@ function wireActionFields(a) {
     _panelEl?.querySelectorAll('[data-armg-collapse]').forEach(btn=>{
       btn.onclick=e=>{e.stopPropagation();e.preventDefault();const key=btn.dataset.armgCollapse;const ch=btn.parentElement?.nextElementSibling;const nowCollapsed=ch&&ch.style.display==='none';_collapsedSteps[key]=!nowCollapsed;if(ch)ch.style.display=nowCollapsed?'':'none';btn.textContent=nowCollapsed?'▼':'▶';};
     });
-    // Wire floor checkboxes — cascade to all group and zone switches on floor
-    _panelEl?.querySelectorAll('[data-armf-cb]').forEach(flCb=>{
-      flCb.onchange=()=>{
-        const fid=flCb.value;
-        const tree=zoneGroupTree();
-        const floorNode=tree.find(n=>n.type==='floor'&&n.id===fid);
-        if(!floorNode)return;
-        const eids=[
-          ...(floorNode.groups||[]).map(g=>'switch.overwatch_zone_group_'+(nameSlug(g.name)||g.id)),
-          ...(floorNode.ungrouped||[]).map(z=>'switch.overwatch_zone_'+(nameSlug(z.name)||z.id)),
-        ];
-        const armBox2=_panelEl?.querySelector(`#act-arm-zones-${a.id}`);
-        if(armBox2) eids.forEach(eid=>{const cb=armBox2.querySelector(`[data-arm-cb][value="${CSS.escape(eid)}"]`);if(cb)cb.checked=flCb.checked;});
-        a.entity_ids=[...(armBox2?.querySelectorAll('[data-arm-cb]:checked')||[])].map(c=>c.value);
-      };
-    });
+
     const armBox=_panelEl?.querySelector(`#act-arm-zones-${a.id}`);
     if(armBox) {
-      armBox.querySelectorAll('[data-arm-cb]').forEach(cb=>{
-        cb.onchange=()=>{
-          a.entity_ids=[...armBox.querySelectorAll('[data-arm-cb]:checked')].map(c=>c.value);
+      function collectArmIds() {
+        // Collect all checked boxes — both group switches and zone switches
+        const grpIds=[...armBox.querySelectorAll('[data-arm-grp-cb]:checked')].map(c=>c.dataset.armGrpEid).filter(Boolean);
+        const zoneIds=[...armBox.querySelectorAll('[data-arm-zone-cb]:checked')].map(c=>c.dataset.armZoneCb).filter(Boolean);
+        const masterIds=[...armBox.querySelectorAll('[data-arm-cb]:checked')].map(c=>c.value).filter(Boolean);
+        return [...new Set([...grpIds,...zoneIds,...masterIds])];
+      }
+      function updateArmIndeterminate() {
+        // For each group: check if some but not all zone checkboxes are checked
+        armBox.querySelectorAll('[data-arm-group]').forEach(grpDiv=>{
+          const gid=grpDiv.dataset.armGroup;
+          const grpCb=grpDiv.querySelector(`[data-arm-grp-cb="${CSS.escape(gid)}"]`);
+          if(!grpCb)return;
+          const zoneCbs=[...grpDiv.querySelectorAll('[data-arm-zone-cb]')];
+          if(!zoneCbs.length)return;
+          const checked=zoneCbs.filter(c=>c.checked).length;
+          grpCb.indeterminate = checked>0 && checked<zoneCbs.length;
+          if(!grpCb.indeterminate) grpCb.checked = checked===zoneCbs.length;
+        });
+      }
+
+      // Wire floor checkboxes — cascade to all groups and zones on floor
+      armBox.querySelectorAll('[data-armf-cb]').forEach(flCb=>{
+        flCb.onchange=()=>{
+          const fid=flCb.value;
+          const flDiv=armBox.querySelector(`[data-ow-children="${CSS.escape('armf-'+fid)}"]`);
+          if(flDiv){
+            flDiv.querySelectorAll('[data-arm-grp-cb]').forEach(cb=>cb.checked=flCb.checked);
+            flDiv.querySelectorAll('[data-arm-zone-cb]').forEach(cb=>cb.checked=flCb.checked);
+          }
+          a.entity_ids=collectArmIds();
+          updateArmIndeterminate();
         };
       });
+
+      // Wire group checkboxes — cascade to zone rows inside that group
+      armBox.querySelectorAll('[data-arm-grp-cb]').forEach(grpCb=>{
+        grpCb.onchange=()=>{
+          const gid=grpCb.dataset.armGrpCb;
+          const grpDiv=armBox.querySelector(`[data-arm-group="${CSS.escape(gid)}"]`);
+          if(grpDiv) grpDiv.querySelectorAll('[data-arm-zone-cb]').forEach(cb=>cb.checked=grpCb.checked);
+          a.entity_ids=collectArmIds();
+          updateArmIndeterminate();
+        };
+      });
+
+      // Wire zone checkboxes — update parent group indeterminate state
+      armBox.querySelectorAll('[data-arm-zone-cb]').forEach(zoneCb=>{
+        zoneCb.onchange=()=>{
+          a.entity_ids=collectArmIds();
+          updateArmIndeterminate();
+        };
+      });
+
+      // Master switch
+      armBox.querySelectorAll('[data-arm-cb]').forEach(cb=>{
+        cb.onchange=()=>{ a.entity_ids=collectArmIds(); };
+      });
+
+      // Set initial indeterminate state
+      updateArmIndeterminate();
     }
     wireSelect(`act-arm-svc-${a.id}`,v=>a.service=v);
   }
@@ -1924,12 +1971,7 @@ function updateIndeterminateStates(root) {
     if (n === 0) zCb.checked = false;
   });
 
-  // ── Arm/disarm checkboxes (no explicit parent chain needed) ─
-  // Groups: check if all zone switches under the group are checked
-  root.querySelectorAll('[data-arm-cb]').forEach(cb => {
-    // Simple flat list — no indeterminate needed unless we add group switches
-    cb.indeterminate = false;
-  });
+  // ── Arm/disarm: handled inline in wireActionFields for 'arm' type ─
 }
 
 function injectStyles(){
