@@ -1006,6 +1006,10 @@ function sensorsHierarchicalSelector(selectedIds, id, overrideSensorsFn) {
     ];
   }
   function isFullS(node) { const a=allSensorsIn(node); return a.length>0 && a.every(e=>selectedIds.includes(e)); }
+  // Returns true if this zone has any sensors (respects override)
+  function zoneHasSensors(z) {
+    return overrideSensorsFn ? overrideSensorsFn(z.id).length > 0 : (z.sensors||[]).length > 0;
+  }
 
   function renderSensorZone(z, indent) {
     const zCollapsed = _collapsedSteps['sz-'+z.id] !== false;
@@ -1032,7 +1036,7 @@ function sensorsHierarchicalSelector(selectedIds, id, overrideSensorsFn) {
   }
 
   function renderSensorGroup(g, indent) {
-    const gZones = g.zones.filter(z=>z.sensors?.length);
+    const gZones = g.zones.filter(z=>zoneHasSensors(z));
     if (!gZones.length) return '';
     const gCollapsed = _collapsedSteps['sg-'+g.id] !== false;
     const full = isFullS(g);
@@ -1051,8 +1055,8 @@ function sensorsHierarchicalSelector(selectedIds, id, overrideSensorsFn) {
   const body = tree.map(node => {
     if (node.type === 'floor') {
       const fCollapsed = !!_collapsedSteps['sf-'+node.id];
-      const flGrps = (node.groups||[]).filter(g=>g.zones.some(z=>z.sensors?.length));
-      const flUng  = (node.ungrouped||[]).filter(z=>z.sensors?.length);
+      const flGrps = (node.groups||[]).filter(g=>g.zones.some(z=>zoneHasSensors(z)));
+      const flUng  = (node.ungrouped||[]).filter(z=>zoneHasSensors(z));
       if (!flGrps.length && !flUng.length) return '';
       const full = isFullS(node);
       const childHtml = flGrps.map(g=>renderSensorGroup(g,16)).join('') + flUng.map(z=>renderSensorZone(z,16)).join('');
@@ -1066,7 +1070,7 @@ function sensorsHierarchicalSelector(selectedIds, id, overrideSensorsFn) {
         '<div data-ow-children="sf-' + escH(node.id) + '"' + (fCollapsed?' style="display:none"':'') + '>' + childHtml + '</div></div>';
     }
     if (node.type === 'group')     return renderSensorGroup(node, 16);
-    if (node.type === 'ungrouped') return (node.zones||[]).filter(z=>z.sensors?.length).map(z=>renderSensorZone(z,16)).join('');
+    if (node.type === 'ungrouped') return (node.zones||[]).filter(z=>zoneHasSensors(z)).map(z=>renderSensorZone(z,16)).join('');
     return '';
   }).join('');
 
