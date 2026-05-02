@@ -620,11 +620,36 @@ function renderEditor() {
   // Wire all searchable list filter inputs (data-scbl-filter) via delegation
   _panelEl.querySelectorAll('[data-scbl-filter]').forEach(inp=>{
     inp.oninput=()=>{
-      const q=inp.value.toLowerCase();
-      const list=inp.closest('.ow-scbl');
-      if(!list)return;
-      list.querySelectorAll('[data-scbl-item]').forEach(r=>{
-        r.style.display=r.dataset.scblLabel?.toLowerCase().includes(q)?'':'none';
+      const q = inp.value.toLowerCase().trim();
+      const list = inp.closest('.ow-scbl');
+      if (!list) return;
+      if (!q) {
+        // No filter — restore all items
+        list.querySelectorAll('[data-scbl-item]').forEach(r=>r.style.display='');
+        return;
+      }
+      // First pass: mark each item based on whether it or any descendant matches
+      // Work bottom-up: sensor labels first, then zone/group/floor wrappers
+      const allItems = [...list.querySelectorAll('[data-scbl-item]')];
+      // Reset
+      allItems.forEach(r=>r.style.display='none');
+      // Show items whose own label matches
+      allItems.forEach(r=>{
+        if (r.dataset.scblLabel?.toLowerCase().includes(q)) {
+          r.style.display='';
+          // Show all ancestors
+          let p = r.parentElement;
+          while (p && p !== list) {
+            if (p.dataset.scblItem !== undefined || p.hasAttribute('data-scbl-item')) p.style.display='';
+            p = p.parentElement;
+          }
+        }
+      });
+      // Second pass: show floor/group/zone containers if any child is visible
+      // (handles case where a sensor matches but its zone wrapper doesn't have matching label)
+      list.querySelectorAll('[data-sg-floor],[data-sg-group],[data-sg-zone],[data-zg-floor],[data-zg-group],[data-zg-zone],[data-dl-floor],[data-dl-group],[data-dl-zone]').forEach(container=>{
+        const hasVisible = [...container.querySelectorAll('[data-scbl-item]')].some(c=>c.style.display!=='none'&&c!==container);
+        if (hasVisible) container.style.display='';
       });
     };
     inp.onkeydown=e=>e.stopPropagation();
@@ -722,18 +747,11 @@ function triggerCard(t) {
 
   if (t.type === 'sensor' || t.type === 'door') {
     const isDoor = t.type === 'door';
-    // For door type, filter sensor selector to only show contact/door/window sensors
-    // We do this by passing a filtered selectedIds and letting the selector show all,
-    // but labelling it appropriately. The filtering is in wireSensorHierarchicalSelector.
     inner = `
       <div style="margin-bottom:10px;">
         <label style="${labelStyle}">${isDoor ? 'Door / Window sensors from zones' : 'Sensors from zones'}</label>
-        ${sensorsHierarchicalSelector(t.entity_ids||[], isDoor ? `trig-door-${t.id}` : `trig-sensor-${t.id}`,
-          isDoor ? (eid, fn) => {
-            const l = (eid + ' ' + fn).toLowerCase();
-            return l.includes('door') || l.includes('window') || l.includes('contact') || l.includes('entry') || l.includes('gate');
-          } : null)}
-        ${isDoor ? `<div style="font-size:11px;color:#555;margin-top:4px;">💡 Tip: shows all sensors — filter by name to find door/window contacts.</div>` : ''}
+        ${isDoor ? `<div style="font-size:11px;color:#555;margin-bottom:4px;">Use the filter box below to search for door, window, contact, gate etc.</div>` : ''}
+        ${sensorsHierarchicalSelector(t.entity_ids||[], isDoor ? `trig-door-${t.id}` : `trig-sensor-${t.id}`)}
       </div>
       <div>
         <label style="${labelStyle}">State</label>
@@ -954,10 +972,8 @@ function wireZoneGroupSelector(t, id) {
 }
 
 
-function sensorsHierarchicalSelector(selectedIds, id, filterFn) {
+function sensorsHierarchicalSelector(selectedIds, id) {
   const tree = zoneGroupTree();
-  // filterFn: optional (eid, friendlyName) => boolean to filter which sensors show
-  const sensorFilter = filterFn || (() => true);
 
   function allSensorsIn(node) {
     if (node.sensors) return node.sensors;
@@ -971,12 +987,7 @@ function sensorsHierarchicalSelector(selectedIds, id, filterFn) {
 
   function renderSensorZone(z, indent) {
     const zCollapsed = _collapsedSteps['sz-'+z.id] !== false;
-    const allSensors = z.sensors||[];
-    // Apply filter
-    const sensors = allSensors.filter(eid => {
-      const fn = haStates()[eid]?.attributes?.friendly_name || eid.split('.').pop().replace(/_/g,' ');
-      return sensorFilter(eid, fn);
-    });
+    const sensors = z.sensors||[];
     if (!sensors.length) return '';
     const allSel = sensors.every(e=>selectedIds.includes(e));
     return '<div data-sg-zone="' + escH(z.id) + '" data-scbl-item data-scbl-label="' + escH(z.name||z.id) + '">' +
@@ -986,7 +997,7 @@ function sensorsHierarchicalSelector(selectedIds, id, filterFn) {
       '<input type="checkbox" data-sz-zone-cb="' + escH(z.id) + '" ' + (allSel?'checked':'') + ' style="accent-color:#0064d2;flex-shrink:0;">' +
       '<span style="font-size:11px;font-weight:600;color:#bbb;">' + escH(z.name||z.id) + '</span>' +
       stateBadge(zoneTriggered(z), zoneArmed(z)) + '</label></div>' +
-      '<div data-ow-children="sz-' + escH(z.id) + '" style="padding-left:' + (indent+14) + 'px;' + (zCollapsed?'display:none;':'') + '">' +
+      '<div data-ow-children="sz-' + escH(z.id) + '" style="padding-left:' + (indent+28) + 'px;' + (zCollapsed?'display:none;':'') + '">' +
       sensors.map(eid => {
         const st = haStates()[eid]?.state;
         const fn = haStates()[eid]?.attributes?.friendly_name || eid.split('.').pop().replace(/_/g,' ');
