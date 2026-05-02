@@ -302,6 +302,9 @@ function parseAutomationsYaml(yamlText) {
     const getDesc  = blockText.match(/^(?:\s+)?description:\s*(.+)/m);
     const getMode  = blockText.match(/^(?:\s+)?mode:\s*(.+)/m);
     const getState = blockText.match(/^(?:\s+)?state:\s*(.+)/m);
+    // Extract ow_id/ow_name from variables block (new metadata format)
+    const getVarOwId   = blockText.match(/^\s+ow_id:\s*(.+)/m);
+    const getVarOwName = blockText.match(/^\s+ow_name:\s*(.+)/m);
 
     function unquote(s) {
       if (!s) return "";
@@ -319,6 +322,7 @@ function parseAutomationsYaml(yamlText) {
       description: getDesc ? unquote(getDesc[1])  : "",
       mode:        getMode ? unquote(getMode[1])  : "single",
       state:       getState? unquote(getState[1]) : "on",
+      variables:   getVarOwId ? { ow_id: unquote(getVarOwId[1]), ow_name: getVarOwName ? unquote(getVarOwName[1]) : "" } : null,
       _raw_yaml:   blockText,
     };
 
@@ -761,7 +765,8 @@ const server = http.createServer(async (req, res) => {
       // Filter to HA-Overwatch automations only
       const ours = allAutomations.filter(a =>
         (a.alias || "").startsWith("HA-Overwatch") ||
-        (a.description || "").includes("ow_meta:")
+        (a.description || "").includes("ow_meta:") ||
+        a.variables?.ow_id
       );
 
       // For each found automation, fetch the full config from HA REST if we only have partial data
@@ -2442,7 +2447,8 @@ function buildHAAutomation(auto, allZones, allGroups) {
   const conditions = [];
   const actions    = [];
 
-  const owMeta = JSON.stringify({ ow_meta:"1", ow_id:auto.id, ow_name:auto.name });
+  // OW metadata stored in 'variables' — a valid HA field, not shown in UI, survives round-trips
+  const owMeta = { ow_id: auto.id, ow_name: auto.name };
 
   for (const t of (auto.triggers || [])) {
     const forDur = t.for_duration || null;
@@ -2559,7 +2565,8 @@ function buildHAAutomation(auto, allZones, allGroups) {
   return {
     id:          auto.id,
     alias:       `HA-Overwatch — ${auto.name}`,
-    description: owMeta,
+    description: 'Created by HA-Overwatch',
+    variables:   owMeta,
     mode:        "single",
     triggers:    triggers,
     conditions:  conditions,
@@ -2573,7 +2580,11 @@ function parseHAAutomation(ha, allZones, allGroups) {
   const groupList = allGroups || [];
 
   let owId=null, owName=null;
-  try { const m=JSON.parse(ha.description||"{}"); owId=m.ow_id||null; owName=m.ow_name||null; } catch {}
+  // Try variables first (new format), fall back to description JSON (old format)
+  try {
+    if (ha.variables?.ow_id) { owId=ha.variables.ow_id; owName=ha.variables.ow_name||null; }
+    else { const m=JSON.parse(ha.description||"{}"); owId=m.ow_id||null; owName=m.ow_name||null; }
+  } catch {}
 
   const alias = ha.alias||"";
   const displayName = owName || alias.replace(/^HA-Overwatch\s*[-–—]?\s*/i,"").trim();

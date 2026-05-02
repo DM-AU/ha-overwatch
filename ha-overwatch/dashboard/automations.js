@@ -273,7 +273,10 @@ async function deleteFromHA(autoId) {
 function parseHAAutomation(ha) {
   const warnings = [];
   let owId=null, owName=null;
-  try { const m=JSON.parse(ha.description||"{}"); owId=m.ow_id||null; owName=m.ow_name||null; } catch {}
+  try {
+    if (ha.variables?.ow_id) { owId=ha.variables.ow_id; owName=ha.variables.ow_name||null; }
+    else { const m=JSON.parse(ha.description||"{}"); owId=m.ow_id||null; owName=m.ow_name||null; }
+  } catch {}
   const alias=ha.alias||"";
   const displayName=owName||alias.replace(/^HA-Overwatch\s*[-–—]?\s*/i,"").trim();
   const draft = { id:owId||uid(), name:displayName, enabled:ha.state!=="off", triggers:[], conditions:[], actions:[], _ha_parse_warnings:[] };
@@ -642,6 +645,8 @@ function renderEditor() {
   _draft.conditions.forEach(c=>wireConditionFields(c));
   _draft.actions.forEach(a=>wireActionFields(a));
   _panelEl.querySelectorAll('[data-entity-autocomplete]').forEach(w=>bindEntityAutocomplete(w));
+  // Set indeterminate state on parent checkboxes after all wiring is done
+  requestAnimationFrame(()=>updateIndeterminateStates(_panelEl));
 
   _panelEl.querySelector('#owAutoBackBtn').onclick=()=>{_editing=null;_draft=null;renderList();};
   _panelEl.querySelector('#owAutoSaveBtn').onclick=async()=>{
@@ -907,6 +912,7 @@ function wireZoneGroupSelector(t, id) {
       // Cascade to sensor checkboxes in this zone
       el.querySelectorAll(`[data-sensor-cb][data-zone-id="${CSS.escape(cb.dataset.zoneCb)}"]`).forEach(scb=>scb.checked=cb.checked);
       collectSelections();
+      updateIndeterminateStates(el);
       // Update parent group checkbox
       const gid=cb.dataset.groupId;
       if (gid) {
@@ -946,6 +952,7 @@ function wireZoneGroupSelector(t, id) {
         });
       }
       collectSelections();
+      updateIndeterminateStates(el);
     };
   });
 }
@@ -957,7 +964,7 @@ function sensorsHierarchicalSelector(selectedIds, id) {
   function renderSensorGroup(g, indent) {
     const gZones = g.zones.filter(z=>z.sensors?.length);
     if (!gZones.length) return '';
-    const gCollapsed = !!_collapsedSteps['sg-' + g.id];
+    const gCollapsed = _collapsedSteps['sg-' + g.id] !== false; // collapsed by default
     return '<div data-scbl-item data-scbl-label="' + escH(g.name) + '">' +
       '<div style="display:flex;align-items:center;padding:4px 6px;gap:6px;padding-left:' + indent + 'px;">' +
       '<button data-sg-collapse="' + escH(g.id) + '" style="background:none;border:none;color:#555;cursor:pointer;font-size:10px;padding:0 2px;">' + (gCollapsed?'▶':'▼') + '</button>' +
@@ -999,7 +1006,7 @@ function sensorsHierarchicalSelector(selectedIds, id) {
 
 function sensorZoneBlock(z, groupId, selectedIds, indent) {
   indent = indent || 6;
-  const zCollapsed = !!_collapsedSteps['sz-' + z.id];
+  const zCollapsed = _collapsedSteps['sz-' + z.id] !== false; // collapsed by default
   const sensors = z.sensors||[];
   if (!sensors.length) return '';
   const allSel = sensors.every(e=>selectedIds.includes(e));
@@ -1047,6 +1054,7 @@ function wireSensorHierarchicalSelector(id, fn) {
   el.querySelectorAll('input[value]').forEach(cb=>{
     cb.onchange=()=>{
       fn(collect());
+      updateIndeterminateStates(el);
       const zone=zones().find(z=>(z.sensors||[]).includes(cb.value));
       if (zone) {
         const zCb=el.querySelector(`[data-sz-zone-cb="${CSS.escape(zone.id)}"]`);
@@ -1484,6 +1492,7 @@ function wireDeviceActionTree(selectedIds, onUpdate, baseId) {
   el.querySelectorAll(`[data-dl-cb][data-base-id="${CSS.escape(baseId)}"]`).forEach(devCb=>{
     devCb.onchange=()=>{
       onUpdate(collectIds());
+      updateIndeterminateStates(_panelEl);
       // Update zone checkbox
       const zid=devCb.dataset.zoneId;
       const allDevInZone=[...el.querySelectorAll(`[data-dl-cb][data-zone-id="${CSS.escape(zid)}"][data-base-id="${CSS.escape(baseId)}"]`)];
@@ -1743,6 +1752,81 @@ const selectStyle = `background:rgba(255,255,255,0.06);border:1px solid rgba(255
 const inputStyle  = `width:100%;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);border-radius:7px;color:#fff;padding:7px 10px;font-size:12px;outline:none;box-sizing:border-box;`;
 function btnStyle(bg,border,ghost=false){return `background:${bg};border:1px solid ${ghost?'rgba(255,255,255,0.1)':border};color:${ghost?'#aaa':'#fff'};border-radius:8px;padding:7px 14px;cursor:pointer;font-size:12px;font-weight:600;`;}
 
+/* ════════════════════════════════════════════════════════════
+ * INDETERMINATE (PARTIAL) CHECKBOX STATE
+ * Called after render and after any checkbox change.
+ * Walks up from individual checkboxes to set indeterminate on
+ * parent group/zone/floor checkboxes when only some children checked.
+ * ═══════════════════════════════════════════════════════════ */
+function updateIndeterminateStates(root) {
+  if (!root) return;
+
+  // ── Zone group selector (zone event / zone arm triggers) ──
+  root.querySelectorAll('[data-grp-cb]').forEach(grpCb => {
+    const gid = grpCb.dataset.grpCb;
+    const grp = groups().find(g=>g.id===gid);
+    if (!grp) return;
+    const zoneCbs = [...root.querySelectorAll(`[data-zone-cb]`)].filter(cb=>{
+      const z = zones().find(z=>z.id===cb.dataset.zoneCb);
+      return z && (grp.zone_ids||[]).includes(z.id);
+    });
+    if (!zoneCbs.length) return;
+    const checkedCount = zoneCbs.filter(cb=>cb.checked).length;
+    grpCb.indeterminate = checkedCount > 0 && checkedCount < zoneCbs.length;
+    if (checkedCount === zoneCbs.length) grpCb.checked = true;
+    if (checkedCount === 0) grpCb.checked = false;
+  });
+
+  // ── Device action tree (lights/cameras/sirens) ────────────
+  // Zone-level: indeterminate if some but not all devices checked
+  root.querySelectorAll('[data-dlz-cb]').forEach(zCb => {
+    const zid = zCb.dataset.dlzCb;
+    const baseId = zCb.dataset.baseId;
+    const devCbs = [...root.querySelectorAll(`[data-dl-cb][data-zone-id="${CSS.escape(zid)}"][data-base-id="${CSS.escape(baseId)}"]`)];
+    if (!devCbs.length) return;
+    const n = devCbs.filter(c=>c.checked).length;
+    zCb.indeterminate = n > 0 && n < devCbs.length;
+    if (n === devCbs.length) zCb.checked = true;
+    if (n === 0) zCb.checked = false;
+  });
+  // Group-level: indeterminate if some but not all zone checkboxes checked/indeterminate
+  root.querySelectorAll('[data-dlg-cb]').forEach(gCb => {
+    const gid = gCb.dataset.dlgCb;
+    const baseId = gCb.dataset.baseId;
+    const grp = groups().find(g=>g.id===gid);
+    if (!grp) return;
+    const zCbs = [...root.querySelectorAll(`[data-dlz-cb][data-base-id="${CSS.escape(baseId)}"]`)]
+      .filter(cb=>(grp.zone_ids||[]).includes(cb.dataset.dlzCb));
+    if (!zCbs.length) return;
+    const fullyChecked = zCbs.filter(c=>c.checked&&!c.indeterminate).length;
+    const partiallyChecked = zCbs.filter(c=>c.checked||c.indeterminate).length;
+    gCb.indeterminate = partiallyChecked > 0 && (fullyChecked < zCbs.length || zCbs.some(c=>c.indeterminate));
+    if (fullyChecked === zCbs.length && !zCbs.some(c=>c.indeterminate)) gCb.checked = true;
+    if (partiallyChecked === 0) gCb.checked = false;
+  });
+
+  // ── Sensor selector ────────────────────────────────────────
+  root.querySelectorAll('[data-sz-zone-cb]').forEach(zCb => {
+    const zid = zCb.dataset.szZoneCb;
+    const z = zones().find(z=>z.id===zid);
+    if (!z) return;
+    const sensInputs = [...root.querySelectorAll('input[value]')]
+      .filter(cb=>(z.sensors||[]).includes(cb.value));
+    if (!sensInputs.length) return;
+    const n = sensInputs.filter(c=>c.checked).length;
+    zCb.indeterminate = n > 0 && n < sensInputs.length;
+    if (n === sensInputs.length) zCb.checked = true;
+    if (n === 0) zCb.checked = false;
+  });
+
+  // ── Arm/disarm checkboxes (no explicit parent chain needed) ─
+  // Groups: check if all zone switches under the group are checked
+  root.querySelectorAll('[data-arm-cb]').forEach(cb => {
+    // Simple flat list — no indeterminate needed unless we add group switches
+    cb.indeterminate = false;
+  });
+}
+
 function injectStyles(){
   if(document.getElementById('ow-auto-styles'))return;
   const s=document.createElement('style');s.id='ow-auto-styles';
@@ -1750,6 +1834,7 @@ function injectStyles(){
     .ow-add-btn{background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);color:#aaa;border-radius:7px;padding:5px 12px;cursor:pointer;font-size:12px;transition:background 0.1s,color 0.1s;}
     .ow-add-btn:hover{background:rgba(255,255,255,0.1);color:#fff;}
     @keyframes ow-blink{0%,100%{opacity:1}50%{opacity:0.3}}
+    input[type=checkbox]:indeterminate { accent-color: #ff9500; outline: none; }
   `;
   document.head.appendChild(s);
 }
