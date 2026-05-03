@@ -165,6 +165,7 @@ let haSocket = null;
 let haConnected = false;
 let haEverConnected = false;  // true after first successful auth_ok
 let haStates = {};        // entity_id -> state object
+let haStatesLoaded = false; // true after first successful get_states response
 let haMsgId = 1;
 let haPendingCmds = {};
 let mapLocked = localStorage.getItem('ow_map_locked') === 'true'; // prevent pan/zoom when true
@@ -1837,7 +1838,11 @@ function getZoneState(zone) {
   const allSensors = [...sensors, ...doorSensors];
   if (!allSensors.length) return "normal";
   const anyTriggered   = allSensors.some(isEntityTriggered);
-  const anyUnavailable = sensors.some(id => {
+  // Only fault if haStates has loaded (>50 entities) — avoids false fault at startup
+  // before the get_states response arrives. Also allow a brief grace period via
+  // haStatesLoaded flag set after the first successful states fetch.
+  const statesReady = haStatesLoaded || Object.keys(haStates).length > 50;
+  const anyUnavailable = statesReady && sensors.some(id => {
     const st = haStates[id];
     return !st || st.state === "unavailable";
   });
@@ -1859,7 +1864,8 @@ function checkZoneStateChanges() {
       state = "disabled";
     } else {
       const anyTriggered   = sensors.some(isEntityTriggered);
-      const anyUnavailable = sensors.length > 0 && sensors.some(id => {
+      const statesReady2   = haStatesLoaded || Object.keys(haStates).length > 50;
+      const anyUnavailable = statesReady2 && sensors.length > 0 && sensors.some(id => {
         const st = haStates[id];
         return !st || (st.state || "").toLowerCase() === "unavailable";
       });
@@ -4635,7 +4641,14 @@ function bindDeviceSearch(selectedZone, inputId, resultsId, devType, listId) {
     if (!(selectedZone[devType] || []).includes(entityId)) {
       selectedZone[devType] = [...(selectedZone[devType] || []), entityId];
       saveZone(selectedZone);
-      if (devType === "sensors") subscribeHAEntities();
+      if (devType === "sensors") {
+        subscribeHAEntities();
+        // If this entity isn't in haStates yet (brand new / never seen), fetch it
+        // so getZoneState doesn't immediately fault due to !st
+        if (!haStates[entityId] && haConnected) {
+          fetchSingleEntityState(entityId);
+        }
+      }
     }
     input.value = "";
     if (resultsEl) { resultsEl.innerHTML = ""; resultsEl.style.display = "none"; }
@@ -5400,6 +5413,7 @@ function connectHA() {
       for (const st of msg.result) {
         haStates[st.entity_id] = st;
       }
+      haStatesLoaded = true; // mark states as fully loaded — safe to show fault state now
       logEvent("info", `Fetched ${msg.result.length} entity states from HA.`, "ha");
 
       // Re-run subscribeHAEntities now that haStates is populated —
@@ -5584,6 +5598,7 @@ function connectHA() {
 
   haSocket.onclose = (ev) => {
     haConnected = false;
+    haStatesLoaded = false; // reset so fault check pauses until states reload
     setHAStatus("disconnected");
     showReconnectBanner(true);
     const reason = ev.reason ? ` (${ev.reason})` : "";
@@ -5703,6 +5718,35 @@ function sendHA(payload) {
 
 function fetchAllStates() {
   sendHA({ type: "get_states" });
+}
+
+// Fetch a single entity's current state from HA and insert into haStates.
+// Used when a new entity is added to a zone that wasn't in the initial get_states response.
+function fetchSingleEntityState(entityId) {
+  sendHA({
+    type: "get_states",
+    id: undefined, // sendHA assigns the id
+  });
+  // Simpler: use the REST API via our proxy
+  fetch(apiPath("ow/states") + "?v=" + Date.now())
+    .then(r => r.ok ? r.json() : null)
+    .then(states => {
+      if (!states) return;
+      // states is an object: entity_id -> state_obj
+      if (states[entityId]) {
+        haStates[entityId] = states[entityId];
+      } else {
+        // Entity genuinely doesn't exist in HA — insert a placeholder so !st doesn't fault
+        haStates[entityId] = { entity_id: entityId, state: "unknown", attributes: {} };
+      }
+      renderZones();
+    })
+    .catch(() => {
+      // On failure insert placeholder so !st doesn't permanently fault
+      if (!haStates[entityId]) {
+        haStates[entityId] = { entity_id: entityId, state: "unknown", attributes: {} };
+      }
+    });
 }
 
 function subscribeHAEntities() {
@@ -7708,8 +7752,6 @@ async function init() {
   if (IS_DIRECT_MODE) {
     const zonesBtn = document.getElementById("zonesBtn");
     if (zonesBtn) zonesBtn.style.display = "none";
-    const automationsBtnDirect = document.getElementById("automationsBtn");
-    if (automationsBtnDirect) automationsBtnDirect.style.display = "none";
   }
 
   // Automations button
