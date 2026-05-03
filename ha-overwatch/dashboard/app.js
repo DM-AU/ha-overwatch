@@ -7754,14 +7754,18 @@ async function init() {
     if (zonesBtn) zonesBtn.style.display = "none";
   }
 
-  // Automations button
+  // Automations button — admin only (hidden in direct/public mode)
   const automationsBtn = document.getElementById("automationsBtn");
   if (automationsBtn) {
-    automationsBtn.onclick = () => {
-      if (window.OW_Automations?.toggle) {
-        window.OW_Automations.toggle();
-      }
-    };
+    if (IS_DIRECT_MODE) {
+      automationsBtn.style.display = "none"; // hide completely in direct/public mode
+    } else {
+      automationsBtn.onclick = () => {
+        if (window.OW_Automations?.toggle) {
+          window.OW_Automations.toggle();
+        }
+      };
+    }
   }
 
   await loadZones();

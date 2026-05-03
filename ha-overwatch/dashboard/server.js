@@ -1184,6 +1184,7 @@ const server = http.createServer(async (req, res) => {
         const base = ingressPath.replace(/\/?$/, "/");
         html = html.replace("<head>", `<head>\n    <base href="${base}" />\n    <meta name="ow-client-ip" content="${clientIp}" />`);
       } else {
+        // Direct port access OR reverse proxy — both treated as non-admin (no SUPERVISOR_TOKEN)
         html = html.replace("<head>", `<head>\n    <meta name="ow-direct" content="true" />\n    <meta name="ow-client-ip" content="${clientIp}" />`);
       }
       res.writeHead(200, { "Content-Type": "text/html", "Cache-Control": "no-cache", "Access-Control-Allow-Origin": "*" });
