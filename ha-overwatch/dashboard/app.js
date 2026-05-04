@@ -2552,6 +2552,7 @@ function renderPins(panelIdx) {
   // Render door pins (always visible — doors are structural)
   doorPins.forEach(pin => {
     if (!pinOnFloor(pin)) return;
+    if (pin.x == null || pin.y == null) return; // not placed on map yet
     const isEdit = editorMode && activePinType === 'door' && activePinId === pin.id;
     svg.appendChild(makeDoorPin(pin, isEdit, scale));
   });
@@ -2851,6 +2852,7 @@ let activePinId   = null;
 let placingPinType  = null; // 'light' | 'siren' | 'camera' — click-to-place mode
 let placingEntityId = null;
 let placingZoneId   = null;
+let _placingExistingPinId = null; // if set, update existing pin position rather than create new
 let _activeZoneTab  = 'sensors'; // persists across renderZonesEditor re-renders
 
 function selectPin(type, id) {
@@ -2870,11 +2872,27 @@ function placePinAtFloorplanCoord(x, y, floorId) {
   const type     = placingPinType;
   const entityId = placingEntityId || '';
   const zoneId   = placingZoneId;
+  const existingPinId = _placingExistingPinId;
   placingPinType  = null;
   placingEntityId = null;
   placingZoneId   = null;
+  _placingExistingPinId = null;
   // Reset cursors
   document.querySelectorAll('#zonesSvg, .fp-svg').forEach(s => s.style.cursor = '');
+
+  // If placing an existing unpositioned pin (e.g. from search-add), just update its position
+  if (existingPinId && type === 'door') {
+    const existing = doorPins.find(p => p.id === existingPinId);
+    if (existing) {
+      existing.x = Math.round(x);
+      existing.y = Math.round(y);
+      existing.floor_id = floorId || activeFloorId || null;
+      saveDoorPin(existing);
+      selectPin('door', existing.id);
+      renderZones(); renderZonesEditor();
+      return;
+    }
+  }
 
   // Inherit floor from the zone the entity belongs to
   const zone = zones.find(z => z.id === zoneId);
@@ -3564,7 +3582,7 @@ function startPinAnimLoop() {
       if (suppressDoorDisarmed) {
         // Find the zone this door belongs to and check if it's disarmed
         const zone = zones.find(z => z.id === p.zone_id);
-        if (zone && getZoneState(zone) === 'normal') return false; // zone disarmed/normal — suppress
+        if (zone && getZoneState(zone) === 'disabled') return false; // zone disarmed — suppress
       }
       return true;
     });
@@ -3925,11 +3943,11 @@ function renderZonesEditor() {
               <div class="ha-entity-list" id="zoneSirenList">${(selectedZone.sirens||[]).map(e=>deviceRow(e,"sirens")).join("")}</div>
             </div>
             <div class="ha-tab-panel" id="tabPanel_doors" style="${_activeZoneTab==='doors'?'flex:1;overflow-y:auto;':'display:none;'}">
-              <div style="font-size:11px;color:#555;padding:6px 0 8px;">Place door sensors on the map. Each door has a sensor (open/closed) and an optional control entity (lock/switch).</div>
+              <div style="font-size:11px;color:#555;padding:6px 0 8px;">Place door &amp; window sensors on the map. Each has a sensor (open/closed) and an optional control entity (lock/switch). Use the search below to add a sensor without placing it on the map.</div>
               <div class="entity-search-wrap"><input type="text" id="doorSearchInput" class="entity-search-input" placeholder="Search sensor entities…" autocomplete="off">
               <div class="entity-search-results" id="doorSearchResults" style="display:none;"></div></div>
               <div class="ha-entity-list" id="zoneDoorList">${doorPins.filter(p=>p.zone_id===selectedZone.id).map(p=>doorPinRow(p)).join("")}</div>
-              <button id="addDoorPinBtn" style="margin-top:8px;width:100%;background:rgba(0,150,255,0.1);border:1px solid rgba(0,150,255,0.3);color:#0096ff;border-radius:6px;padding:6px;cursor:pointer;font-size:12px;">+ Place Door on Map</button>
+              <button id="addDoorPinBtn" style="margin-top:8px;width:100%;background:rgba(0,150,255,0.1);border:1px solid rgba(0,150,255,0.3);color:#0096ff;border-radius:6px;padding:6px;cursor:pointer;font-size:12px;">+ Place Door or Window on Map</button>
             </div>
           </div>
         </div>`;
@@ -4430,13 +4448,28 @@ function renderZonesEditor() {
         resultsEl.style.display = 'block';
         resultsEl.querySelectorAll('.entity-search-result').forEach(row => {
           row.addEventListener('click', () => {
-            placingPinType  = 'door';
-            placingEntityId = row.dataset.entityId;
-            placingZoneId   = selectedZone.id;
-            document.querySelectorAll('#zonesSvg, .fp-svg').forEach(s => s.style.cursor = 'crosshair');
+            const entityId = row.dataset.entityId;
+            // Create a door pin directly without requiring map placement
+            // Pin is created with no x/y position (won't render on map until placed)
+            const zone = selectedZone;
+            const newPin = {
+              id:             'door_' + Date.now(),
+              name:           entityId.split('.').pop().replace(/_/g, ' '),
+              sensor_entity:  entityId,
+              control_entity: null,
+              zone_id:        zone.id,
+              floor_id:       zone.floor_id || activeFloorId || null,
+              x:              null,
+              y:              null,
+              rotation:       0,
+            };
+            doorPins.push(newPin);
+            saveDoorPin(newPin);
             doorSearchEl.value = '';
+            resultsEl.innerHTML = '';
             resultsEl.style.display = 'none';
-            logEvent('info', `Click the map to place ${row.dataset.entityId}`, 'system');
+            renderZonesEditor();
+            logEvent('info', `Added ${entityId} as door/window sensor. Use "Place on Map" to position it.`, 'system');
           });
         });
       });
@@ -4450,6 +4483,19 @@ function renderZonesEditor() {
       document.querySelectorAll('#zonesSvg, .fp-svg').forEach(s => s.style.cursor = 'crosshair');
       // Show hint
       logEvent('info', 'Click the map to place the door icon.', 'system');
+    });
+
+    document.querySelectorAll(".door-pin-place-btn").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const pin = doorPins.find(p => p.id === btn.dataset.id);
+        if (!pin) return;
+        placingPinType  = 'door';
+        placingEntityId = pin.sensor_entity || '';
+        placingZoneId   = pin.zone_id;
+        _placingExistingPinId = pin.id; // flag to update existing pin rather than create new
+        document.querySelectorAll('#zonesSvg, .fp-svg').forEach(s => s.style.cursor = 'crosshair');
+        logEvent('info', `Click the map to place ${pin.name || pin.sensor_entity}`, 'system');
+      });
     });
 
     document.querySelectorAll(".door-pin-edit-btn").forEach(btn => {
@@ -4532,11 +4578,15 @@ function doorPinRow(pin) {
   const sState = haStates[pin.sensor_entity]?.state;
   const isOpen = sState === 'on';
   const colour = sState === undefined ? '#555' : isOpen ? '#ff9500' : '#34c759';
+  const isPlaced = pin.x != null && pin.y != null;
+  const placeBtn = !isPlaced
+    ? `<button class="door-pin-place-btn" data-id="${escapeHtml(pin.id)}" style="background:none;border:1px solid rgba(0,150,255,0.4);border-radius:4px;padding:2px 6px;cursor:pointer;font-size:10px;color:#4db8ff;flex-shrink:0;">📍 Place</button>`
+    : `<button class="door-pin-edit-btn" data-id="${escapeHtml(pin.id)}" style="background:none;border:1px solid rgba(255,255,255,0.15);border-radius:4px;padding:2px 6px;cursor:pointer;font-size:10px;color:#888;flex-shrink:0;">Edit</button>`;
   return `<div class="ha-entity-row" data-door-pin-id="${escapeHtml(pin.id)}" style="flex-wrap:wrap;gap:4px;">
     <div class="ha-entity-state" style="background:${colour};flex-shrink:0;"></div>
     <span class="ha-entity-id" title="${escapeHtml(pin.sensor_entity||'')}">${escapeHtml(pin.name || pin.sensor_entity?.split('.').pop() || 'Door')}</span>
     <span class="ha-entity-type" style="font-size:10px;color:#555;">${sState ? (isOpen?'OPEN':'CLOSED') : '—'}</span>
-    <button class="door-pin-edit-btn" data-id="${escapeHtml(pin.id)}" style="background:none;border:1px solid rgba(255,255,255,0.15);border-radius:4px;padding:2px 6px;cursor:pointer;font-size:10px;color:#888;flex-shrink:0;">Edit</button>
+    ${placeBtn}
     <button class="door-pin-delete-btn" data-id="${escapeHtml(pin.id)}" style="background:none;border:none;color:#ff3b30;cursor:pointer;font-size:12px;flex-shrink:0;">✕</button>
   </div>`;
 }
