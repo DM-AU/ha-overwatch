@@ -272,6 +272,10 @@ const haRegistryCallbacks = {}; // msgId -> type being fetched
 // Keyed by entity_id, value is the full HA state object {entity_id, state, attributes, ...}
 const serverHaStates = {};
 
+// Zone triggered state — keyed by zone slug, value is bool
+// Declared at module scope so /ow/triggered works before startHAListener connects
+const globalTriggeredZones = {};
+
 /* ── Parse HA automations.yaml without a YAML library ─────────
  * HA's automations.yaml is a YAML list of objects. We need to
  * extract enough fields to identify and round-trip OW automations:
@@ -1897,7 +1901,7 @@ function startHAListener() {
       }, 30000);
 
       sock.on("data", chunk => {
-        if (!connected || buf === null) return; // BUG FIX: ignore data after disconnect
+        if (!connected || buf === null) return; // guard after disconnect
         buf = Buffer.concat([buf, chunk]);
         while (buf.length >= 2) {
           const used = frameLength(buf);
@@ -1913,18 +1917,18 @@ function startHAListener() {
       });
 
       sock.on("close", () => {
-        if (!connected) return; // BUG FIX: don't double-schedule if error already fired
+        if (!connected) return; // prevent double-schedule if error already fired
         connected = false;
         clearInterval(pingTimer);
-        buf = null; // BUG FIX: release accumulated buffer memory
+        buf = null; // release buffer memory
         console.log("[HA-Overwatch] HA listener disconnected");
         scheduleReconnect();
       });
       sock.on("error", e => {
-        if (!connected) return; // BUG FIX: don't double-schedule if close already fired
+        if (!connected) return; // prevent double-schedule if close already fired
         connected = false;
         clearInterval(pingTimer);
-        buf = null; // BUG FIX: release accumulated buffer memory
+        buf = null; // release buffer memory
         console.error("[HA-Overwatch] HA listener error:", e.message);
         scheduleReconnect();
       });
@@ -1941,7 +1945,7 @@ function startHAListener() {
   const triggeredZones = {};  // "zone.id::sensor_id" -> bool, "zone.id" -> bool
   let   cachedZones    = [];  // refreshed every 60s and on auth_ok
   let   sensorToZones  = {};  // entityId -> [zone, ...] for fast lookup
-  let   zoneCacheTimer = null; // BUG FIX: track interval so it's not duplicated on reconnect
+  let   zoneCacheTimer = null; // track interval so it is not duplicated on reconnect
 
   function refreshZoneCache() {
     cachedZones   = loadZones();
@@ -1965,16 +1969,12 @@ function startHAListener() {
     }
     if (msg.type === "auth_ok") {
       refreshZoneCache();
-      // BUG FIX: clear any existing interval before creating a new one.
-      // Previously a new setInterval was created on every reconnect without
-      // clearing the old one, causing N timers to accumulate over time.
       if (zoneCacheTimer) clearInterval(zoneCacheTimer);
       zoneCacheTimer = setInterval(refreshZoneCache, 60000); // keep cache fresh
       send({ type: "subscribe_events", event_type: "state_changed" });
       // Fetch all current entity states into cache for /ow/states endpoint
       send({ type: "get_states" });
       // Fetch HA registries for floor/area linking
-      // BUG FIX: clear stale callbacks from any previous connection before adding new ones
       Object.keys(haRegistryCallbacks).forEach(k => delete haRegistryCallbacks[k]);
       const floorMsgId = msgId; send({ type: "config/floor_registry/list" });
       haRegistryCallbacks[floorMsgId] = "floors";
@@ -2239,14 +2239,11 @@ function startHAListener() {
     req.end();
   }
 
-  let reconnectScheduled = false; // BUG FIX: prevent double-scheduling if both close+error fire
+  let reconnectScheduled = false;
   function scheduleReconnect() {
     if (reconnectScheduled) return;
     reconnectScheduled = true;
-    setTimeout(() => {
-      reconnectScheduled = false;
-      connect();
-    }, reconnectDelay);
+    setTimeout(() => { reconnectScheduled = false; connect(); }, reconnectDelay);
     reconnectDelay = Math.min(reconnectDelay * 2, 60000);
   }
 

@@ -1780,8 +1780,8 @@ function setMasterEnabled(val) {
   if (zoneUseServerState()) {
     // Server mode: call HA switch, cascade to all groups and zones
     owCallSwitch("switch.overwatch_zone_master", val);
-    for (const g of groups) owCallSwitchIfExists(`switch.overwatch_zone_group_${groupSlug(g)}`, val);
-    for (const z of zones)  owCallSwitchIfExists(`switch.overwatch_zone_${zoneSlug(z)}`, val);
+    for (const g of groups) owCallSwitch(`switch.overwatch_zone_group_${groupSlug(g)}`, val);
+    for (const z of zones)  owCallSwitch(`switch.overwatch_zone_${zoneSlug(z)}`, val);
   } else {
     // Device mode: store in localStorage
     localStorage.setItem(ZONE_LOCAL_MASTER, val ? 'true' : 'false');
@@ -1852,7 +1852,16 @@ function nameSlug(name) {
 function zoneSlug(zone)  { return nameSlug(zone.name)  || zone.id; }
 function groupSlug(group) { return nameSlug(group.name) || group.id; }
 
+// Tracks entity IDs we have called owCallSwitch on within the current event loop tick.
+// Used to suppress echo cascades: when we call turn_on/off on entity X, HA fires a
+// state_changed for X which would otherwise trigger another cascade. We ignore it.
+const _owPendingSwitch = new Map(); // entityId -> timeout handle
+
 function owCallSwitch(entityId, on) {
+  // Mark as pending so the state_changed echo for this entity is ignored
+  if (_owPendingSwitch.has(entityId)) clearTimeout(_owPendingSwitch.get(entityId));
+  _owPendingSwitch.set(entityId, setTimeout(() => _owPendingSwitch.delete(entityId), 3000));
+
   if (IS_DIRECT_MODE) {
     // Direct Mode: no WebSocket — call HA via backend REST proxy
     fetch("ow/call-service", {
@@ -1873,16 +1882,6 @@ function owCallSwitch(entityId, on) {
     service: on ? "turn_on" : "turn_off",
     service_data: { entity_id: entityId },
   });
-}
-
-// BUG FIX: only call HA switch service if the entity actually exists in the state cache.
-// Prevents "Referenced entities missing" errors when cascade fires before entities are ready.
-function owCallSwitchIfExists(entityId, on) {
-  if (!haStates[entityId]) {
-    console.warn(`[OW] owCallSwitch skipped — entity not in HA yet: ${entityId}`);
-    return;
-  }
-  owCallSwitch(entityId, on);
 }
 
 function zoneEntityId(zone) {
@@ -5727,6 +5726,8 @@ function connectHA() {
 
         // Sync masterEnabled when the HA master switch changes
         if (data.entity_id === "switch.overwatch_zone_master") {
+          if (_owPendingSwitch.has(data.entity_id)) { /* echo from our own call — skip cascade */ }
+          else {
           const newMaster = (data.new_state.state || "").toLowerCase() !== "off";
           if (masterEnabled !== newMaster) {
             masterEnabled = newMaster;
@@ -5734,12 +5735,13 @@ function connectHA() {
           }
           // Cascade master to all zones and groups
           const on = newMaster;
-          for (const g of groups) owCallSwitchIfExists(`switch.overwatch_zone_group_${groupSlug(g)}`, on);
-          for (const z of zones)  owCallSwitchIfExists(`switch.overwatch_zone_${zoneSlug(z)}`, on);
+          for (const g of groups) owCallSwitch(`switch.overwatch_zone_group_${groupSlug(g)}`, on);
+          for (const z of zones)  owCallSwitch(`switch.overwatch_zone_${zoneSlug(z)}`, on);
+          } // end echo guard
         }
 
         // When a ZONE group switch changes in HA, cascade to member zones
-        if (data.entity_id.startsWith("switch.overwatch_zone_group_")) {
+        if (data.entity_id.startsWith("switch.overwatch_zone_group_") && !_owPendingSwitch.has(data.entity_id)) {
           const groupSwitchId = data.entity_id; // e.g. switch.overwatch_zone_group_house
           const on = (data.new_state.state || "").toLowerCase() !== "off";
           // Find which group this is
@@ -5748,13 +5750,13 @@ function connectHA() {
           if (matchGroup) {
             (matchGroup.zone_ids || []).forEach(zid => {
               const z = zones.find(z => z.id === zid);
-              if (z) owCallSwitchIfExists(`switch.overwatch_zone_${zoneSlug(z)}`, on);
+              if (z) owCallSwitch(`switch.overwatch_zone_${zoneSlug(z)}`, on);
             });
           }
         }
 
         // When a CAMERA group switch changes in HA, cascade to member zones and cameras
-        if (data.entity_id.startsWith("switch.overwatch_camera_group_")) {
+        if (data.entity_id.startsWith("switch.overwatch_camera_group_") && !_owPendingSwitch.has(data.entity_id)) {
           const on = (data.new_state.state || "").toLowerCase() !== "off";
           const matchGroup = groups.find(g =>
             `switch.overwatch_camera_group_${groupSlug(g)}` === data.entity_id);
@@ -5762,10 +5764,10 @@ function connectHA() {
             (matchGroup.zone_ids || []).forEach(zid => {
               const z = zones.find(z => z.id === zid);
               if (z && (z.cameras || []).length > 0) {
-                owCallSwitchIfExists(`switch.overwatch_camera_zone_${nameSlug(z.name) || z.id}`, on);
+                owCallSwitch(`switch.overwatch_camera_zone_${nameSlug(z.name) || z.id}`, on);
                 (z.cameras || []).forEach(camId => {
                   const safe = camId.replace(/^camera\./, '').replace(/[^a-z0-9]+/g, '_');
-                  owCallSwitchIfExists(`switch.overwatch_camera_${safe}`, on);
+                  owCallSwitch(`switch.overwatch_camera_${safe}`, on);
                 });
               }
             });
@@ -5773,51 +5775,51 @@ function connectHA() {
         }
 
         // When a CAMERA zone switch changes in HA, cascade to member cameras
-        if (data.entity_id.startsWith("switch.overwatch_camera_zone_")) {
+        if (data.entity_id.startsWith("switch.overwatch_camera_zone_") && !_owPendingSwitch.has(data.entity_id)) {
           const on = (data.new_state.state || "").toLowerCase() !== "off";
           const slug = data.entity_id.replace("switch.overwatch_camera_zone_", "");
           const matchZone = zones.find(z => (nameSlug(z.name) || z.id) === slug);
           if (matchZone) {
             (matchZone.cameras || []).forEach(camId => {
               const safe = camId.replace(/^camera\./, '').replace(/[^a-z0-9]+/g, '_');
-              owCallSwitchIfExists(`switch.overwatch_camera_${safe}`, on);
+              owCallSwitch(`switch.overwatch_camera_${safe}`, on);
             });
           }
         }
 
         // When a ZONE floor switch changes, cascade to all zones on that floor
-        if (data.entity_id.startsWith("switch.overwatch_zone_floor_")) {
+        if (data.entity_id.startsWith("switch.overwatch_zone_floor_") && !_owPendingSwitch.has(data.entity_id)) {
           const on = (data.new_state.state || "").toLowerCase() !== "off";
           const fid = data.entity_id.replace("switch.overwatch_zone_floor_", "");
           const isFirstFloor1 = floors.length === 0 || floors[0].id === fid;
           zones.filter(z => z.floor_id === fid || (!z.floor_id && isFirstFloor1)).forEach(z => {
-            owCallSwitchIfExists(`switch.overwatch_zone_${zoneSlug(z)}`, on);
+            owCallSwitch(`switch.overwatch_zone_${zoneSlug(z)}`, on);
           });
         }
 
         // When a CAMERA floor switch changes, cascade to zones + cameras on that floor
-        if (data.entity_id.startsWith("switch.overwatch_camera_floor_")) {
+        if (data.entity_id.startsWith("switch.overwatch_camera_floor_") && !_owPendingSwitch.has(data.entity_id)) {
           const on = (data.new_state.state || "").toLowerCase() !== "off";
           const fid = data.entity_id.replace("switch.overwatch_camera_floor_", "");
           const isFirstFloor2 = floors.length === 0 || floors[0].id === fid;
           zones.filter(z => (z.floor_id === fid || (!z.floor_id && isFirstFloor2)) && (z.cameras || []).length > 0).forEach(z => {
-            owCallSwitchIfExists(`switch.overwatch_camera_zone_${nameSlug(z.name) || z.id}`, on);
+            owCallSwitch(`switch.overwatch_camera_zone_${nameSlug(z.name) || z.id}`, on);
             (z.cameras || []).forEach(camId => {
               const safe = camId.replace(/^camera\./, '').replace(/[^a-z0-9]+/g, '_');
-              owCallSwitchIfExists(`switch.overwatch_camera_${safe}`, on);
+              owCallSwitch(`switch.overwatch_camera_${safe}`, on);
             });
           });
         }
 
         // When camera_all changes in HA, cascade to all zones and cameras
-        if (data.entity_id === "switch.overwatch_camera_all") {
+        if (data.entity_id === "switch.overwatch_camera_all" && !_owPendingSwitch.has(data.entity_id)) {
           const on = (data.new_state.state || "").toLowerCase() !== "off";
           zones.forEach(z => {
             if ((z.cameras || []).length > 0) {
-              owCallSwitchIfExists(`switch.overwatch_camera_zone_${nameSlug(z.name) || z.id}`, on);
+              owCallSwitch(`switch.overwatch_camera_zone_${nameSlug(z.name) || z.id}`, on);
               (z.cameras || []).forEach(camId => {
                 const safe = camId.replace(/^camera\./, '').replace(/[^a-z0-9]+/g, '_');
-                owCallSwitchIfExists(`switch.overwatch_camera_${safe}`, on);
+                owCallSwitch(`switch.overwatch_camera_${safe}`, on);
               });
             }
           });
