@@ -3558,7 +3558,16 @@ function startPinAnimLoop() {
     if (editorMode || _pinDragging) { _pinAnimRunning = false; return; }
     const hasActiveSirens = sirens.some(p => haStates[p.entity_id]?.state === 'on');
     const hasActiveLights = lights.some(p => haStates[p.entity_id]?.state === 'on');
-    const hasOpenDoors    = doorPins.some(p => p.sensor_entity && haStates[p.sensor_entity]?.state === 'on');
+    const suppressDoorDisarmed = localStorage.getItem('ow_hide_door_alert_disarmed') === 'true';
+    const hasOpenDoors    = doorPins.some(p => {
+      if (!p.sensor_entity || haStates[p.sensor_entity]?.state !== 'on') return false;
+      if (suppressDoorDisarmed) {
+        // Find the zone this door belongs to and check if it's disarmed
+        const zone = zones.find(z => z.id === p.zone_id);
+        if (zone && getZoneState(zone) === 'normal') return false; // zone disarmed/normal — suppress
+      }
+      return true;
+    });
     if (hasActiveSirens || hasActiveLights || hasOpenDoors) {
       renderPins();
       if (getNumPanels() > 1) {
@@ -3893,7 +3902,7 @@ function renderZonesEditor() {
               <button class="ha-device-tab ${_activeZoneTab==='cameras'?'active':''}" data-tab="cameras">Cameras</button>
               <button class="ha-device-tab ${_activeZoneTab==='lights'?'active':''}" data-tab="lights">Lights</button>
               <button class="ha-device-tab ${_activeZoneTab==='sirens'?'active':''}" data-tab="sirens">Sirens</button>
-              <button class="ha-device-tab ${_activeZoneTab==='doors'?'active':''}" data-tab="doors">Doors</button>
+              <button class="ha-device-tab ${_activeZoneTab==='doors'?'active':''}" data-tab="doors">Doors &amp; Windows</button>
             </div>
             <div class="ha-tab-panel" id="tabPanel_sensors" style="${_activeZoneTab==='sensors'?'flex:1;overflow-y:auto;':'display:none;'}">
               <div class="entity-search-wrap"><input type="text" id="entitySearchInput" class="entity-search-input" placeholder="Search HA entities…" autocomplete="off">
@@ -6233,6 +6242,11 @@ function renderSettingsPanel() {
               Treat Smoke &amp; CO as always armed
               <span style="font-size:11px;color:#777;margin-left:2px;">(use armed colours even when disarmed)</span>
             </label>
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:6px;">
+              <input type="checkbox" id="hideDoorAlertDisarmedChk" ${localStorage.getItem('ow_hide_door_alert_disarmed') === 'true' ? 'checked' : ''}>
+              Suppress open door/window alerts for disarmed zones
+              <span style="font-size:11px;color:#777;margin-left:2px;">(no animation when zone is disarmed)</span>
+            </label>
           </div>
           <div class="settings-field">
             <label>Map icons</label>
@@ -6555,6 +6569,11 @@ function renderSettingsPanel() {
 
   document.getElementById("smokeCoAlwaysArmedChk")?.addEventListener("change", function() {
     localStorage.setItem('ow_smoke_co_always_armed', this.checked ? 'true' : 'false');
+    renderZones();
+  });
+
+  document.getElementById("hideDoorAlertDisarmedChk")?.addEventListener("change", function() {
+    localStorage.setItem('ow_hide_door_alert_disarmed', this.checked ? 'true' : 'false');
     renderZones();
   });
 
