@@ -2207,7 +2207,16 @@ function init(){
   reg();
 }
 
-window.OW_Automations={toggle,open,close,searchAutomations};
+// Re-push all OW automations to HA — called when zone/group names change so entity IDs update
+async function repushAll() {
+  if (!_automations.length) return;
+  logEvent?.('info', `Updating ${_automations.length} automation(s) after rename…`, 'system');
+  for (const a of _automations) {
+    try { await pushToHA(a.draft); } catch(e) { console.warn('[OW-Auto] repush failed:', e); }
+  }
+}
+
+window.OW_Automations={toggle,open,close,searchAutomations,repushAll};
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);
 else init();
 

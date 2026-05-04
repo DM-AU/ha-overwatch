@@ -4116,6 +4116,14 @@ function renderZonesEditor() {
       saveGroup(selectedGroup);
       renderZonesEditor();
     });
+    document.getElementById("groupNameInput")?.addEventListener("blur", e => {
+      const newName = e.target.value.trim();
+      if (newName && window.OW_Automations?.repushAll) {
+        window.OW_Automations.repushAll().then(() =>
+          logEvent("ok", `Automations updated for renamed group "${newName}".`, "system")
+        );
+      }
+    });
 
     document.getElementById("groupColorInput")?.addEventListener("input", e => {
       selectedGroup.colorHex = e.target.value;
@@ -4381,11 +4389,16 @@ function renderZonesEditor() {
     document.getElementById("zoneNameInput")?.addEventListener("blur", e => {
       const newName = e.target.value.trim();
       if (newName && newName !== _zoneOrigName) {
-        // Warn admin that entity ID changes break automations
-        logEvent("warn",
-          `Zone renamed from "${_zoneOrigName}" to "${newName}". ` +
-          `HA entity IDs for this zone have changed — update any automations referencing the old entity.`,
-          "system");
+        // Re-push all OW automations so entity IDs reflect the new slug
+        if (window.OW_Automations?.repushAll) {
+          window.OW_Automations.repushAll().then(() =>
+            logEvent("ok", `Automations updated for renamed zone "${newName}".`, "system")
+          );
+        } else {
+          logEvent("warn",
+            `Zone renamed to "${newName}". Re-open Automation Editor and re-save any automations referencing this zone.`,
+            "system");
+        }
         _zoneOrigName = newName;
         // Re-sync the new entity state to HA
         owEntitySet("zone", selectedZone.id, selectedZone.enabled !== false);
