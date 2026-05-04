@@ -4123,6 +4123,9 @@ function renderZonesEditor() {
       selectedGroup.name = e.target.value;
       saveGroup(selectedGroup);
       renderZonesEditor();
+      // Also update the group header name in the left panel tree immediately
+      const treeHdr = document.querySelector(`.zed-group-header[data-group-id="${CSS.escape(selectedGroup.id)}"] span`);
+      if (treeHdr) treeHdr.textContent = e.target.value || '(unnamed)';
     });
     document.getElementById("groupNameInput")?.addEventListener("blur", e => {
       const newName = e.target.value.trim();
@@ -4393,6 +4396,13 @@ function renderZonesEditor() {
     document.getElementById("zoneNameInput")?.addEventListener("input", e => {
       selectedZone.name = e.target.value;
       saveZone(selectedZone);
+      // Update the name label in the left panel tree immediately without full re-render
+      // (renderZonesEditor early-returns when an input has focus to preserve cursor position)
+      const treeItem = document.querySelector(`.zones-list-item[data-zone-id="${CSS.escape(selectedZone.id)}"]`);
+      if (treeItem) {
+        const nameSpan = treeItem.querySelector('span:first-of-type');
+        if (nameSpan) nameSpan.textContent = e.target.value || '(unnamed)';
+      }
     });
     document.getElementById("zoneNameInput")?.addEventListener("blur", e => {
       const newName = e.target.value.trim();
