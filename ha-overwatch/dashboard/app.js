@@ -2941,10 +2941,14 @@ function makeDoorPin(pin, isEdit, scale) {
   const ownerZone   = zones.find(z => z.id === pin.zone_id);
   const zoneArmed   = ownerZone ? getZoneState(ownerZone) !== 'disabled' : true;
 
+  // If "suppress door alerts for disarmed zones" is on, treat open doors as closed visually
+  const suppressDisarmed = localStorage.getItem('ow_hide_door_alert_disarmed') === 'true';
+  const effectivelyOpen  = isOpen && (zoneArmed || !suppressDisarmed);
+
   // Open door: use armed colour if zone armed, disarmed colour if zone disarmed
   // Closed door: always green (safe, shut)
   const colOpen = noSensor ? '#888' : zoneArmed ? colOnDoor : colOffDoor;
-  const col     = noSensor ? '#888' : isOpen ? colOpen : '#34c759';
+  const col     = noSensor ? '#888' : effectivelyOpen ? colOpen : '#34c759';
 
   const mk = (tag, attrs) => {
     const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
@@ -2983,7 +2987,7 @@ function makeDoorPin(pin, isEdit, scale) {
     iconG.appendChild(mk('line', { x1:-W/2+H, y1:0, x2:W/2-H, y2:0,
       stroke:col, 'stroke-width':T*0.4, 'stroke-dasharray':`${T*2},${T}` }));
     const panelW = (W - H*2) * 0.9;
-    if (isOpen) {
+    if (effectivelyOpen) {
       // Panel at left side
       iconG.appendChild(mk('rect', { x:-W/2+H, y:-H/2, width:panelW, height:H,
         fill:col, 'fill-opacity':'0.7', stroke:col, 'stroke-width':T*0.4 }));
@@ -3006,7 +3010,7 @@ function makeDoorPin(pin, isEdit, scale) {
       const panelDX = side === 'left' ? panelL : -panelL;
       // Hinge dot
       iconG.appendChild(mk('circle', { cx:hinge, cy:0, r:jT*0.6, fill:col }));
-      if (isOpen) {
+      if (effectivelyOpen) {
         const angle = side === 'left' ? -90 : 90;
         const pg = mk('g', { transform:`rotate(${angle},${hinge},0)` });
         pg.appendChild(mk('line', { x1:hinge, y1:0, x2:hinge+panelDX, y2:0,
@@ -3037,7 +3041,7 @@ function makeDoorPin(pin, isEdit, scale) {
     // Hinge dot
     iconG.appendChild(mk('circle', { cx:hinge, cy:0, r:jT*0.6, fill:col }));
 
-    if (isOpen) {
+    if (effectivelyOpen) {
       // Panel perpendicular — rotated 90° at hinge face, NO horizontal line
       const angle = doorHand === 'left' ? -90 : 90;
       const pg = mk('g', { transform:`rotate(${angle},${hinge},0)` });
@@ -3056,7 +3060,7 @@ function makeDoorPin(pin, isEdit, scale) {
   }
 
   // Aura when open — siren-style expanding rings, centred on door opening
-  if (isOpen && !isEdit) {
+  if (effectivelyOpen && !isEdit) {
     const auraRadius = pin.auraRadius || 3;
     const maxRingR   = (W/2) * (0.8 + auraRadius * 0.4);
     const minRingR   = W * 0.1;
@@ -3906,7 +3910,7 @@ function renderZonesEditor() {
           <div class="zones-editor-row" style="align-items:center;gap:8px;">
             <label style="flex:0 0 auto;">Armed</label>
             <label class="zone-toggle-switch">
-              <input type="checkbox" id="zoneEnabledToggle" ${selectedZone.enabled !== false ? "checked" : ""}>
+              <input type="checkbox" id="zoneEnabledToggle" ${zoneIsEnabled(selectedZone) ? "checked" : ""}>
               <span class="zone-toggle-track"></span>
             </label>
             <span style="flex:1;"></span>
@@ -4444,19 +4448,34 @@ function renderZonesEditor() {
     const doorSearchEl = document.getElementById('doorSearchInput');
     if (doorSearchEl) {
       doorSearchEl.addEventListener('keydown', e => e.stopPropagation());
-      doorSearchEl.addEventListener('input', e => {
+      const triggerDoorSearch = (e) => {
         e.stopPropagation();
         const q = e.target.value.trim().toLowerCase();
         const resultsEl = document.getElementById('doorSearchResults');
         if (!resultsEl) return;
-        if (!q) { resultsEl.style.display = 'none'; return; }
-        const matches = Object.keys(haStates).filter(id =>
-          (id.startsWith('binary_sensor.') || id.startsWith('sensor.')) &&
-          (id.toLowerCase().includes(q) || (haStates[id]?.attributes?.friendly_name||'').toLowerCase().includes(q))
-        ).slice(0, 50);
-        resultsEl.innerHTML = matches.map(id =>
-          `<div class="entity-search-result" data-entity-id="${escapeHtml(id)}">${escapeHtml(id.split('.').pop())} <span style="color:#555;font-size:10px;">${escapeHtml(id)}</span></div>`
-        ).join('') || '<div style="padding:6px;color:#555;font-size:12px;">No matches</div>';
+        const DOOR_CLASSES = new Set(['door','window','garage_door','opening','lock','gate','awning','blind','curtain','damper','shutter','shade']);
+        // When no query: show all door/window class entities. When query: also match id/name.
+        const matches = Object.keys(haStates).filter(id => {
+          if (!id.startsWith('binary_sensor.') && !id.startsWith('sensor.')) return false;
+          const attrs = haStates[id]?.attributes || {};
+          const dc = (attrs.device_class || '').toLowerCase();
+          const fn = (attrs.friendly_name || '').toLowerCase();
+          const isDoorType = DOOR_CLASSES.has(dc);
+          if (!q) return isDoorType; // no query → show only door/window class
+          const matchesQuery = id.toLowerCase().includes(q) || fn.includes(q);
+          return matchesQuery; // with query → show any matching sensor
+        }).sort((a, b) => {
+          // Sort door/window class entities to top
+          const da = DOOR_CLASSES.has((haStates[a]?.attributes?.device_class||'').toLowerCase());
+          const db = DOOR_CLASSES.has((haStates[b]?.attributes?.device_class||'').toLowerCase());
+          return (db ? 1 : 0) - (da ? 1 : 0);
+        }).slice(0, 50);
+        resultsEl.innerHTML = (matches.length ? matches : []).map(id => {
+          const attrs = haStates[id]?.attributes || {};
+          const fn = attrs.friendly_name || id.split('.').pop().replace(/_/g,' ');
+          const dc = attrs.device_class || '';
+          return `<div class="entity-search-result" data-entity-id="${escapeHtml(id)}">${escapeHtml(fn)} <span style="color:#555;font-size:10px;">${escapeHtml(id)}${dc ? ' · '+escapeHtml(dc) : ''}</span></div>`;
+        }).join('') || `<div style="padding:6px;color:#555;font-size:12px;">${q ? 'No matches' : 'No door/window sensors found'}</div>`;
         resultsEl.style.display = 'block';
         resultsEl.querySelectorAll('.entity-search-result').forEach(row => {
           row.addEventListener('click', () => {
@@ -4484,7 +4503,9 @@ function renderZonesEditor() {
             logEvent('info', `Added ${entityId} as door/window sensor. Use "Place on Map" to position it.`, 'system');
           });
         });
-      });
+      };
+      doorSearchEl.addEventListener('input', triggerDoorSearch);
+      doorSearchEl.addEventListener('focus', triggerDoorSearch);
     }
 
     document.getElementById("addDoorPinBtn")?.addEventListener("click", () => {
