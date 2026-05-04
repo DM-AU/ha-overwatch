@@ -4537,6 +4537,15 @@ function renderZonesEditor() {
       };
       doorSearchEl.addEventListener('input', triggerDoorSearch);
       doorSearchEl.addEventListener('focus', triggerDoorSearch);
+      // Close results when clicking outside the search box
+      document.addEventListener('click', function closeDoorSearch(e) {
+        if (!doorSearchEl.isConnected) { document.removeEventListener('click', closeDoorSearch); return; }
+        const wrap = doorSearchEl.closest('.entity-search-wrap');
+        if (wrap && !wrap.contains(e.target)) {
+          const resultsEl = document.getElementById('doorSearchResults');
+          if (resultsEl) { resultsEl.innerHTML = ''; resultsEl.style.display = 'none'; }
+        }
+      });
     }
 
     document.getElementById("addDoorPinBtn")?.addEventListener("click", () => {
