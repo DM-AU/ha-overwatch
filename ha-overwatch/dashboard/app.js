@@ -3580,9 +3580,20 @@ function startPinAnimLoop() {
     const hasOpenDoors    = doorPins.some(p => {
       if (!p.sensor_entity || haStates[p.sensor_entity]?.state !== 'on') return false;
       if (suppressDoorDisarmed) {
-        // Find the zone this door belongs to and check if it's disarmed
+        // Check if the zone is disarmed — check arm switch directly (not getZoneState
+        // which would return 'triggered' because the open door makes the zone triggered)
         const zone = zones.find(z => z.id === p.zone_id);
-        if (zone && getZoneState(zone) === 'disabled') return false; // zone disarmed — suppress
+        if (!zone) return true;
+        let zoneEnabled;
+        if (!zoneUseServerState()) {
+          zoneEnabled = localStorage.getItem(ZONE_LOCAL_PREFIX + zone.id) !== 'false';
+        } else {
+          const sw = haStates[`switch.overwatch_zone_${zoneSlug(zone)}`];
+          zoneEnabled = sw ? sw.state !== 'off' : zone.enabled !== false;
+        }
+        const masterSw = haStates['switch.overwatch_zone_master'];
+        const masterOn = masterSw ? masterSw.state !== 'off' : masterEnabled;
+        if (!zoneEnabled || !masterOn) return false; // zone/master disarmed — suppress
       }
       return true;
     });
@@ -3944,7 +3955,7 @@ function renderZonesEditor() {
             </div>
             <div class="ha-tab-panel" id="tabPanel_doors" style="${_activeZoneTab==='doors'?'flex:1;overflow-y:auto;':'display:none;'}">
               <div style="font-size:11px;color:#555;padding:6px 0 8px;">Place door &amp; window sensors on the map. Each has a sensor (open/closed) and an optional control entity (lock/switch). Use the search below to add a sensor without placing it on the map.</div>
-              <div class="entity-search-wrap"><input type="text" id="doorSearchInput" class="entity-search-input" placeholder="Search sensor entities…" autocomplete="off">
+              <div class="entity-search-wrap"><input type="text" id="doorSearchInput" class="entity-search-input" placeholder="Search doors &amp; windows…" autocomplete="off">
               <div class="entity-search-results" id="doorSearchResults" style="display:none;"></div></div>
               <div class="ha-entity-list" id="zoneDoorList">${doorPins.filter(p=>p.zone_id===selectedZone.id).map(p=>doorPinRow(p)).join("")}</div>
               <button id="addDoorPinBtn" style="margin-top:8px;width:100%;background:rgba(0,150,255,0.1);border:1px solid rgba(0,150,255,0.3);color:#0096ff;border-radius:6px;padding:6px;cursor:pointer;font-size:12px;">+ Place Door or Window on Map</button>
@@ -4440,8 +4451,9 @@ function renderZonesEditor() {
         if (!resultsEl) return;
         if (!q) { resultsEl.style.display = 'none'; return; }
         const matches = Object.keys(haStates).filter(id =>
-          (id.startsWith('binary_sensor.') || id.startsWith('sensor.')) && id.toLowerCase().includes(q)
-        ).slice(0, 12);
+          (id.startsWith('binary_sensor.') || id.startsWith('sensor.')) &&
+          (id.toLowerCase().includes(q) || (haStates[id]?.attributes?.friendly_name||'').toLowerCase().includes(q))
+        ).slice(0, 50);
         resultsEl.innerHTML = matches.map(id =>
           `<div class="entity-search-result" data-entity-id="${escapeHtml(id)}">${escapeHtml(id.split('.').pop())} <span style="color:#555;font-size:10px;">${escapeHtml(id)}</span></div>`
         ).join('') || '<div style="padding:6px;color:#555;font-size:12px;">No matches</div>';
@@ -5836,6 +5848,17 @@ function subscribeHAEntities() {
     for (const s of (zone.cameras || []))  haSubscribedEntities.add(s);
     for (const s of (zone.lights  || []))  haSubscribedEntities.add(s);
     for (const s of (zone.sirens  || []))  haSubscribedEntities.add(s);
+    // Zone arm switch — so armed/disarmed changes from HA/dashboard update the editor and suppress logic
+    const zSwitchId = `switch.overwatch_zone_${zoneSlug(zone)}`;
+    haSubscribedEntities.add(zSwitchId);
+  }
+  // Master arm switch
+  haSubscribedEntities.add('switch.overwatch_zone_master');
+
+  // Door pin sensor entities
+  for (const pin of doorPins) {
+    if (pin.sensor_entity)  haSubscribedEntities.add(pin.sensor_entity);
+    if (pin.control_entity) haSubscribedEntities.add(pin.control_entity);
   }
 
   // Map pin entities (lights and sirens placed on map)
