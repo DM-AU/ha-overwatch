@@ -1780,8 +1780,8 @@ function setMasterEnabled(val) {
   if (zoneUseServerState()) {
     // Server mode: call HA switch, cascade to all groups and zones
     owCallSwitch("switch.overwatch_zone_master", val);
-    for (const g of groups) owCallSwitch(`switch.overwatch_zone_group_${groupSlug(g)}`, val);
-    for (const z of zones)  owCallSwitch(`switch.overwatch_zone_${zoneSlug(z)}`, val);
+    for (const g of groups) owCallSwitchIfExists(`switch.overwatch_zone_group_${groupSlug(g)}`, val);
+    for (const z of zones)  owCallSwitchIfExists(`switch.overwatch_zone_${zoneSlug(z)}`, val);
   } else {
     // Device mode: store in localStorage
     localStorage.setItem(ZONE_LOCAL_MASTER, val ? 'true' : 'false');
@@ -1873,6 +1873,16 @@ function owCallSwitch(entityId, on) {
     service: on ? "turn_on" : "turn_off",
     service_data: { entity_id: entityId },
   });
+}
+
+// BUG FIX: only call HA switch service if the entity actually exists in the state cache.
+// Prevents "Referenced entities missing" errors when cascade fires before entities are ready.
+function owCallSwitchIfExists(entityId, on) {
+  if (!haStates[entityId]) {
+    console.warn(`[OW] owCallSwitch skipped — entity not in HA yet: ${entityId}`);
+    return;
+  }
+  owCallSwitch(entityId, on);
 }
 
 function zoneEntityId(zone) {
@@ -5724,8 +5734,8 @@ function connectHA() {
           }
           // Cascade master to all zones and groups
           const on = newMaster;
-          for (const g of groups) owCallSwitch(`switch.overwatch_zone_group_${groupSlug(g)}`, on);
-          for (const z of zones)  owCallSwitch(`switch.overwatch_zone_${zoneSlug(z)}`, on);
+          for (const g of groups) owCallSwitchIfExists(`switch.overwatch_zone_group_${groupSlug(g)}`, on);
+          for (const z of zones)  owCallSwitchIfExists(`switch.overwatch_zone_${zoneSlug(z)}`, on);
         }
 
         // When a ZONE group switch changes in HA, cascade to member zones
@@ -5738,7 +5748,7 @@ function connectHA() {
           if (matchGroup) {
             (matchGroup.zone_ids || []).forEach(zid => {
               const z = zones.find(z => z.id === zid);
-              if (z) owCallSwitch(`switch.overwatch_zone_${zoneSlug(z)}`, on);
+              if (z) owCallSwitchIfExists(`switch.overwatch_zone_${zoneSlug(z)}`, on);
             });
           }
         }
@@ -5752,10 +5762,10 @@ function connectHA() {
             (matchGroup.zone_ids || []).forEach(zid => {
               const z = zones.find(z => z.id === zid);
               if (z && (z.cameras || []).length > 0) {
-                owCallSwitch(`switch.overwatch_camera_zone_${nameSlug(z.name) || z.id}`, on);
+                owCallSwitchIfExists(`switch.overwatch_camera_zone_${nameSlug(z.name) || z.id}`, on);
                 (z.cameras || []).forEach(camId => {
                   const safe = camId.replace(/^camera\./, '').replace(/[^a-z0-9]+/g, '_');
-                  owCallSwitch(`switch.overwatch_camera_${safe}`, on);
+                  owCallSwitchIfExists(`switch.overwatch_camera_${safe}`, on);
                 });
               }
             });
@@ -5770,7 +5780,7 @@ function connectHA() {
           if (matchZone) {
             (matchZone.cameras || []).forEach(camId => {
               const safe = camId.replace(/^camera\./, '').replace(/[^a-z0-9]+/g, '_');
-              owCallSwitch(`switch.overwatch_camera_${safe}`, on);
+              owCallSwitchIfExists(`switch.overwatch_camera_${safe}`, on);
             });
           }
         }
@@ -5781,7 +5791,7 @@ function connectHA() {
           const fid = data.entity_id.replace("switch.overwatch_zone_floor_", "");
           const isFirstFloor1 = floors.length === 0 || floors[0].id === fid;
           zones.filter(z => z.floor_id === fid || (!z.floor_id && isFirstFloor1)).forEach(z => {
-            owCallSwitch(`switch.overwatch_zone_${zoneSlug(z)}`, on);
+            owCallSwitchIfExists(`switch.overwatch_zone_${zoneSlug(z)}`, on);
           });
         }
 
@@ -5791,10 +5801,10 @@ function connectHA() {
           const fid = data.entity_id.replace("switch.overwatch_camera_floor_", "");
           const isFirstFloor2 = floors.length === 0 || floors[0].id === fid;
           zones.filter(z => (z.floor_id === fid || (!z.floor_id && isFirstFloor2)) && (z.cameras || []).length > 0).forEach(z => {
-            owCallSwitch(`switch.overwatch_camera_zone_${nameSlug(z.name) || z.id}`, on);
+            owCallSwitchIfExists(`switch.overwatch_camera_zone_${nameSlug(z.name) || z.id}`, on);
             (z.cameras || []).forEach(camId => {
               const safe = camId.replace(/^camera\./, '').replace(/[^a-z0-9]+/g, '_');
-              owCallSwitch(`switch.overwatch_camera_${safe}`, on);
+              owCallSwitchIfExists(`switch.overwatch_camera_${safe}`, on);
             });
           });
         }
@@ -5804,10 +5814,10 @@ function connectHA() {
           const on = (data.new_state.state || "").toLowerCase() !== "off";
           zones.forEach(z => {
             if ((z.cameras || []).length > 0) {
-              owCallSwitch(`switch.overwatch_camera_zone_${nameSlug(z.name) || z.id}`, on);
+              owCallSwitchIfExists(`switch.overwatch_camera_zone_${nameSlug(z.name) || z.id}`, on);
               (z.cameras || []).forEach(camId => {
                 const safe = camId.replace(/^camera\./, '').replace(/[^a-z0-9]+/g, '_');
-                owCallSwitch(`switch.overwatch_camera_${safe}`, on);
+                owCallSwitchIfExists(`switch.overwatch_camera_${safe}`, on);
               });
             }
           });
