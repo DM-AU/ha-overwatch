@@ -757,8 +757,10 @@ async function saveZone(zone) {
     if (!res.ok) throw new Error(res.statusText);
     // Update dataVersion baseline so we don't self-sync
     try { const h = await fetch(apiPath("ow/health"),{cache:"no-store"}); const d = await h.json(); if(d.dataVersion) _lastDataVersion = d.dataVersion; } catch{}
+    showSaveToast('Zone');
   } catch {
     localStorage.setItem("zones", JSON.stringify(zones));
+    showSaveToast('Zone');
   }
 }
 
@@ -848,11 +850,13 @@ async function loadSirens() {
 }
 async function saveLight(pin) {
   await fetch(apiPath("ow/save-light"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(pin) });
+  showSaveToast('Light');
   // Update our dataVersion baseline so we don't re-sync our own change
   try { const h = await fetch(apiPath("ow/health"),{cache:"no-store"}); const d = await h.json(); if(d.dataVersion) _lastDataVersion = d.dataVersion; } catch{}
 }
 async function saveSiren(pin) {
   await fetch(apiPath("ow/save-siren"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(pin) });
+  showSaveToast('Siren');
   try { const h = await fetch(apiPath("ow/health"),{cache:"no-store"}); const d = await h.json(); if(d.dataVersion) _lastDataVersion = d.dataVersion; } catch{}
 }
 async function deleteLight(id) {
@@ -873,6 +877,7 @@ async function loadCameraPins() {
 }
 async function saveCameraPin(pin) {
   await fetch(apiPath("ow/save-camera-pin"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(pin) });
+  showSaveToast('Camera');
   try { const h = await fetch(apiPath("ow/health"),{cache:"no-store"}); const d = await h.json(); if(d.dataVersion) _lastDataVersion = d.dataVersion; } catch{}
 }
 async function deleteCameraPin(id) {
@@ -889,6 +894,7 @@ async function loadDoorPins() {
 }
 async function saveDoorPin(pin) {
   await fetch(apiPath("ow/save-door-pin"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(pin) });
+  showSaveToast('Door / Window');
   try { const h = await fetch(apiPath("ow/health"),{cache:"no-store"}); const d = await h.json(); if(d.dataVersion) _lastDataVersion = d.dataVersion; } catch{}
 }
 async function deleteDoorPin(id) {
@@ -992,6 +998,7 @@ async function saveFloor(floor) {
   });
   const data = await res.json();
   if (data.floors) floors = data.floors;
+  showSaveToast('Floor');
   return data;
 }
 
@@ -1520,6 +1527,7 @@ async function saveGroup(group) {
         body: JSON.stringify({ filename: "groups_index.json", content: JSON.stringify(index, null, 2) })
       });
     }
+    showSaveToast('Group');
   } catch { /* ignore */ }
 }
 
@@ -5065,6 +5073,16 @@ function logEvent(level, message, category = "system", meta = {}) {
 
   // Live-refresh the log panel if open
   renderLogPanel(false);
+}
+
+// Debounced save toast — consolidates rapid saves (e.g. typing) into a single "Saved ✓"
+let _saveToastTimer = null;
+function showSaveToast(label) {
+  if (_saveToastTimer) clearTimeout(_saveToastTimer);
+  _saveToastTimer = setTimeout(() => {
+    showToast(`${label || 'Changes'} saved ✓`, 'ok');
+    _saveToastTimer = null;
+  }, 600); // wait 600ms after last save before showing toast
 }
 
 function showToast(message, level = "warn") {
