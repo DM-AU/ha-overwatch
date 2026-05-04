@@ -166,6 +166,76 @@ let haConnected = false;
 let haEverConnected = false;  // true after first successful auth_ok
 let haStates = {};        // entity_id -> state object
 let haStatesLoaded = false; // true after first successful get_states response
+
+// HA registry — floors, areas, devices, entities from HA config registries
+let _haRegistry = { floors: [], areas: [], devices: [], entities: [], loaded: false };
+
+// Returns true if entity is ghosted (excluded) in any zone — hides from search/automations
+function isEntityGhosted(entityId) {
+  return zones.some(z => (z.ha_excluded_entities||[]).includes(entityId));
+}
+
+async function loadHARegistry() {
+  try {
+    const r = await fetch(apiPath('ow/ha-registry') + '?v=' + Date.now());
+    if (r.ok) {
+      _haRegistry = await r.json();
+      // Auto-add new HA areas to floors that have ha_auto_add_areas enabled
+      if (_haRegistry.loaded) await autoAddNewHAAreas();
+    }
+  } catch { _haRegistry = { floors: [], areas: [], devices: [], entities: [], loaded: false }; }
+}
+
+// Check each linked floor for new HA areas and auto-create zones if ha_auto_add_areas is on
+async function autoAddNewHAAreas() {
+  for (const floor of floors) {
+    if (!floor.ha_floor_id || floor.ha_auto_add_areas === false) continue;
+    const haAreas = (_haRegistry.areas || []).filter(a => a.floor_id === floor.ha_floor_id);
+    if (!floor.ha_linked_area_ids) floor.ha_linked_area_ids = [];
+    for (const area of haAreas) {
+      if (floor.ha_linked_area_ids.includes(area.area_id)) continue; // already linked
+      // New area — auto-create zone and add to linked list
+      floor.ha_linked_area_ids.push(area.area_id);
+      const existing = zones.find(z => z.ha_area_id === area.area_id);
+      if (!existing) {
+        await createZoneFromHAArea(area.area_id, area.name, floor.id);
+      }
+      await saveFloor(floor);
+      logEvent('info', `Auto-created zone for new HA area "${area.name}"`, 'system');
+    }
+  }
+}
+
+// Get all entity registry entries for a given area_id
+function haEntitiesForArea(areaId) {
+  if (!areaId || !_haRegistry.loaded) return [];
+  // Find devices in this area
+  const deviceIds = new Set(_haRegistry.devices.filter(d => d.area_id === areaId).map(d => d.id));
+  // Get entities assigned directly to area OR via their device
+  return _haRegistry.entities.filter(e =>
+    e.area_id === areaId || (e.device_id && deviceIds.has(e.device_id))
+  ).filter(e => !e.disabled_by && !e.hidden_by); // skip disabled/hidden entities
+}
+
+// Device class filters per OW tab
+const HA_AREA_FILTERS = {
+  sensors: e => {
+    const dc = (e.device_class||'').toLowerCase();
+    const eid = (e.entity_id||'').toLowerCase();
+    return eid.startsWith('binary_sensor.') &&
+      ['motion','occupancy','presence','vibration','sound','moisture','smoke','carbon_monoxide','heat','cold','gas'].includes(dc) &&
+      !eid.startsWith('binary_sensor.overwatch_');
+  },
+  cameras: e => (e.entity_id||'').startsWith('camera.'),
+  lights:  e => (e.entity_id||'').startsWith('light.'),
+  sirens:  e => (e.entity_id||'').startsWith('siren.'),
+  doors:   e => {
+    const dc = (e.device_class||'').toLowerCase();
+    const eid = (e.entity_id||'').toLowerCase();
+    return eid.startsWith('binary_sensor.') &&
+      ['door','window','garage_door','opening','gate','lock'].includes(dc);
+  },
+};
 let haMsgId = 1;
 let haPendingCmds = {};
 let mapLocked = localStorage.getItem('ow_map_locked') === 'true'; // prevent pan/zoom when true
@@ -666,7 +736,8 @@ function zoneToYaml(z) {
   out += `color: "${z.colorHex || "#0096ff"}"\n`;
   out += `enabled: ${z.enabled !== false}\n`;
   out += `hidden: ${z.hidden === true}\n`;
-  if (z.floor_id) out += `floor_id: ${z.floor_id}\n`;
+  if (z.floor_id)    out += `floor_id: ${z.floor_id}\n`;
+  if (z.ha_area_id)  out += `ha_area_id: ${z.ha_area_id}\n`;
   out += `points:\n`;
   (z.points || []).forEach(p => { out += ` - [${Math.round(p.x)}, ${Math.round(p.y)}]\n`; });
   out += `sensors:\n`;
@@ -677,31 +748,37 @@ function zoneToYaml(z) {
   (z.lights || []).forEach(s => { out += ` - ${s}\n`; });
   out += `sirens:\n`;
   (z.sirens || []).forEach(s => { out += ` - ${s}\n`; });
+  if ((z.ha_excluded_entities || []).length) {
+    out += `ha_excluded_entities:\n`;
+    (z.ha_excluded_entities || []).forEach(s => { out += ` - ${s}\n`; });
+  }
   return out;
 }
 
 function parseZoneYaml(text) {
-  const z = { points: [], sensors: [], cameras: [], lights: [], sirens: [], enabled: true, hidden: false };
+  const z = { points: [], sensors: [], cameras: [], lights: [], sirens: [], ha_excluded_entities: [], enabled: true, hidden: false };
   let section = "";
 
   for (const raw of text.split("\n")) {
     const line = raw.trim();
     if (!line || line.startsWith("#")) continue;
-    if (line === "points:")  { section = "points";  continue; }
-    if (line === "sensors:") { section = "sensors"; continue; }
-    if (line === "cameras:") { section = "cameras"; continue; }
-    if (line === "lights:")  { section = "lights";  continue; }
-    if (line === "sirens:")  { section = "sirens";  continue; }
+    if (line === "points:")               { section = "points";               continue; }
+    if (line === "sensors:")              { section = "sensors";              continue; }
+    if (line === "cameras:")              { section = "cameras";              continue; }
+    if (line === "lights:")               { section = "lights";               continue; }
+    if (line === "sirens:")               { section = "sirens";               continue; }
+    if (line === "ha_excluded_entities:") { section = "ha_excluded_entities"; continue; }
 
     if (line.startsWith("-")) {
       const val = line.slice(1).trim();
       if (section === "points") {
         const m = val.match(/\[\s*([\d.+-]+)\s*,\s*([\d.+-]+)\s*\]/);
         if (m) z.points.push({ x: parseFloat(m[1]), y: parseFloat(m[2]) });
-      } else if (section === "sensors") { z.sensors.push(val); }
-      else if (section === "cameras")   { z.cameras.push(val); }
-      else if (section === "lights")    { z.lights.push(val); }
-      else if (section === "sirens")    { z.sirens.push(val); }
+      } else if (section === "sensors")              { z.sensors.push(val); }
+      else if (section === "cameras")                { z.cameras.push(val); }
+      else if (section === "lights")                 { z.lights.push(val); }
+      else if (section === "sirens")                 { z.sirens.push(val); }
+      else if (section === "ha_excluded_entities")   { z.ha_excluded_entities.push(val); }
       continue;
     }
 
@@ -711,12 +788,13 @@ function parseZoneYaml(text) {
       const key = line.slice(0, colonIdx).trim();
       let val = line.slice(colonIdx + 1).trim();
       val = val.replace(/^"(.*)"$/, "$1").replace(/^'(.*)'$/, "$1");
-      if (key === "id")       z.id       = val;
-      else if (key === "name")     z.name     = val;
-      else if (key === "enabled")  z.enabled  = val !== "false";
-      else if (key === "hidden")   z.hidden   = val === "true";
-      else if (key === "floor_id") z.floor_id = val;
-      else if (key === "color")    { z.colorHex = val; z.color = hexToRgba(val, 0.25); }
+      if (key === "id")                     z.id              = val;
+      else if (key === "name")              z.name            = val;
+      else if (key === "enabled")           z.enabled         = val !== "false";
+      else if (key === "hidden")            z.hidden          = val === "true";
+      else if (key === "floor_id")          z.floor_id        = val;
+      else if (key === "ha_area_id")        z.ha_area_id      = val;
+      else if (key === "color")             { z.colorHex = val; z.color = hexToRgba(val, 0.25); }
     }
   }
 
@@ -1840,7 +1918,7 @@ function getZoneState(zone) {
 
   if (!enabled || !masterOn) return "disabled";
   if (!haConnected) return "normal";
-  const sensors = zone.sensors || [];
+  const sensors = (zone.sensors || []).filter(e => !isEntityGhosted(e));
   // Also treat open door pins as triggered sensors (issue 8)
   const doorSensors = doorPins.filter(p => p.zone_id === zone.id && p.sensor_entity).map(p => p.sensor_entity);
   const allSensors = [...sensors, ...doorSensors];
@@ -1865,7 +1943,7 @@ function getZoneState(zone) {
 function checkZoneStateChanges() {
   if (!haConnected) return;
   for (const zone of zones) {
-    const sensors = zone.sensors || [];
+    const sensors = (zone.sensors || []).filter(e => !isEntityGhosted(e));
     // Compute raw state without the prev-state side effects
     let state = "normal";
     if (getZoneState(zone) === "disabled") {
@@ -3937,6 +4015,14 @@ function renderZonesEditor() {
               ${floors.map(f => `<option value="${f.id}" ${(selectedZone.floor_id || floors[0]?.id) === f.id ? 'selected' : ''}>${escapeHtml(f.name)}</option>`).join('')}
             </select>
           </div>` : ''}
+          <div class="zones-editor-row" style="align-items:center;">
+            <label style="flex:0 0 auto;">HA Area</label>
+            <select id="zoneHAAreaSelect" style="flex:1;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:5px 8px;color:#fff;font-size:12px;">
+              <option value="">— None —</option>
+              ${(_haRegistry.areas||[]).map(a => `<option value="${escapeHtml(a.area_id)}" ${selectedZone.ha_area_id === a.area_id ? 'selected' : ''}>${escapeHtml(a.name)}</option>`).join('')}
+            </select>
+            ${selectedZone.ha_area_id ? `<button id="zoneHAAreaSync" title="Sync entities from HA area" style="background:rgba(0,150,255,0.1);border:1px solid rgba(0,150,255,0.3);color:#4db8ff;border-radius:7px;padding:5px 8px;cursor:pointer;font-size:11px;margin-left:6px;flex-shrink:0;">↻ Sync</button>` : ''}
+          </div>
           <div class="ha-section" style="margin-top:2px;flex:1;display:flex;flex-direction:column;">
             <div class="ha-device-tabs" id="haDeviceTabs">
               <button class="ha-device-tab ${_activeZoneTab==='sensors'?'active':''}" data-tab="sensors">Sensors</button>
@@ -3948,22 +4034,22 @@ function renderZonesEditor() {
             <div class="ha-tab-panel" id="tabPanel_sensors" style="${_activeZoneTab==='sensors'?'flex:1;overflow-y:auto;':'display:none;'}">
               <div class="entity-search-wrap"><input type="text" id="entitySearchInput" class="entity-search-input" placeholder="Search HA entities…" autocomplete="off">
               <div class="entity-search-results" id="entitySearchResults" style="display:none;"></div></div>
-              <div class="ha-entity-list" id="zoneEntityList">${(selectedZone.sensors||[]).map(e=>deviceRow(e,"sensors")).join("")}</div>
+              <div class="ha-entity-list" id="zoneEntityList">${(selectedZone.sensors||[]).map(e=>deviceRow(e,"sensors",selectedZone)).join("")}</div>
             </div>
             <div class="ha-tab-panel" id="tabPanel_cameras" style="${_activeZoneTab==='cameras'?'flex:1;overflow-y:auto;':'display:none;'}">
               <div class="entity-search-wrap"><input type="text" id="cameraSearchInput" class="entity-search-input" placeholder="Search camera entities…" autocomplete="off">
               <div class="entity-search-results" id="cameraSearchResults" style="display:none;"></div></div>
-              <div class="ha-entity-list" id="zoneCameraList">${(selectedZone.cameras||[]).map(e=>deviceRow(e,"cameras")).join("")}</div>
+              <div class="ha-entity-list" id="zoneCameraList">${(selectedZone.cameras||[]).map(e=>deviceRow(e,"cameras",selectedZone)).join("")}</div>
             </div>
             <div class="ha-tab-panel" id="tabPanel_lights" style="${_activeZoneTab==='lights'?'flex:1;overflow-y:auto;':'display:none;'}">
               <div class="entity-search-wrap"><input type="text" id="lightSearchInput" class="entity-search-input" placeholder="Search light entities…" autocomplete="off">
               <div class="entity-search-results" id="lightSearchResults" style="display:none;"></div></div>
-              <div class="ha-entity-list" id="zoneLightList">${(selectedZone.lights||[]).map(e=>deviceRow(e,"lights")).join("")}</div>
+              <div class="ha-entity-list" id="zoneLightList">${(selectedZone.lights||[]).map(e=>deviceRow(e,"lights",selectedZone)).join("")}</div>
             </div>
             <div class="ha-tab-panel" id="tabPanel_sirens" style="${_activeZoneTab==='sirens'?'flex:1;overflow-y:auto;':'display:none;'}">
               <div class="entity-search-wrap"><input type="text" id="sirenSearchInput" class="entity-search-input" placeholder="Search siren entities…" autocomplete="off">
               <div class="entity-search-results" id="sirenSearchResults" style="display:none;"></div></div>
-              <div class="ha-entity-list" id="zoneSirenList">${(selectedZone.sirens||[]).map(e=>deviceRow(e,"sirens")).join("")}</div>
+              <div class="ha-entity-list" id="zoneSirenList">${(selectedZone.sirens||[]).map(e=>deviceRow(e,"sirens",selectedZone)).join("")}</div>
             </div>
             <div class="ha-tab-panel" id="tabPanel_doors" style="${_activeZoneTab==='doors'?'flex:1;overflow-y:auto;':'display:none;'}">
               <div style="font-size:11px;color:#555;padding:6px 0 8px;">Place door &amp; window sensors on the map. Each has a sensor (open/closed) and an optional control entity (lock/switch). Use the search below to add a sensor without placing it on the map.</div>
@@ -4443,6 +4529,19 @@ function renderZonesEditor() {
       renderZones(); renderZonesEditor();
     });
 
+    // HA Area select
+    document.getElementById("zoneHAAreaSelect")?.addEventListener("change", async e => {
+      selectedZone.ha_area_id = e.target.value || null;
+      await saveZone(selectedZone);
+      renderZonesEditor(); // re-render to show/hide sync button
+    });
+
+    // HA Area sync button — populate entity tabs from HA area
+    document.getElementById("zoneHAAreaSync")?.addEventListener("click", async () => {
+      await syncZoneFromHAArea(selectedZone);
+      renderZonesEditor();
+    });
+
     // Device tabs
     document.getElementById("haDeviceTabs")?.querySelectorAll(".ha-device-tab").forEach(btn => {
       btn.addEventListener("click", () => {
@@ -4455,7 +4554,7 @@ function renderZonesEditor() {
       });
     });
 
-    // Entity remove buttons
+    // Entity remove + ghost buttons
     ["sensors","cameras","lights","sirens"].forEach(devType => {
       const listId = { sensors:"zoneEntityList", cameras:"zoneCameraList", lights:"zoneLightList", sirens:"zoneSirenList" }[devType];
       document.getElementById(listId)?.querySelectorAll(".ha-entity-remove").forEach(btn => {
@@ -4464,6 +4563,22 @@ function renderZonesEditor() {
           selectedZone[devType] = (selectedZone[devType]||[]).filter(s => s !== btn.dataset.entityId);
           saveZone(selectedZone);
           if (devType === "sensors") subscribeHAEntities();
+          renderZonesEditor();
+        };
+      });
+      // Ghost toggle — adds/removes from ha_excluded_entities
+      document.getElementById(listId)?.querySelectorAll(".ha-entity-ghost").forEach(btn => {
+        btn.onclick = e => {
+          e.stopPropagation();
+          const eid = btn.dataset.entityId;
+          if (!selectedZone.ha_excluded_entities) selectedZone.ha_excluded_entities = [];
+          const ex = selectedZone.ha_excluded_entities;
+          if (ex.includes(eid)) {
+            selectedZone.ha_excluded_entities = ex.filter(x => x !== eid); // restore
+          } else {
+            ex.push(eid); // ghost
+          }
+          saveZone(selectedZone);
           renderZonesEditor();
         };
       });
@@ -4664,13 +4779,24 @@ function doorPinRow(pin) {
   </div>`;
 }
 
-function deviceRow(entityId, devType) {
+function deviceRow(entityId, devType, zone) {
   const st = haStates[entityId];
   const stateStr  = st ? st.state : (haConnected ? "unavailable" : "—");
   const stateClass = st ? (isEntityTriggered(entityId) ? "on" : "off") : "unavailable";
   const shortId   = entityId.split(".").pop() || entityId;
+  const fn        = st?.attributes?.friendly_name;
+  const displayName = fn || shortId;
   const icons = { sensors:"⬡", cameras:"⊡", lights:"⊙", sirens:"⊛" };
   const icon = icons[devType] || "·";
+
+  // Ghost state — entity is excluded (from HA area sync but user toggled off)
+  const excluded = zone && (zone.ha_excluded_entities || []).includes(entityId);
+  const fromArea = zone?.ha_area_id && !!_haRegistry.areas.length; // whether area linking is active
+  const ghostBtn = fromArea
+    ? `<button class="ha-entity-ghost" data-entity-id="${escapeHtml(entityId)}" title="${excluded ? 'Entity ghosted — click to restore' : 'Ghost this entity (hide from automation & search)'}"
+        style="background:none;border:1px solid ${excluded ? 'rgba(255,149,0,0.4)' : 'rgba(255,255,255,0.12)'};border-radius:4px;padding:2px 5px;cursor:pointer;font-size:10px;color:${excluded ? '#ff9500' : '#555'};flex-shrink:0;"
+        >${excluded ? '👻 Ghosted' : '👻'}</button>`
+    : '';
 
   // For lights and sirens: show pin button — filled if already placed, outline if not
   let pinBtn = '';
@@ -4697,11 +4823,12 @@ function deviceRow(entityId, devType) {
   })() : '';
 
   return `
-    <div class="ha-entity-row" data-entity-id="${escapeHtml(entityId)}" data-dev-type="${devType}" style="flex-wrap:wrap;">
+    <div class="ha-entity-row" data-entity-id="${escapeHtml(entityId)}" data-dev-type="${devType}" style="flex-wrap:wrap;${excluded ? 'opacity:0.4;' : ''}">
       <span style="font-size:9px;color:#555;flex-shrink:0;">${icon}</span>
       <div class="ha-entity-state ${stateClass}"></div>
-      <span class="ha-entity-id" title="${escapeHtml(entityId)}">${escapeHtml(shortId)}</span>
+      <span class="ha-entity-id" title="${escapeHtml(entityId)}">${escapeHtml(displayName)}</span>
       <span class="ha-entity-type">${escapeHtml(stateStr)}</span>
+      ${ghostBtn}
       ${pinBtn}
       <button class="ha-entity-remove" data-entity-id="${escapeHtml(entityId)}" title="Remove">✕</button>
       ${lowResRow}
@@ -7163,11 +7290,13 @@ function runSearch(q) {
       hits.push({ type: "zone", zoneId: z.id, title: z.name || z.id, sub: `Zone` });
     }
     for (const s of (z.sensors || [])) {
+      if (isEntityGhosted(s)) continue; // skip ghosted
       if (String(s).toLowerCase().includes(query)) {
         hits.push({ type: "entity", zoneId: z.id, title: s, sub: `Sensor in ${z.name || z.id}` });
       }
     }
     for (const c of (z.cameras || [])) {
+      if (isEntityGhosted(c)) continue; // skip ghosted
       const friendly = haStates[c]?.attributes?.friendly_name || c;
       if (String(c).toLowerCase().includes(query) || friendly.toLowerCase().includes(query)) {
         hits.push({ type: "camera", zoneId: z.id, title: friendly, sub: `Camera in ${z.name || z.id}` });
@@ -7691,6 +7820,204 @@ function bindFloorSwitcher() {
   };
 }
 
+function openFloorConfigPanel(floorId) {
+  const floor = floors.find(f => f.id === floorId);
+  if (!floor) return;
+
+  // Remove any existing panel
+  document.getElementById('owFloorConfigPanel')?.remove();
+
+  const panel = document.createElement('div');
+  panel.id = 'owFloorConfigPanel';
+  panel.style.cssText = `
+    position:fixed; top:50%; left:50%; transform:translate(-50%,-50%);
+    background:rgba(18,18,18,0.98); border:1px solid rgba(255,255,255,0.12);
+    border-radius:14px; padding:20px; z-index:600; min-width:360px; max-width:480px;
+    box-shadow:0 16px 48px rgba(0,0,0,0.7); backdrop-filter:blur(16px);
+    max-height:80vh; overflow-y:auto;
+  `;
+
+  function render() {
+    const haFloors = _haRegistry.floors || [];
+    const haAreas  = _haRegistry.areas  || [];
+    const linkedHAFloor = haFloors.find(f => f.floor_id === floor.ha_floor_id);
+    // Areas on the linked HA floor
+    const floorAreas = floor.ha_floor_id
+      ? haAreas.filter(a => a.floor_id === floor.ha_floor_id)
+      : [];
+    const linkedAreaIds = floor.ha_linked_area_ids || [];
+    const autoAdd = floor.ha_auto_add_areas !== false;
+
+    panel.innerHTML = `
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+        <div>
+          <div style="font-size:13px;font-weight:700;color:#fff;">Floor Configuration</div>
+          <div style="font-size:11px;color:#666;margin-top:2px;">${escapeHtml(floor.name)}</div>
+        </div>
+        <button id="owFloorConfigClose" style="background:none;border:none;color:#666;cursor:pointer;font-size:16px;padding:4px;">✕</button>
+      </div>
+
+      <div style="margin-bottom:14px;">
+        <label style="font-size:11px;color:#888;display:block;margin-bottom:5px;text-transform:uppercase;letter-spacing:0.05em;">HA Floor Link</label>
+        <select id="owFloorHASelect" style="width:100%;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);color:#ccc;border-radius:8px;padding:7px 10px;font-size:13px;outline:none;">
+          <option value="">— Not linked to a HA floor —</option>
+          ${haFloors.map(hf => `<option value="${escapeHtml(hf.floor_id)}" ${floor.ha_floor_id === hf.floor_id ? 'selected' : ''}>${escapeHtml(hf.name)}</option>`).join('')}
+        </select>
+        ${!_haRegistry.loaded ? '<div style="font-size:11px;color:#f60;margin-top:4px;">⚠ HA registry not loaded — ensure add-on is connected</div>' : ''}
+      </div>
+
+      ${floor.ha_floor_id ? `
+        <div style="margin-bottom:14px;">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+            <label style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.05em;">HA Areas → OW Zones</label>
+            <label style="display:flex;align-items:center;gap:5px;font-size:11px;color:#777;cursor:pointer;">
+              <input type="checkbox" id="owFloorAutoAdd" ${autoAdd ? 'checked' : ''} style="accent-color:#0064d2;">
+              Auto-add new areas
+            </label>
+          </div>
+          <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.07);border-radius:8px;overflow:hidden;">
+            ${floorAreas.length ? floorAreas.map(area => {
+              const isLinked = linkedAreaIds.includes(area.area_id);
+              const existingZone = zones.find(z => z.ha_area_id === area.area_id);
+              return `<label style="display:flex;align-items:center;gap:8px;padding:8px 12px;cursor:pointer;border-bottom:1px solid rgba(255,255,255,0.04);">
+                <input type="checkbox" class="ow-area-chk" data-area-id="${escapeHtml(area.area_id)}" data-area-name="${escapeHtml(area.name)}" ${isLinked ? 'checked' : ''} style="accent-color:#0064d2;flex-shrink:0;">
+                <span style="flex:1;font-size:12px;color:#ccc;">${escapeHtml(area.name)}</span>
+                ${existingZone ? `<span style="font-size:10px;color:#0096ff;background:rgba(0,100,255,0.1);padding:2px 6px;border-radius:4px;">${escapeHtml(existingZone.name)}</span>` : `<span style="font-size:10px;color:#555;">no zone</span>`}
+              </label>`;
+            }).join('') : '<div style="padding:12px;color:#555;font-size:12px;text-align:center;">No areas on this HA floor</div>'}
+          </div>
+        </div>
+      ` : ''}
+
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;">
+        <button id="owFloorRegistryRefresh" style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);color:#888;border-radius:8px;padding:7px 14px;cursor:pointer;font-size:12px;">↻ Refresh from HA</button>
+        <button id="owFloorConfigSave" style="background:rgba(0,100,210,0.2);border:1px solid rgba(0,100,210,0.4);color:#4db8ff;border-radius:8px;padding:7px 14px;cursor:pointer;font-size:12px;font-weight:600;">Save</button>
+      </div>
+    `;
+
+    // Wire close
+    panel.querySelector('#owFloorConfigClose').onclick = () => panel.remove();
+
+    // Wire HA floor select
+    panel.querySelector('#owFloorHASelect').onchange = async (e) => {
+      floor.ha_floor_id = e.target.value || null;
+      floor.ha_linked_area_ids = [];
+      await saveFloor(floor);
+      render();
+    };
+
+    // Wire auto-add checkbox
+    panel.querySelector('#owFloorAutoAdd')?.addEventListener('change', async (e) => {
+      floor.ha_auto_add_areas = e.target.checked;
+      await saveFloor(floor);
+    });
+
+    // Wire area checkboxes
+    panel.querySelectorAll('.ow-area-chk').forEach(chk => {
+      chk.addEventListener('change', async () => {
+        const areaId   = chk.dataset.areaId;
+        const areaName = chk.dataset.areaName;
+        if (!floor.ha_linked_area_ids) floor.ha_linked_area_ids = [];
+        if (chk.checked) {
+          if (!floor.ha_linked_area_ids.includes(areaId)) floor.ha_linked_area_ids.push(areaId);
+          // Auto-create OW zone if none exists for this area
+          const existing = zones.find(z => z.ha_area_id === areaId);
+          if (!existing) await createZoneFromHAArea(areaId, areaName, floor.id);
+        } else {
+          floor.ha_linked_area_ids = floor.ha_linked_area_ids.filter(id => id !== areaId);
+          // Note: we don't delete the zone — user manages that separately
+        }
+        await saveFloor(floor);
+        render();
+      });
+    });
+
+    // Wire registry refresh
+    panel.querySelector('#owFloorRegistryRefresh').onclick = async () => {
+      await fetch(apiPath('ow/ha-registry/refresh'), { method: 'POST' });
+      await loadHARegistry();
+      render();
+    };
+
+    // Wire save button — just closes (all changes are auto-saved above)
+    panel.querySelector('#owFloorConfigSave').onclick = () => { panel.remove(); showToast('Floor configuration saved ✓', 'ok'); };
+  }
+
+  render();
+  document.body.appendChild(panel);
+
+  // Dismiss on outside click
+  setTimeout(() => {
+    document.addEventListener('pointerdown', function dismiss(e) {
+      if (!panel.contains(e.target)) { panel.remove(); document.removeEventListener('pointerdown', dismiss); }
+    });
+  }, 100);
+}
+
+// Sync a zone's entity tabs from its linked HA area.
+// Adds new entities from the area; does not remove manually-added ones.
+// Entities in ha_excluded_entities are ghosted (not added).
+async function syncZoneFromHAArea(zone) {
+  if (!zone.ha_area_id || !_haRegistry.loaded) {
+    showToast('HA registry not loaded', 'warn'); return;
+  }
+  const areaEntities = haEntitiesForArea(zone.ha_area_id);
+  const excluded = new Set(zone.ha_excluded_entities || []);
+  let added = 0;
+
+  const addIfNew = (arr, eid) => {
+    if (!arr.includes(eid) && !excluded.has(eid)) { arr.push(eid); added++; }
+  };
+
+  areaEntities.filter(e => HA_AREA_FILTERS.sensors(e)).forEach(e => addIfNew(zone.sensors, e.entity_id));
+  areaEntities.filter(e => HA_AREA_FILTERS.cameras(e)).forEach(e => addIfNew(zone.cameras, e.entity_id));
+  areaEntities.filter(e => HA_AREA_FILTERS.lights(e)).forEach (e => addIfNew(zone.lights,  e.entity_id));
+  areaEntities.filter(e => HA_AREA_FILTERS.sirens(e)).forEach (e => addIfNew(zone.sirens,  e.entity_id));
+
+  // Door/window entities go into doorPins
+  const doorEntities = areaEntities.filter(e => HA_AREA_FILTERS.doors(e));
+  for (const e of doorEntities) {
+    if (!excluded.has(e.entity_id) && !doorPins.some(p => p.sensor_entity === e.entity_id)) {
+      const newPin = {
+        id: 'door_' + Date.now() + '_' + Math.random().toString(36).slice(2,6),
+        name: haStates[e.entity_id]?.attributes?.friendly_name || e.name || e.entity_id.split('.').pop().replace(/_/g,' '),
+        sensor_entity: e.entity_id, control_entity: null,
+        zone_id: zone.id, floor_id: zone.floor_id || null,
+        x: null, y: null, rotation: 0,
+      };
+      doorPins.push(newPin);
+      await saveDoorPin(newPin);
+      added++;
+    }
+  }
+
+  await saveZone(zone);
+  subscribeHAEntities();
+  showToast(`Synced ${added} entit${added === 1 ? 'y' : 'ies'} from HA area ✓`, added > 0 ? 'ok' : 'info');
+}
+
+// Create an OW zone linked to a HA area with no map points
+async function createZoneFromHAArea(areaId, areaName, floorId) {
+  const id = 'zone_' + areaId.replace(/[^a-z0-9]/gi, '_') + '_' + Date.now();
+  const zone = {
+    id, name: areaName, colorHex: '#0096ff', color: hexToRgba('#0096ff', 0.25),
+    enabled: true, hidden: false,
+    floor_id: floorId, ha_area_id: areaId,
+    points: [], sensors: [], cameras: [], lights: [], sirens: [], ha_excluded_entities: [],
+  };
+  zones.push(zone);
+  // Add to zone index
+  const idxRes = await fetch(ZONES_DIR + 'index.json?v=' + Date.now());
+  let index = idxRes.ok ? await idxRes.json() : [];
+  const filename = zoneFilename(id);
+  if (!index.includes(filename)) index.push(filename);
+  await fetch(apiPath('ow/save-zone'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ filename: 'index.json', content: JSON.stringify(index, null, 2) }) });
+  await saveZone(zone);
+  showToast(`Zone "${areaName}" created from HA area ✓`, 'ok');
+  renderZonesEditor();
+  return zone;
+}
+
 function renderFloorFlyout() {
   const existing = document.getElementById("floorFlyout");
   if (existing) existing.remove();
@@ -7749,15 +8076,24 @@ function renderFloorFlyout() {
       <span style="width:8px;height:8px;border-radius:50%;background:${dotColour};flex-shrink:0;display:inline-block;${hasTriggered ? "animation:pulse-dot 0.8s infinite;" : ""}"></span>
       <span style="flex:1;">${escapeHtml(f.name)}</span>
       <span style="font-size:10px;color:#555;">${floorZones.length} zone${floorZones.length !== 1 ? "s" : ""}</span>
+      ${editorMode ? `<span class="floor-config-btn" data-floor-id="${escapeHtml(f.id)}" style="font-size:12px;color:#555;padding:0 4px;cursor:pointer;" title="Configure floor">⚙</span>` : ''}
     `;
 
-    row.onclick = () => {
+    row.onclick = (e) => {
+      if (e.target.closest('.floor-config-btn')) return; // handled below
       setActiveFloor(f.id);
       // Re-render zone editor floor selector if open
       if (editorMode) renderZonesEditor();
       flyout.remove();
       document.getElementById("floorsBtn")?.classList.remove("active");
     };
+
+    row.querySelector('.floor-config-btn')?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      flyout.remove();
+      document.getElementById("floorsBtn")?.classList.remove("active");
+      openFloorConfigPanel(f.id);
+    });
 
     flyout.appendChild(row);
   });
@@ -7826,7 +8162,11 @@ function bindZonesButton() {
     isCreatingZone = false;
     isEditingPoints = false;
     currentNewZone = null;
-    if (editorMode) editorPosRestored = false; // allow position restore on open
+    if (editorMode) {
+      editorPosRestored = false; // allow position restore on open
+      // Load HA registry for floor/area linking (non-blocking)
+      if (!_haRegistry.loaded) loadHARegistry().then(() => renderZonesEditor());
+    }
     zonesBtn.classList.toggle("active", editorMode);
     const svg = document.getElementById("zonesSvg");
     if (svg) svg.style.pointerEvents = editorMode ? "all" : "none";

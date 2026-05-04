@@ -262,7 +262,11 @@ function nameSlug(name) {
 }
 
 // Zone triggered states — written by startHAListener, read by /ow/triggered endpoint
-const globalTriggeredZones = {}; // nameSlug(zone.name) -> bool
+// HA registry cache — populated by startHAListener on auth_ok
+const haRegistry = { floors: [], areas: [], devices: [], entities: [], loaded: false };
+const haRegistryCallbacks = {}; // msgId -> type being fetched
+
+
 
 // Full HA entity state cache — written by startHAListener, read by /ow/states endpoint
 // Keyed by entity_id, value is the full HA state object {entity_id, state, attributes, ...}
@@ -811,6 +815,27 @@ const server = http.createServer(async (req, res) => {
       console.error("[OW-Auto] /ow/ha-automations error:", e.message);
       json(res, []);
     }
+    return;
+  }
+
+  /* ── /ow/ha-registry — return HA floor/area/device/entity registry ── */
+  if (pathname === "/ow/ha-registry" && req.method === "GET") {
+    // Return cached registry data (populated by startHAListener on auth_ok)
+    if (haRegistry.loaded) {
+      json(res, haRegistry);
+      return;
+    }
+    // Not loaded yet (direct mode or not connected) — try REST API fallback
+    // HA REST doesn't expose registries directly, so return empty with a flag
+    json(res, { floors: [], areas: [], devices: [], entities: [], loaded: false, error: "Registry not available — ensure add-on is connected to HA" });
+    return;
+  }
+
+  /* ── /ow/ha-registry/refresh — re-fetch registry from HA ── */
+  if (pathname === "/ow/ha-registry/refresh" && req.method === "POST") {
+    haRegistry.loaded = false;
+    haRegistry.floors = []; haRegistry.areas = []; haRegistry.devices = []; haRegistry.entities = [];
+    json(res, { ok: true, message: "Registry refresh requested — reconnect to HA to reload" });
     return;
   }
 
@@ -1938,10 +1963,30 @@ function startHAListener() {
       send({ type: "subscribe_events", event_type: "state_changed" });
       // Fetch all current entity states into cache for /ow/states endpoint
       send({ type: "get_states" });
+      // Fetch HA registries for floor/area linking
+      const floorMsgId = msgId; send({ type: "config/floor_registry/list" });
+      haRegistryCallbacks[floorMsgId] = "floors";
+      const areaMsgId  = msgId; send({ type: "config/area_registry/list" });
+      haRegistryCallbacks[areaMsgId] = "areas";
+      const devMsgId   = msgId; send({ type: "config/device_registry/list" });
+      haRegistryCallbacks[devMsgId] = "devices";
+      const entMsgId   = msgId; send({ type: "config/entity_registry/list" });
+      haRegistryCallbacks[entMsgId] = "entities";
       return;
     }
     // Populate serverHaStates from get_states response
+    // Also handle registry responses
     if (msg.type === "result" && Array.isArray(msg.result)) {
+      const regType = haRegistryCallbacks[msg.id];
+      if (regType) {
+        delete haRegistryCallbacks[msg.id];
+        haRegistry[regType] = msg.result;
+        if (haRegistry.floors.length && haRegistry.areas.length && haRegistry.devices.length && haRegistry.entities.length) {
+          haRegistry.loaded = true;
+          console.log(`[HA-Overwatch] Registry loaded: ${haRegistry.floors.length} floors, ${haRegistry.areas.length} areas, ${haRegistry.devices.length} devices, ${haRegistry.entities.length} entities`);
+        }
+        return;
+      }
       msg.result.forEach(st => { if (st.entity_id) serverHaStates[st.entity_id] = st; });
       console.log(`[HA-Overwatch] State cache populated: ${Object.keys(serverHaStates).length} entities`);
       // Seed triggered zone state from current HA states — catches sensors already on at startup
