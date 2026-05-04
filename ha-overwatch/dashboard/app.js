@@ -2941,14 +2941,10 @@ function makeDoorPin(pin, isEdit, scale) {
   const ownerZone   = zones.find(z => z.id === pin.zone_id);
   const zoneArmed   = ownerZone ? getZoneState(ownerZone) !== 'disabled' : true;
 
-  // If "suppress door alerts for disarmed zones" is on, treat open doors as closed visually
-  const suppressDisarmed = localStorage.getItem('ow_hide_door_alert_disarmed') === 'true';
-  const effectivelyOpen  = isOpen && (zoneArmed || !suppressDisarmed);
-
   // Open door: use armed colour if zone armed, disarmed colour if zone disarmed
   // Closed door: always green (safe, shut)
   const colOpen = noSensor ? '#888' : zoneArmed ? colOnDoor : colOffDoor;
-  const col     = noSensor ? '#888' : effectivelyOpen ? colOpen : '#34c759';
+  const col     = noSensor ? '#888' : isOpen ? colOpen : '#34c759';
 
   const mk = (tag, attrs) => {
     const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
@@ -2987,7 +2983,7 @@ function makeDoorPin(pin, isEdit, scale) {
     iconG.appendChild(mk('line', { x1:-W/2+H, y1:0, x2:W/2-H, y2:0,
       stroke:col, 'stroke-width':T*0.4, 'stroke-dasharray':`${T*2},${T}` }));
     const panelW = (W - H*2) * 0.9;
-    if (effectivelyOpen) {
+    if (isOpen) {
       // Panel at left side
       iconG.appendChild(mk('rect', { x:-W/2+H, y:-H/2, width:panelW, height:H,
         fill:col, 'fill-opacity':'0.7', stroke:col, 'stroke-width':T*0.4 }));
@@ -3010,7 +3006,7 @@ function makeDoorPin(pin, isEdit, scale) {
       const panelDX = side === 'left' ? panelL : -panelL;
       // Hinge dot
       iconG.appendChild(mk('circle', { cx:hinge, cy:0, r:jT*0.6, fill:col }));
-      if (effectivelyOpen) {
+      if (isOpen) {
         const angle = side === 'left' ? -90 : 90;
         const pg = mk('g', { transform:`rotate(${angle},${hinge},0)` });
         pg.appendChild(mk('line', { x1:hinge, y1:0, x2:hinge+panelDX, y2:0,
@@ -3041,7 +3037,7 @@ function makeDoorPin(pin, isEdit, scale) {
     // Hinge dot
     iconG.appendChild(mk('circle', { cx:hinge, cy:0, r:jT*0.6, fill:col }));
 
-    if (effectivelyOpen) {
+    if (isOpen) {
       // Panel perpendicular — rotated 90° at hinge face, NO horizontal line
       const angle = doorHand === 'left' ? -90 : 90;
       const pg = mk('g', { transform:`rotate(${angle},${hinge},0)` });
@@ -3060,7 +3056,7 @@ function makeDoorPin(pin, isEdit, scale) {
   }
 
   // Aura when open — siren-style expanding rings, centred on door opening
-  if (effectivelyOpen && !isEdit) {
+  if (isOpen && !isEdit) {
     const auraRadius = pin.auraRadius || 3;
     const maxRingR   = (W/2) * (0.8 + auraRadius * 0.4);
     const minRingR   = W * 0.1;
