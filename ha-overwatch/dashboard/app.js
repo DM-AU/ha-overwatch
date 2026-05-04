@@ -3057,6 +3057,9 @@ function makeDoorPin(pin, isEdit, scale) {
 
   // Aura when open — siren-style expanding rings, centred on door opening
   if (isOpen && !isEdit) {
+    const suppressDisarmed = localStorage.getItem('ow_hide_door_alert_disarmed') === 'true';
+    const showAura = !suppressDisarmed || zoneArmed;
+    if (showAura) {
     const auraRadius = pin.auraRadius || 3;
     const maxRingR   = (W/2) * (0.8 + auraRadius * 0.4);
     const minRingR   = W * 0.1;
@@ -3080,6 +3083,7 @@ function makeDoorPin(pin, isEdit, scale) {
       iconG.appendChild(mk('circle', { cx:auraCX, cy:auraCY, r, fill:'none', stroke:colOpen,
         'stroke-width':T*0.8, opacity:op }));
     });
+    }
   }
 
   // Editor box
