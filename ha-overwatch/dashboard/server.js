@@ -265,8 +265,7 @@ function nameSlug(name) {
 // HA registry cache — populated by startHAListener on auth_ok
 const haRegistry = { floors: [], areas: [], devices: [], entities: [], loaded: false };
 const haRegistryCallbacks = {}; // msgId -> type being fetched
-// haMsgId is module-scoped so IDs are globally unique across startHAListener restarts.
-let haMsgId = 1;
+let haMsgId = 1; // module-scoped so IDs are unique across restarts
 
 
 
@@ -274,7 +273,6 @@ let haMsgId = 1;
 // Keyed by entity_id, value is the full HA state object {entity_id, state, attributes, ...}
 const serverHaStates = {};
 
-// Zone triggered state — keyed by zone slug, value is bool
 // Declared at module scope so /ow/triggered works before startHAListener connects
 const globalTriggeredZones = {};
 
@@ -1513,11 +1511,7 @@ class OWSwitch(CoordinatorEntity, SwitchEntity, RestoreEntity):
 
     @callback
     def _handle_coordinator_update(self) -> None:
-        # Do NOT call async_write_ha_state() here.
-        # CoordinatorEntity's default implementation would re-publish self._is_on,
-        # bouncing the switch back to its pre-toggle state whenever the coordinator
-        # refreshes (every ~30s). State is authoritative in HA — we only restore
-        # it on startup via async_get_last_state().
+        # Do not republish state on coordinator refresh — state is authoritative in HA
         pass
 
 
@@ -1621,7 +1615,6 @@ from homeassistant.components.binary_sensor import BinarySensorDeviceClass, Bina
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
-from homeassistant.core import callback
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -1913,7 +1906,6 @@ function startHAListener() {
       }, 30000);
 
       sock.on("data", chunk => {
-        if (!connected || buf === null) return;
         buf = Buffer.concat([buf, chunk]);
         while (buf.length >= 2) {
           const used = frameLength(buf);
@@ -1929,18 +1921,14 @@ function startHAListener() {
       });
 
       sock.on("close", () => {
-        if (!connected) return;
         connected = false;
         clearInterval(pingTimer);
-        buf = null;
         console.log("[HA-Overwatch] HA listener disconnected");
         scheduleReconnect();
       });
       sock.on("error", e => {
-        if (!connected) return;
         connected = false;
         clearInterval(pingTimer);
-        buf = null;
         console.error("[HA-Overwatch] HA listener error:", e.message);
         scheduleReconnect();
       });
@@ -1980,11 +1968,11 @@ function startHAListener() {
     }
     if (msg.type === "auth_ok") {
       refreshZoneCache();
-      if (zoneCacheTimer) clearInterval(zoneCacheTimer);
-      zoneCacheTimer = setInterval(refreshZoneCache, 60000);
+      setInterval(refreshZoneCache, 60000); // keep cache fresh
       send({ type: "subscribe_events", event_type: "state_changed" });
+      // Fetch all current entity states into cache for /ow/states endpoint
       send({ type: "get_states" });
-      // Clear stale callbacks — prevents old IDs from silently discarding get_states
+      // Fetch HA registries — clear stale callbacks first
       Object.keys(haRegistryCallbacks).forEach(k => delete haRegistryCallbacks[k]);
       const floorMsgId = haMsgId; send({ type: "config/floor_registry/list" });
       haRegistryCallbacks[floorMsgId] = "floors";
@@ -2249,12 +2237,8 @@ function startHAListener() {
     req.end();
   }
 
-  let zoneCacheTimer = null;
-  let reconnectScheduled = false;
   function scheduleReconnect() {
-    if (reconnectScheduled) return;
-    reconnectScheduled = true;
-    setTimeout(() => { reconnectScheduled = false; connect(); }, reconnectDelay);
+    setTimeout(connect, reconnectDelay);
     reconnectDelay = Math.min(reconnectDelay * 2, 60000);
   }
 
