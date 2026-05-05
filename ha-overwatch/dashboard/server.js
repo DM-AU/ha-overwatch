@@ -1393,6 +1393,7 @@ from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
+from homeassistant.core import callback
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
@@ -1510,6 +1511,15 @@ class OWSwitch(CoordinatorEntity, SwitchEntity, RestoreEntity):
         self._is_on = False
         self.async_write_ha_state()
 
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        # Do NOT call async_write_ha_state() here.
+        # CoordinatorEntity's default implementation would re-publish self._is_on,
+        # bouncing the switch back to its pre-toggle state whenever the coordinator
+        # refreshes (every ~30s). State is authoritative in HA — we only restore
+        # it on startup via async_get_last_state().
+        pass
+
 
 class OverwatchMasterSwitch(OWSwitch):
     def __init__(self, c):
@@ -1592,9 +1602,6 @@ class OverwatchCameraZoneSwitch(OWSwitch):
 class OverwatchCameraSwitch(OWSwitch):
     def __init__(self, c, cam):
         cid = cam["id"]
-        # Strip "camera." prefix so entity ID matches browser + server JS slug logic.
-        # Without this: camera.office_hr → switch.overwatch_camera_camera_office_hr (wrong)
-        # With this:    camera.office_hr → switch.overwatch_camera_office_hr (correct)
         bare = cid[len("camera."):] if cid.startswith("camera.") else cid
         safe = bare.replace(".", "_").replace("-", "_")
         super().__init__(c,
@@ -1614,6 +1621,7 @@ from homeassistant.components.binary_sensor import BinarySensorDeviceClass, Bina
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
+from homeassistant.core import callback
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -1866,9 +1874,6 @@ function startHAListener() {
   if (!process.env.SUPERVISOR_TOKEN) return;
 
   let reconnectDelay = 5000;
-  // msgId is module-scoped so IDs are unique across reconnects.
-  // If reset to 1 on each reconnect, old haRegistryCallbacks entries
-  // would match new responses and silently discard get_states results.
   function connect() {
     const crypto = require("crypto");
     const wsKey  = crypto.randomBytes(16).toString("base64");
@@ -1908,7 +1913,7 @@ function startHAListener() {
       }, 30000);
 
       sock.on("data", chunk => {
-        if (!connected || buf === null) return; // guard after disconnect
+        if (!connected || buf === null) return;
         buf = Buffer.concat([buf, chunk]);
         while (buf.length >= 2) {
           const used = frameLength(buf);
@@ -1924,18 +1929,18 @@ function startHAListener() {
       });
 
       sock.on("close", () => {
-        if (!connected) return; // prevent double-schedule if error already fired
+        if (!connected) return;
         connected = false;
         clearInterval(pingTimer);
-        buf = null; // release buffer memory
+        buf = null;
         console.log("[HA-Overwatch] HA listener disconnected");
         scheduleReconnect();
       });
       sock.on("error", e => {
-        if (!connected) return; // prevent double-schedule if close already fired
+        if (!connected) return;
         connected = false;
         clearInterval(pingTimer);
-        buf = null; // release buffer memory
+        buf = null;
         console.error("[HA-Overwatch] HA listener error:", e.message);
         scheduleReconnect();
       });
@@ -2244,6 +2249,7 @@ function startHAListener() {
     req.end();
   }
 
+  let zoneCacheTimer = null;
   let reconnectScheduled = false;
   function scheduleReconnect() {
     if (reconnectScheduled) return;
