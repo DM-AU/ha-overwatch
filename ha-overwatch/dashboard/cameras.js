@@ -25,7 +25,9 @@ function camUseServerState() {
   return localStorage.getItem(CAM_MODE_KEY) !== 'device';
 }
 
-// Read camera/zone toggle state from HA switch entities or localStorage
+// Read camera toggle state from HA switch entities or localStorage
+// For zone/group/global: DERIVED from children (any camera off = parent off)
+// This means zone/group toggles REFLECT child state rather than having independent state.
 function camIsEnabled(type, key) {
   if (!camUseServerState()) {
     // Device mode — use localStorage
@@ -33,25 +35,44 @@ function camIsEnabled(type, key) {
     if (type === 'zone')   return localStorage.getItem(CAM_ZONE_PREFIX   + key) !== 'false';
     return localStorage.getItem(CAM_GLOBAL_KEY) !== 'false';
   }
-  // Server mode — read from HA switch entity state via haStates
+
+  // Server mode — cameras read from HA switch entity state
   const haStates = window.OW?.haStates || {};
+
   if (type === 'camera') {
-    // Strip camera. prefix then slugify to match entity ID
     const safe = key.replace(/^camera\./, '').replace(/[^a-z0-9]+/g, '_');
     const st   = haStates[`switch.overwatch_camera_${safe}`];
     return st ? st.state !== 'off' : true;
   }
+
+  // Zone: ON only if ALL cameras in the zone are ON (any off = zone off)
   if (type === 'zone') {
-    // zone.id is raw file ID — convert to name slug to match entity ID
     const zones = window.OW?.zones || [];
     const zone  = zones.find(z => z.id === key || nameSlug(z.name) === key);
-    const slug  = zone ? nameSlug(zone.name) : nameSlug(key);
-    const st    = haStates[`switch.overwatch_camera_zone_${slug || key}`];
-    return st ? st.state !== 'off' : true;
+    if (!zone) return true;
+    const cameras = zone.cameras || [];
+    if (!cameras.length) return true;
+    return cameras.every(camId => camIsEnabled('camera', camId));
   }
-  // global — check camera_all switch
-  const st = haStates['switch.overwatch_camera_all'];
-  return st ? st.state !== 'off' : true;
+
+  // Group: ON only if ALL cameras in ALL member zones are ON
+  if (type === 'camera_group' || type === 'group') {
+    const zones  = window.OW?.zones  || [];
+    const groups = window.OW?.groups || [];
+    const group  = groups.find(g => g.id === key || nameSlug(g.name) === key);
+    if (!group) return true;
+    const memberZones = (group.zone_ids || [])
+      .map(zid => zones.find(z => z.id === zid))
+      .filter(z => z && (z.cameras || []).length > 0);
+    if (!memberZones.length) return true;
+    return memberZones.every(z => camIsEnabled('zone', z.id));
+  }
+
+  // Global: ON only if ALL cameras across all zones are ON
+  const zones = window.OW?.zones || [];
+  const allCams = zones.flatMap(z => z.cameras || []);
+  if (!allCams.length) return true;
+  return allCams.every(camId => camIsEnabled('camera', camId));
 }
 
 // Set camera/zone toggle — calls HA switch service or writes localStorage
@@ -601,8 +622,8 @@ function renderCameraStatusBar() {
       const gCollapsed = localStorage.getItem(gColKey) !== 'expanded';
       const gDot       = groupDotState(group, zones, activeIds);
 
-      // Group is "on" if ALL member zones are on per current mode
-      const gAllOn = memberZones.every(z => camIsEnabled('zone', z.id));
+      // Group is "on" if ALL cameras in all member zones are on (derived from children)
+      const gAllOn = camIsEnabled('group', group.id);
 
       zonesHtml += `
         <div class="cam-dd-group-header${gCollapsed ? ' collapsed' : ''}"
@@ -855,7 +876,36 @@ function renderCameraStatusBar() {
       const camId = e.target.dataset.camId;
       const on    = e.target.checked;
       await camSetEnabled('camera', camId, on);
-      if (!camUseServerState()) {
+
+      if (camUseServerState()) {
+        // Server mode: bottom-up cascade — update zone and group switches to reflect new state.
+        // The zone/group switch state is DERIVED from children (any off = parent off).
+        // We update the zone switch immediately so /ow/states reflects truth on next poll.
+        const parentZone = zones.find(z => (z.cameras || []).includes(camId));
+        if (parentZone) {
+          // Zone is ON only if ALL its cameras are still ON after this change
+          const zoneNowOn = (parentZone.cameras || []).every(id =>
+            id === camId ? on : camIsEnabled('camera', id)
+          );
+          camSetEnabled('zone', parentZone.id, zoneNowOn);
+
+          // Group containing this zone: ON only if ALL member zones are now ON
+          const parentGroup = (groups || []).find(g =>
+            (g.zone_ids || []).includes(parentZone.id)
+          );
+          if (parentGroup) {
+            const memberZones = (parentGroup.zone_ids || [])
+              .map(zid => zones.find(z => z.id === zid))
+              .filter(z => z && (z.cameras || []).length > 0);
+            const groupNowOn = memberZones.every(z =>
+              z.id === parentZone.id ? zoneNowOn : camIsEnabled('zone', z.id)
+            );
+            camSetEnabled('camera_group', parentGroup.id, groupNowOn);
+          }
+        }
+        // Re-render will happen on next /ow/states poll (Direct Mode) or WS state_changed
+      } else {
+        // Device mode: update localStorage bottom-up
         localStorage.setItem(CAM_TOGGLE_PREFIX + camId, on ? 'true' : 'false');
         const parentZone = zones.find(z => (z.cameras || []).includes(camId));
         if (parentZone) {
