@@ -68,11 +68,10 @@ function camIsEnabled(type, key) {
     return memberZones.every(z => camIsEnabled('zone', z.id));
   }
 
-  // Global: ON only if ALL cameras across all zones are ON
-  const zones = window.OW?.zones || [];
-  const allCams = zones.flatMap(z => z.cameras || []);
-  if (!allCams.length) return true;
-  return allCams.every(camId => camIsEnabled('camera', camId));
+  // Global: read directly from HA switch — it is an independent master override,
+  // not derived from children. Turning any camera off should not turn off the master.
+  const st = haStates['switch.overwatch_camera_all'];
+  return st ? st.state !== 'off' : true;
 }
 
 // Set camera/zone toggle — calls HA switch service or writes localStorage
@@ -901,6 +900,7 @@ function renderCameraStatusBar() {
               z.id === parentZone.id ? zoneNowOn : camIsEnabled('zone', z.id)
             );
             camSetEnabled('camera_group', parentGroup.id, groupNowOn);
+            // Do NOT cascade further to global/master — it is an independent override
           }
         }
         // Re-render will happen on next /ow/states poll (Direct Mode) or WS state_changed
