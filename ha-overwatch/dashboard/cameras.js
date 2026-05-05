@@ -892,16 +892,10 @@ function renderCameraStatusBar() {
           const parentGroup = (groups || []).find(g =>
             (g.zone_ids || []).includes(parentZone.id)
           );
-          if (parentGroup) {
-            const memberZones = (parentGroup.zone_ids || [])
-              .map(zid => zones.find(z => z.id === zid))
-              .filter(z => z && (z.cameras || []).length > 0);
-            const groupNowOn = memberZones.every(z =>
-              z.id === parentZone.id ? zoneNowOn : camIsEnabled('zone', z.id)
-            );
-            camSetEnabled('camera_group', parentGroup.id, groupNowOn);
-            // Do NOT cascade further to global/master — it is an independent override
-          }
+          // Do NOT call camSetEnabled for the group — group display is derived from
+          // children via camIsEnabled('group') so it reflects correctly without writing
+          // to HA. Writing to the group HA switch would trigger server-side cascadeSwitchState
+          // which would turn off ALL zones in the group, not just the one camera's zone.
         }
         // Re-render will happen on next /ow/states poll (Direct Mode) or WS state_changed
       } else {
