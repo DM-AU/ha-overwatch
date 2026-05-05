@@ -1253,6 +1253,7 @@ import aiohttp
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_URL, Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from .const import DOMAIN
 
@@ -1272,12 +1273,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     try:
         await zone_coordinator.async_config_entry_first_refresh()
     except Exception as err:
-        _LOGGER.error("Failed to fetch zone structure: %s", err)
-        return False
+        # Raise ConfigEntryNotReady so HA retries automatically with backoff.
+        # This handles the race condition where the add-on hasn't started yet
+        # when HA Core loads the integration on startup.
+        raise ConfigEntryNotReady(f"Cannot reach HA Overwatch add-on: {err}") from err
 
     # Triggered state coordinator — polls /ow/triggered every 2s
     triggered_coordinator = TriggeredCoordinator(hass, url)
-    await triggered_coordinator.async_config_entry_first_refresh()
+    try:
+        await triggered_coordinator.async_config_entry_first_refresh()
+    except Exception as err:
+        raise ConfigEntryNotReady(f"Cannot reach HA Overwatch add-on (triggered): {err}") from err
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {
         "zone_coordinator":     zone_coordinator,
