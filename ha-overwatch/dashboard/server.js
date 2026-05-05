@@ -1906,6 +1906,7 @@ function startHAListener() {
       }, 30000);
 
       sock.on("data", chunk => {
+        if (!connected || buf === null) return;
         buf = Buffer.concat([buf, chunk]);
         while (buf.length >= 2) {
           const used = frameLength(buf);
@@ -1921,14 +1922,18 @@ function startHAListener() {
       });
 
       sock.on("close", () => {
+        if (!connected) return;
         connected = false;
         clearInterval(pingTimer);
+        buf = null; // release buffer memory
         console.log("[HA-Overwatch] HA listener disconnected");
         scheduleReconnect();
       });
       sock.on("error", e => {
+        if (!connected) return;
         connected = false;
         clearInterval(pingTimer);
+        buf = null; // release buffer memory
         console.error("[HA-Overwatch] HA listener error:", e.message);
         scheduleReconnect();
       });
@@ -1945,6 +1950,7 @@ function startHAListener() {
   const triggeredZones = {};  // "zone.id::sensor_id" -> bool, "zone.id" -> bool
   let   cachedZones    = [];  // refreshed every 60s and on auth_ok
   let   sensorToZones  = {};  // entityId -> [zone, ...] for fast lookup
+  let   zoneCacheTimer = null; // tracked so we don't stack intervals on reconnect
 
   function refreshZoneCache() {
     cachedZones   = loadZones();
@@ -1968,7 +1974,8 @@ function startHAListener() {
     }
     if (msg.type === "auth_ok") {
       refreshZoneCache();
-      setInterval(refreshZoneCache, 60000); // keep cache fresh
+      if (zoneCacheTimer) clearInterval(zoneCacheTimer);
+      zoneCacheTimer = setInterval(refreshZoneCache, 60000); // keep cache fresh
       send({ type: "subscribe_events", event_type: "state_changed" });
       // Fetch all current entity states into cache for /ow/states endpoint
       send({ type: "get_states" });
@@ -2237,8 +2244,11 @@ function startHAListener() {
     req.end();
   }
 
+  let reconnectScheduled = false;
   function scheduleReconnect() {
-    setTimeout(connect, reconnectDelay);
+    if (reconnectScheduled) return;
+    reconnectScheduled = true;
+    setTimeout(() => { reconnectScheduled = false; connect(); }, reconnectDelay);
     reconnectDelay = Math.min(reconnectDelay * 2, 60000);
   }
 
