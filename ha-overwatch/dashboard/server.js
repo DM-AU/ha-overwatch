@@ -265,6 +265,8 @@ function nameSlug(name) {
 // HA registry cache — populated by startHAListener on auth_ok
 const haRegistry = { floors: [], areas: [], devices: [], entities: [], loaded: false };
 const haRegistryCallbacks = {}; // msgId -> type being fetched
+// haMsgId is module-scoped so IDs are globally unique across startHAListener restarts.
+let haMsgId = 1;
 
 
 
@@ -1860,8 +1862,9 @@ function startHAListener() {
   if (!process.env.SUPERVISOR_TOKEN) return;
 
   let reconnectDelay = 5000;
-  let msgId = 1;
-
+  // msgId is module-scoped so IDs are unique across reconnects.
+  // If reset to 1 on each reconnect, old haRegistryCallbacks entries
+  // would match new responses and silently discard get_states results.
   function connect() {
     const crypto = require("crypto");
     const wsKey  = crypto.randomBytes(16).toString("base64");
@@ -1888,7 +1891,7 @@ function startHAListener() {
       let connected = true;
 
       function send(obj) {
-        sendWsFrame(sock, JSON.stringify({ ...obj, id: msgId++ }));
+        sendWsFrame(sock, JSON.stringify({ ...obj, id: haMsgId++ }));
       }
 
       // Send a ping every 30s to keep connection alive
@@ -1945,7 +1948,6 @@ function startHAListener() {
   const triggeredZones = {};  // "zone.id::sensor_id" -> bool, "zone.id" -> bool
   let   cachedZones    = [];  // refreshed every 60s and on auth_ok
   let   sensorToZones  = {};  // entityId -> [zone, ...] for fast lookup
-  let   zoneCacheTimer = null; // track interval so it is not duplicated on reconnect
 
   function refreshZoneCache() {
     cachedZones   = loadZones();
@@ -1970,19 +1972,18 @@ function startHAListener() {
     if (msg.type === "auth_ok") {
       refreshZoneCache();
       if (zoneCacheTimer) clearInterval(zoneCacheTimer);
-      zoneCacheTimer = setInterval(refreshZoneCache, 60000); // keep cache fresh
+      zoneCacheTimer = setInterval(refreshZoneCache, 60000);
       send({ type: "subscribe_events", event_type: "state_changed" });
-      // Fetch all current entity states into cache for /ow/states endpoint
       send({ type: "get_states" });
-      // Fetch HA registries for floor/area linking
+      // Clear stale callbacks — prevents old IDs from silently discarding get_states
       Object.keys(haRegistryCallbacks).forEach(k => delete haRegistryCallbacks[k]);
-      const floorMsgId = msgId; send({ type: "config/floor_registry/list" });
+      const floorMsgId = haMsgId; send({ type: "config/floor_registry/list" });
       haRegistryCallbacks[floorMsgId] = "floors";
-      const areaMsgId  = msgId; send({ type: "config/area_registry/list" });
+      const areaMsgId  = haMsgId; send({ type: "config/area_registry/list" });
       haRegistryCallbacks[areaMsgId] = "areas";
-      const devMsgId   = msgId; send({ type: "config/device_registry/list" });
+      const devMsgId   = haMsgId; send({ type: "config/device_registry/list" });
       haRegistryCallbacks[devMsgId] = "devices";
-      const entMsgId   = msgId; send({ type: "config/entity_registry/list" });
+      const entMsgId   = haMsgId; send({ type: "config/entity_registry/list" });
       haRegistryCallbacks[entMsgId] = "entities";
       return;
     }
