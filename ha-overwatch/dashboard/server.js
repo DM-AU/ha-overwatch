@@ -1592,7 +1592,11 @@ class OverwatchCameraZoneSwitch(OWSwitch):
 class OverwatchCameraSwitch(OWSwitch):
     def __init__(self, c, cam):
         cid = cam["id"]
-        safe = cid.replace(".", "_").replace("-", "_")
+        # Strip "camera." prefix so entity ID matches browser + server JS slug logic.
+        # Without this: camera.office_hr → switch.overwatch_camera_camera_office_hr (wrong)
+        # With this:    camera.office_hr → switch.overwatch_camera_office_hr (correct)
+        bare = cid[len("camera."):] if cid.startswith("camera.") else cid
+        safe = bare.replace(".", "_").replace("-", "_")
         super().__init__(c,
             entity_id=f"switch.overwatch_camera_{safe}",
             unique_id=f"overwatch_camera_{safe}",
