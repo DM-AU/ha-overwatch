@@ -127,7 +127,7 @@ async function camSetEnabled(type, key, state) {
 }
 
 /* ── Module state ────────────────────────────────────────────── */
-let camMode        = 'live';   // 'snapshot' | 'live'
+let camMode        = 'snapshot';   // 'snapshot' | 'live'
 let camPinned      = new Set();    // Set of pinned camera entity ids
 let camToggled     = {};           // { entityId: bool } — false = user disabled
 let camZoneToggled = {};           // { zoneId: bool } — false = zone disabled on cam page
@@ -433,7 +433,10 @@ function attachFailureHandler(img, entityId) {
       // Retry with exponential backoff up to 5s
       const delay = Math.min(1000 * failCount, 5000);
       setTimeout(() => {
-        if (!camHidden.has(entityId)) img.src = camSnapshotUrl(entityId) ;
+        if (!camHidden.has(entityId)) {
+          const tileEnt = tileEntityFor(entityId);
+          img.src = camMode === 'live' ? camStreamUrl(tileEnt) : camSnapshotUrl(tileEnt);
+        }
       }, delay);
     }
   };
