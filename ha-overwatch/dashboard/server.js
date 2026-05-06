@@ -272,9 +272,6 @@ let haMsgId = 1; // module-scoped so IDs are unique across restarts
 // Full HA entity state cache — written by startHAListener, read by /ow/states endpoint
 // Keyed by entity_id, value is the full HA state object {entity_id, state, attributes, ...}
 const serverHaStates = {};
-// Per-camera in-flight request tracker — prevents unbounded concurrency when
-// browsers poll faster than cameras respond, which causes Node heap growth.
-const camProxyInFlight = new Set();
 
 // Declared at module scope so /ow/triggered works before startHAListener connects
 const globalTriggeredZones = {};
@@ -1149,16 +1146,6 @@ const server = http.createServer(async (req, res) => {
         ? `/api/camera_proxy_stream/${entity}`
         : `/api/camera_proxy/${entity}`;
 
-      // Concurrency guard — if a request for this camera is already in flight,
-      // return 429 immediately rather than stacking another connection.
-      // This prevents heap growth when browsers poll faster than cameras respond.
-      if (!isStream && camProxyInFlight.has(entity)) {
-        res.writeHead(429, { "Content-Type": "text/plain", "Retry-After": "1" });
-        res.end("busy");
-        return;
-      }
-      if (!isStream) camProxyInFlight.add(entity);
-
       console.log(`[CAM PROXY] ${isStream ? "stream" : "snap"} → ${entity}`);
 
       let parsed;
@@ -1182,14 +1169,8 @@ const server = http.createServer(async (req, res) => {
         if (haRes.headers["content-length"]) fwdHeaders["Content-Length"] = haRes.headers["content-length"];
         res.writeHead(haRes.statusCode, fwdHeaders);
         haRes.pipe(res);
-        haRes.on("end",   () => camProxyInFlight.delete(entity));
-        haRes.on("error", () => camProxyInFlight.delete(entity));
       });
-      haReq.on("error", e => {
-        camProxyInFlight.delete(entity);
-        console.error("[CAM PROXY] error:", e.message);
-        err(res, "Proxy error", 502);
-      });
+      haReq.on("error", e => { console.error("[CAM PROXY] error:", e.message); err(res, "Proxy error", 502); });
       haReq.end();
     } catch (e) { console.error("[CAM PROXY] exception:", e.message); err(res, e.message, 500); }
     return;
@@ -1272,7 +1253,6 @@ import aiohttp
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_URL, Platform
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from .const import DOMAIN
 
@@ -1292,17 +1272,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     try:
         await zone_coordinator.async_config_entry_first_refresh()
     except Exception as err:
-        # Raise ConfigEntryNotReady so HA retries automatically with backoff.
-        # This handles the race condition where the add-on hasn't started yet
-        # when HA Core loads the integration on startup.
-        raise ConfigEntryNotReady(f"Cannot reach HA Overwatch add-on: {err}") from err
+        _LOGGER.error("Failed to fetch zone structure: %s", err)
+        return False
 
     # Triggered state coordinator — polls /ow/triggered every 2s
     triggered_coordinator = TriggeredCoordinator(hass, url)
-    try:
-        await triggered_coordinator.async_config_entry_first_refresh()
-    except Exception as err:
-        raise ConfigEntryNotReady(f"Cannot reach HA Overwatch add-on (triggered): {err}") from err
+    await triggered_coordinator.async_config_entry_first_refresh()
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {
         "zone_coordinator":     zone_coordinator,
@@ -1349,7 +1324,7 @@ class TriggeredCoordinator(DataUpdateCoordinator):
 
     def __init__(self, hass: HomeAssistant, url: str) -> None:
         super().__init__(hass, _LOGGER, name="HA Overwatch Triggered",
-            update_interval=timedelta(seconds=5))
+            update_interval=timedelta(seconds=2))
         self.url = url
 
     async def _async_update_data(self) -> dict:
