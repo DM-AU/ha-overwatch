@@ -272,6 +272,9 @@ let haMsgId = 1; // module-scoped so IDs are unique across restarts
 // Full HA entity state cache — written by startHAListener, read by /ow/states endpoint
 // Keyed by entity_id, value is the full HA state object {entity_id, state, attributes, ...}
 const serverHaStates = {};
+// Per-camera in-flight request tracker — prevents unbounded concurrency when
+// browsers poll faster than cameras respond, which causes Node heap growth.
+const camProxyInFlight = new Set();
 
 // Declared at module scope so /ow/triggered works before startHAListener connects
 const globalTriggeredZones = {};
@@ -1146,6 +1149,16 @@ const server = http.createServer(async (req, res) => {
         ? `/api/camera_proxy_stream/${entity}`
         : `/api/camera_proxy/${entity}`;
 
+      // Concurrency guard — if a request for this camera is already in flight,
+      // return 429 immediately rather than stacking another connection.
+      // This prevents heap growth when browsers poll faster than cameras respond.
+      if (!isStream && camProxyInFlight.has(entity)) {
+        res.writeHead(429, { "Content-Type": "text/plain", "Retry-After": "1" });
+        res.end("busy");
+        return;
+      }
+      if (!isStream) camProxyInFlight.add(entity);
+
       console.log(`[CAM PROXY] ${isStream ? "stream" : "snap"} → ${entity}`);
 
       let parsed;
@@ -1169,8 +1182,14 @@ const server = http.createServer(async (req, res) => {
         if (haRes.headers["content-length"]) fwdHeaders["Content-Length"] = haRes.headers["content-length"];
         res.writeHead(haRes.statusCode, fwdHeaders);
         haRes.pipe(res);
+        haRes.on("end",   () => camProxyInFlight.delete(entity));
+        haRes.on("error", () => camProxyInFlight.delete(entity));
       });
-      haReq.on("error", e => { console.error("[CAM PROXY] error:", e.message); err(res, "Proxy error", 502); });
+      haReq.on("error", e => {
+        camProxyInFlight.delete(entity);
+        console.error("[CAM PROXY] error:", e.message);
+        err(res, "Proxy error", 502);
+      });
       haReq.end();
     } catch (e) { console.error("[CAM PROXY] exception:", e.message); err(res, e.message, 500); }
     return;
@@ -1330,7 +1349,7 @@ class TriggeredCoordinator(DataUpdateCoordinator):
 
     def __init__(self, hass: HomeAssistant, url: str) -> None:
         super().__init__(hass, _LOGGER, name="HA Overwatch Triggered",
-            update_interval=timedelta(seconds=2))
+            update_interval=timedelta(seconds=5))
         self.url = url
 
     async def _async_update_data(self) -> dict:
