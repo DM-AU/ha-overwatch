@@ -127,7 +127,7 @@ async function camSetEnabled(type, key, state) {
 }
 
 /* ── Module state ────────────────────────────────────────────── */
-let camMode        = 'snapshot';   // 'snapshot' | 'live'
+let camMode        = 'live';       // 'snapshot' | 'live' — live is default
 let camPinned      = new Set();    // Set of pinned camera entity ids
 let camToggled     = {};           // { entityId: bool } — false = user disabled
 let camZoneToggled = {};           // { zoneId: bool } — false = zone disabled on cam page
@@ -436,10 +436,14 @@ function attachFailureHandler(img, entityId) {
         }
       }, 60000);
     } else {
-      // Retry with exponential backoff up to 5s
+      // Retry with exponential backoff up to 5s.
+      // In live mode retry the stream, not a snapshot.
       const delay = Math.min(1000 * failCount, 5000);
       setTimeout(() => {
-        if (!camHidden.has(entityId)) img.src = camSnapshotUrl(entityId) ;
+        if (!camHidden.has(entityId)) {
+          const tileEnt = tileEntityFor(entityId);
+          img.src = camMode === 'live' ? camStreamUrl(tileEnt) : camSnapshotUrl(tileEnt);
+        }
       }, delay);
     }
   };
@@ -450,7 +454,7 @@ function attachFailureHandler(img, entityId) {
 function openCameraModal(entityId) {
   camModalOpen    = true;
   camModalEntityId = entityId;
-  camModalMode    = (window.OW.uiConfig.cam_default_mode || 'snapshot') === 'live' ? 'live' : 'snapshot';
+  camModalMode    = 'live';
 
   const modal   = document.getElementById('cameraModal');
   const title   = document.getElementById('camModalTitle');
@@ -1170,6 +1174,10 @@ async function initCameraPage() {
     camPinned = new Set(JSON.parse(stored || OW.uiConfig.cam_pinned || '[]'));
   } catch { camPinned = new Set(); }
 
+  // Set camera mode — live is default, snapshot is user-selectable per device
+  const savedMode = localStorage.getItem('ow_cam_mode');
+  camMode = savedMode === 'snapshot' ? 'snapshot' : 'live';
+
   // Expose for settings panel source toggle
   window.renderCameraStatusBar = renderCameraStatusBar;
   window.openCameraModal       = openCameraModal;
@@ -1206,6 +1214,7 @@ async function initCameraPage() {
   window._camSetMode = (mode) => {
     if (camMode === mode) return;
     camMode = mode;
+    localStorage.setItem('ow_cam_mode', mode);
     if (mode === 'live') { stopSnapshotRefresh(); } else { startSnapshotRefresh(); }
     const grid = document.getElementById('cameraGrid');
     if (grid) grid.innerHTML = '';
