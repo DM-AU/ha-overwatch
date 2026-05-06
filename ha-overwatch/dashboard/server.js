@@ -276,6 +276,9 @@ const serverHaStates = {};
 // Declared at module scope so /ow/triggered works before startHAListener connects
 const globalTriggeredZones = {};
 
+// Per-camera in-flight request tracker to prevent unbounded proxy concurrency
+const camProxyInFlight = new Set();
+
 /* ── Parse HA automations.yaml without a YAML library ─────────
  * HA's automations.yaml is a YAML list of objects. We need to
  * extract enough fields to identify and round-trip OW automations:
@@ -1146,6 +1149,13 @@ const server = http.createServer(async (req, res) => {
         ? `/api/camera_proxy_stream/${entity}`
         : `/api/camera_proxy/${entity}`;
 
+      if (!isStream && camProxyInFlight.has(entity)) {
+        res.writeHead(429, { "Content-Type": "text/plain", "Retry-After": "1" });
+        res.end("busy");
+        return;
+      }
+      if (!isStream) camProxyInFlight.add(entity);
+
       console.log(`[CAM PROXY] ${isStream ? "stream" : "snap"} → ${entity}`);
 
       let parsed;
@@ -1169,8 +1179,14 @@ const server = http.createServer(async (req, res) => {
         if (haRes.headers["content-length"]) fwdHeaders["Content-Length"] = haRes.headers["content-length"];
         res.writeHead(haRes.statusCode, fwdHeaders);
         haRes.pipe(res);
+        haRes.on("end",   () => camProxyInFlight.delete(entity));
+        haRes.on("error", () => camProxyInFlight.delete(entity));
       });
-      haReq.on("error", e => { console.error("[CAM PROXY] error:", e.message); err(res, "Proxy error", 502); });
+      haReq.on("error", e => {
+        camProxyInFlight.delete(entity);
+        console.error("[CAM PROXY] error:", e.message);
+        err(res, "Proxy error", 502);
+      });
       haReq.end();
     } catch (e) { console.error("[CAM PROXY] exception:", e.message); err(res, e.message, 500); }
     return;
@@ -1253,6 +1269,7 @@ import aiohttp
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_URL, Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from .const import DOMAIN
 
@@ -1272,8 +1289,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     try:
         await zone_coordinator.async_config_entry_first_refresh()
     except Exception as err:
-        _LOGGER.error("Failed to fetch zone structure: %s", err)
-        return False
+        raise ConfigEntryNotReady(f"Cannot reach HA Overwatch add-on: {err}") from err
 
     # Triggered state coordinator — polls /ow/triggered every 2s
     triggered_coordinator = TriggeredCoordinator(hass, url)
@@ -1324,7 +1340,7 @@ class TriggeredCoordinator(DataUpdateCoordinator):
 
     def __init__(self, hass: HomeAssistant, url: str) -> None:
         super().__init__(hass, _LOGGER, name="HA Overwatch Triggered",
-            update_interval=timedelta(seconds=2))
+            update_interval=timedelta(seconds=5))
         self.url = url
 
     async def _async_update_data(self) -> dict:
