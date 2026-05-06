@@ -78,7 +78,7 @@ let uiConfig = {
   zone_fade_duration: 3,  // seconds to fade from full to transparent after trigger clears
 
   // Camera dashboard
-  cam_default_mode:       "live",      // "snapshot" | "live"
+  cam_default_mode:       "snapshot",  // "snapshot" | "live"
   cam_snapshot_interval:  2,           // seconds between snapshot refreshes
   cam_cooldown:           30,          // seconds camera stays visible after zone clears
   cam_max_visible:        0,           // 0 = unlimited
@@ -6606,8 +6606,8 @@ function renderSettingsPanel() {
           <div class="settings-field">
             <label>Camera mode</label>
             <div class="settings-toggle-row">
-              <button class="settings-toggle ${eff('ow_cam_mode','cam_default_mode','live') !== 'live' ? 'active' : ''}" data-cammode="snapshot">Snapshot</button>
-              <button class="settings-toggle ${eff('ow_cam_mode','cam_default_mode','live') === 'live' ? 'active' : ''}" data-cammode="live">Live</button>
+              <button class="settings-toggle ${eff('ow_cam_mode','cam_default_mode','snapshot') !== 'live' ? 'active' : ''}" data-cammode="snapshot">Snapshot</button>
+              <button class="settings-toggle ${eff('ow_cam_mode','cam_default_mode','snapshot') === 'live' ? 'active' : ''}" data-cammode="live">Live</button>
             </div>
             <div style="font-size:11px;color:#777;margin-top:4px;"><b>Snapshot:</b> lower bandwidth, periodic refresh.<br><b>Live:</b> MJPEG stream, instant but more resources.</div>
           </div>
