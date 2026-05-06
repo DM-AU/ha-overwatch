@@ -153,30 +153,19 @@ function waitForOW(cb, attempts = 0) {
 
 /* ── HA camera snapshot URL ─────────────────────────────────── */
 function camSnapshotUrl(entityId) {
-  const haUrl = (window.OW.uiConfig.ha_url || '').replace(/\/$/, '');
-  const st    = window.OW?.haStates?.[entityId];
-  const token = st?.attributes?.access_token;
-  if (haUrl && token) {
-    return `${haUrl}/api/camera_proxy/${entityId}?token=${token}&t=${Date.now()}`;
-  }
-  // Fallback to proxy if no entity token available
+  // Use apiPath() same as all other server API calls — works in both addon and standalone mode
   if (window.OW.isAddonMode) {
     return window.OW.apiPath(`ow/camera_proxy/${entityId}`) + `?t=${Date.now()}`;
   }
+  const haUrl = (window.OW.uiConfig.ha_url || '').replace(/\/$/, '');
   return `${haUrl}/api/camera_proxy/${entityId}?t=${Date.now()}`;
 }
 
 function camStreamUrl(entityId) {
-  const haUrl = (window.OW.uiConfig.ha_url || '').replace(/\/$/, '');
-  const st    = window.OW?.haStates?.[entityId];
-  const token = st?.attributes?.access_token;
-  if (haUrl && token) {
-    return `${haUrl}/api/camera_proxy_stream/${entityId}?token=${token}`;
-  }
-  // Fallback to proxy if no entity token available
   if (window.OW.isAddonMode) {
     return window.OW.apiPath(`ow/camera_proxy_stream/${entityId}`);
   }
+  const haUrl = (window.OW.uiConfig.ha_url || '').replace(/\/$/, '');
   return `${haUrl}/api/camera_proxy_stream/${entityId}`;
 }
 
