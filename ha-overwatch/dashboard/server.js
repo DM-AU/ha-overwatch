@@ -276,9 +276,6 @@ const serverHaStates = {};
 // Declared at module scope so /ow/triggered works before startHAListener connects
 const globalTriggeredZones = {};
 
-// Per-camera in-flight request tracker to prevent unbounded proxy concurrency
-const camProxyInFlight = new Set();
-
 /* ── Parse HA automations.yaml without a YAML library ─────────
  * HA's automations.yaml is a YAML list of objects. We need to
  * extract enough fields to identify and round-trip OW automations:
@@ -1149,13 +1146,6 @@ const server = http.createServer(async (req, res) => {
         ? `/api/camera_proxy_stream/${entity}`
         : `/api/camera_proxy/${entity}`;
 
-      if (!isStream && camProxyInFlight.has(entity)) {
-        res.writeHead(429, { "Content-Type": "text/plain", "Retry-After": "1" });
-        res.end("busy");
-        return;
-      }
-      if (!isStream) camProxyInFlight.add(entity);
-
       console.log(`[CAM PROXY] ${isStream ? "stream" : "snap"} → ${entity}`);
 
       let parsed;
@@ -1179,14 +1169,8 @@ const server = http.createServer(async (req, res) => {
         if (haRes.headers["content-length"]) fwdHeaders["Content-Length"] = haRes.headers["content-length"];
         res.writeHead(haRes.statusCode, fwdHeaders);
         haRes.pipe(res);
-        haRes.on("end",   () => camProxyInFlight.delete(entity));
-        haRes.on("error", () => camProxyInFlight.delete(entity));
       });
-      haReq.on("error", e => {
-        camProxyInFlight.delete(entity);
-        console.error("[CAM PROXY] error:", e.message);
-        err(res, "Proxy error", 502);
-      });
+      haReq.on("error", e => { console.error("[CAM PROXY] error:", e.message); err(res, "Proxy error", 502); });
       haReq.end();
     } catch (e) { console.error("[CAM PROXY] exception:", e.message); err(res, e.message, 500); }
     return;
