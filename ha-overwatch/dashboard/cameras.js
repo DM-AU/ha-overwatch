@@ -1167,10 +1167,10 @@ async function initCameraPage() {
     camPinned = new Set(JSON.parse(stored || OW.uiConfig.cam_pinned || '[]'));
   } catch { camPinned = new Set(); }
 
-  // Persist live as default so settings panel eff() reads localStorage
-  // not cam_default_mode from ui.yaml which defaults to 'snapshot'
-  if (!localStorage.getItem('ow_cam_mode')) {
-    localStorage.setItem('ow_cam_mode', 'live');
+  // Use v2 key to clear stale 'snapshot' values saved during testing.
+  // New key defaults to 'live' for all browsers on first load.
+  if (!localStorage.getItem('ow_cam_mode_v2')) {
+    localStorage.setItem('ow_cam_mode_v2', 'live');
   }
 
   // Expose for settings panel source toggle

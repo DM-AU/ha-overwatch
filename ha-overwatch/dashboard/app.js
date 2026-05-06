@@ -6606,8 +6606,8 @@ function renderSettingsPanel() {
           <div class="settings-field">
             <label>Camera mode</label>
             <div class="settings-toggle-row">
-              <button class="settings-toggle ${eff('ow_cam_mode','cam_default_mode','snapshot') !== 'live' ? 'active' : ''}" data-cammode="snapshot">Snapshot</button>
-              <button class="settings-toggle ${eff('ow_cam_mode','cam_default_mode','snapshot') === 'live' ? 'active' : ''}" data-cammode="live">Live</button>
+              <button class="settings-toggle ${eff('ow_cam_mode_v2','cam_default_mode','live') !== 'live' ? 'active' : ''}" data-cammode="snapshot">Snapshot</button>
+              <button class="settings-toggle ${eff('ow_cam_mode_v2','cam_default_mode','live') === 'live' ? 'active' : ''}" data-cammode="live">Live</button>
             </div>
             <div style="font-size:11px;color:#777;margin-top:4px;"><b>Snapshot:</b> lower bandwidth, periodic refresh.<br><b>Live:</b> MJPEG stream, instant but more resources.</div>
           </div>
@@ -6770,7 +6770,7 @@ function renderSettingsPanel() {
     btn.onclick = () => {
       panel.querySelectorAll(".settings-toggle[data-cammode]").forEach(b => b.classList.remove("active"));
       btn.classList.add("active");
-      localStorage.setItem('ow_cam_mode', btn.dataset.cammode);
+      localStorage.setItem('ow_cam_mode_v2', btn.dataset.cammode);
       if (window._camSetMode) window._camSetMode(btn.dataset.cammode);
     };
   });
@@ -6786,7 +6786,7 @@ function renderSettingsPanel() {
     btn.onclick = () => {
       panel.querySelectorAll(".settings-toggle[data-cammode]").forEach(b => b.classList.remove("active"));
       btn.classList.add("active");
-      localStorage.setItem('ow_cam_mode', btn.dataset.cammode);
+      localStorage.setItem('ow_cam_mode_v2', btn.dataset.cammode);
       if (window._camSetMode) window._camSetMode(btn.dataset.cammode);
     };
   });
