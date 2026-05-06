@@ -162,11 +162,17 @@ function camSnapshotUrl(entityId) {
 }
 
 function camStreamUrl(entityId) {
-  if (window.OW.isAddonMode) {
+  // Always go directly to HA for MJPEG streams — never proxy through Node or HA ingress.
+  // Both the Node proxy and HA's ingress proxy buffer HTTP responses and cannot handle
+  // the never-ending MJPEG multipart stream, causing stream failures and snapshot fallback.
+  // HA's camera_proxy_stream endpoint accepts ?token= for authentication without headers.
+  const haUrl = (window.OW.uiConfig.ha_url || '').replace(/\/$/, '');
+  const token = window.OW.uiConfig.ha_token || '';
+  if (!haUrl) {
+    // No external HA URL configured — fall back to proxy (may not work through ingress)
     return window.OW.apiPath(`ow/camera_proxy_stream/${entityId}`);
   }
-  const haUrl = (window.OW.uiConfig.ha_url || '').replace(/\/$/, '');
-  return `${haUrl}/api/camera_proxy_stream/${entityId}`;
+  return `${haUrl}/api/camera_proxy_stream/${entityId}${token ? '?token=' + token : ''}`;
 }
 
 /* ── Tile entity resolution ──────────────────────────────────── */
