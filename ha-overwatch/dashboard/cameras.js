@@ -430,13 +430,14 @@ function attachFailureHandler(img, entityId) {
         }
       }, 60000);
     } else {
-      // Retry with exponential backoff up to 5s
+      // Retry with exponential backoff up to 5s.
+      // In live mode: ONLY retry the stream, never snapshot.
+      // Snapshot fallback hammers Protect's snapshot API causing 429 rate limiting.
       const delay = Math.min(1000 * failCount, 5000);
       setTimeout(() => {
-        if (!camHidden.has(entityId)) {
-          const tileEnt = tileEntityFor(entityId);
-          img.src = camMode === 'live' ? camStreamUrl(tileEnt) : camSnapshotUrl(tileEnt);
-        }
+        if (camHidden.has(entityId)) return;
+        const tileEnt = tileEntityFor(entityId);
+        img.src = camMode === 'live' ? camStreamUrl(tileEnt) : camSnapshotUrl(tileEnt);
       }, delay);
     }
   };
