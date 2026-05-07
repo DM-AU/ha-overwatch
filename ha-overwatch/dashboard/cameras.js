@@ -127,7 +127,7 @@ async function camSetEnabled(type, key, state) {
 }
 
 /* ── Module state ────────────────────────────────────────────── */
-let camMode        = 'live';       // 'live' | 'snapshot' — live is forced by default
+let camMode        = 'live';       // live by default
 let camPinned      = new Set();    // Set of pinned camera entity ids
 let camToggled     = {};           // { entityId: bool } — false = user disabled
 let camZoneToggled = {};           // { zoneId: bool } — false = zone disabled on cam page
@@ -153,8 +153,8 @@ function waitForOW(cb, attempts = 0) {
 
 /* ── HA camera snapshot URL ─────────────────────────────────── */
 function camSnapshotUrl(entityId) {
-  // Snapshots are intentionally disabled. Never call /ow/camera_proxy or HA
-  // /api/camera_proxy from the frontend. This placeholder performs no network I/O.
+  // Snapshots are disabled. Never call /ow/camera_proxy or HA /api/camera_proxy
+  // from the frontend. This placeholder performs no network request.
   const label = String(entityId || 'camera').replace(/[<>&"']/g, '');
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360" viewBox="0 0 640 360">
     <rect width="640" height="360" fill="#111"/>
@@ -1155,9 +1155,8 @@ async function initCameraPage() {
     camPinned = new Set(JSON.parse(stored || OW.uiConfig.cam_pinned || '[]'));
   } catch { camPinned = new Set(); }
 
-  // Live by default on every normal/external dashboard load.
-  // Ignore stale snapshot values from older builds and from the settings panel.
-  // HA Ingress cannot reliably carry live streams, so Ingress gets placeholder only.
+  // Live by default on every normal/direct dashboard load.
+  // Ignore stale snapshot values from older builds.
   localStorage.setItem('ow_cam_mode_v4', 'live');
   camMode = isIngressBrowser() ? 'snapshot' : 'live';
 
@@ -1172,8 +1171,8 @@ async function initCameraPage() {
   renderCameraGrid();
   bindModal();
 
-  // Start in live mode by default; snapshots are disabled.
-  if (camMode === 'snapshot') stopSnapshotRefresh();
+  // Snapshot polling disabled. Live mode is rendered by default.
+  stopSnapshotRefresh();
 
   // Poll every 2s for zone state changes
   camUpdateInterval = setInterval(camUpdate, 2000);
@@ -1197,9 +1196,8 @@ async function initCameraPage() {
   window._camSetMode = (mode) => {
     if (mode !== 'live' && mode !== 'snapshot') return;
     localStorage.setItem('ow_cam_mode_v4', mode);
-    camMode = isIngressBrowser() ? 'snapshot' : (mode === 'snapshot' ? 'snapshot' : 'live');
-    if (camMode === 'live') stopSnapshotRefresh();
-    else stopSnapshotRefresh(); // snapshots disabled; placeholder only
+    camMode = isIngressBrowser() ? 'snapshot' : mode;
+    stopSnapshotRefresh();
     const grid = document.getElementById('cameraGrid');
     if (grid) grid.innerHTML = '';
     renderCameraGrid();
