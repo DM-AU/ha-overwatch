@@ -154,17 +154,20 @@ function waitForOW(cb, attempts = 0) {
 
 /* ── HA camera snapshot URL ─────────────────────────────────── */
 function camSnapshotUrl(entityId) {
-  // No Date.now() cache-buster — backend snapshot cache handles freshness.
-  // Adding a timestamp would defeat server-side coalescing and cause every browser
-  // to make independent upstream HA requests.
-  if (window.OW.isAddonMode) {
+  // Always prefer the HA-Overwatch backend proxy when available.
+  // This is required for shared server-side snapshot cache/coalescing/backoff.
+  // Falling back to HA's /api/camera_proxy directly bypasses that protection and
+  // can still hammer UniFi Protect with snapshot requests.
+  if (window.OW?.apiPath) {
     return window.OW.apiPath(`ow/camera_proxy/${entityId}`);
   }
-  const haUrl = (window.OW.uiConfig.ha_url || '').replace(/\/$/, '');
+  const haUrl = (window.OW?.uiConfig?.ha_url || '').replace(/\/$/, '');
   return `${haUrl}/api/camera_proxy/${entityId}`;
 }
 
-// HA ingress proxy cannot handle MJPEG streams — detect and use snapshot instead
+// HA add-on ingress cannot reliably carry long-lived camera streams.
+// Ingress browsers are intentionally forced to snapshot rendering. External/direct
+// Overwatch URLs can still use live streams.
 function isIngressBrowser() {
   return window.location.pathname.includes('/api/hassio_ingress/');
 }
@@ -173,10 +176,10 @@ function camStreamUrl(entityId) {
   // Cache-buster ensures browser makes a fresh stream connection each time,
   // not a cached response from a previous snapshot load of the same URL.
   const cb = `?_=${Date.now()}`;
-  if (window.OW.isAddonMode) {
+  if (window.OW?.apiPath) {
     return window.OW.apiPath(`ow/camera_proxy_stream/${entityId}`) + cb;
   }
-  const haUrl = (window.OW.uiConfig.ha_url || '').replace(/\/$/, '');
+  const haUrl = (window.OW?.uiConfig?.ha_url || '').replace(/\/$/, '');
   return `${haUrl}/api/camera_proxy_stream/${entityId}${cb}`;
 }
 
@@ -1229,10 +1232,22 @@ async function initCameraPage() {
     camPinned = new Set(JSON.parse(stored || OW.uiConfig.cam_pinned || '[]'));
   } catch { camPinned = new Set(); }
 
-  // Use v2 key to clear stale 'snapshot' values saved during testing.
-  // New key defaults to 'live' for all browsers on first load.
-  if (!localStorage.getItem('ow_cam_mode_v2')) {
-    localStorage.setItem('ow_cam_mode_v2', 'live');
+  // Camera display mode.
+  // v3 deliberately ignores stale v2 values from earlier broken builds that could
+  // leave the dashboard stuck in snapshot mode after refresh.
+  const storedCamMode = localStorage.getItem(CAM_DISPLAY_MODE_KEY);
+  if (storedCamMode === 'live' || storedCamMode === 'snapshot') {
+    camMode = storedCamMode;
+  } else {
+    camMode = (OW.uiConfig.cam_default_mode === 'snapshot') ? 'snapshot' : 'live';
+    localStorage.setItem(CAM_DISPLAY_MODE_KEY, camMode);
+  }
+
+  // HA add-on ingress cannot reliably carry the MJPEG/image stream response.
+  // Force snapshot only for this ingress browser session; do not persist it,
+  // otherwise normal external/direct dashboards would also be changed.
+  if (isIngressBrowser() && camMode === 'live') {
+    camMode = 'snapshot';
   }
 
   // Expose for settings panel source toggle
@@ -1291,11 +1306,24 @@ async function initCameraPage() {
 
   // Allow settings panel to change mode live
   window._camSetMode = (mode) => {
-    if (camMode === mode) return;
-    camMode = mode;
-    if (mode === 'live') { stopSnapshotRefresh(); } else { startSnapshotRefresh(); }
+    if (mode !== 'live' && mode !== 'snapshot') return;
+
+    // Persist the user's preference in v3. If this is HA add-on ingress, render
+    // snapshots for this session because ingress cannot keep live streams open.
+    localStorage.setItem(CAM_DISPLAY_MODE_KEY, mode);
+    camMode = (isIngressBrowser() && mode === 'live') ? 'snapshot' : mode;
+
+    if (camMode === 'live') {
+      stopSnapshotRefresh();
+      startLiveRecycle();
+    } else {
+      stopLiveRecycle();
+      startSnapshotRefresh();
+    }
+
     const grid = document.getElementById('cameraGrid');
     if (grid) grid.innerHTML = '';
+
     renderCameraGrid();
     renderCameraStatusBar();
   };
