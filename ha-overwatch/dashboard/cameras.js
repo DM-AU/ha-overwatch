@@ -154,10 +154,9 @@ function waitForOW(cb, attempts = 0) {
 
 /* ── HA camera snapshot URL ─────────────────────────────────── */
 function camSnapshotUrl(entityId) {
-  // HA add-on ingress cannot display the live camera stream reliably, and snapshots
-  // are disabled to prevent UniFi Protect 429 rate limiting. Return a local SVG
-  // placeholder only; never call snapshot proxy endpoints here.
-  const label = String(entityId || 'camera').replace(/[<>&"']/g, '');
+  // Snapshot paths are disabled. Never call snapshot proxy endpoints.
+  // In HA add-on/Ingress, show a local instruction placeholder instead.
+  const label = String(entityId || 'camera').replace(/[<>&\"']/g, '');
   const directUrl = 'http://HA_IP:8099';
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="900" height="506" viewBox="0 0 900 506">
     <rect width="900" height="506" fill="#080808"/>
@@ -402,8 +401,7 @@ function renderCameraGrid() {
 
 /* ── Snapshot refresh ───────────────────────────────────────── */
 function startSnapshotRefresh() {
-  // Snapshot refresh disabled. Add-on/Ingress users see the local placeholder;
-  // external/direct users should use live mode. Do not poll /ow/camera_proxy.
+  // Snapshot refresh disabled. Do not poll snapshot proxy endpoint.
   stopSnapshotRefresh();
   return;
 }
@@ -413,29 +411,15 @@ function stopSnapshotRefresh() {
 }
 
 function refreshLiveStreams() {
-  if (camMode !== 'live') return;
-  if (document.hidden) return;
-  if (isIngressBrowser()) return;
-
-  document.querySelectorAll('.cam-tile-img').forEach(img => {
-    const tile = img.closest('.cam-tile');
-    if (!tile) return;
-    const entityId = tile.dataset.entityId;
-    const tileEnt = tileEntityFor(entityId);
-    img.src = camStreamUrl(tileEnt);
-  });
-
-  if (camModalOpen && camModalMode === 'live' && camModalEntityId) {
-    const modalImg = document.getElementById('camModalImg');
-    if (modalImg) modalImg.src = camStreamUrl(camModalEntityId);
-  }
+  // Disabled: reopening HA camera_proxy_stream causes UniFi Protect snapshot 429s.
+  // Existing <img> streams remain active; only new/changed tiles create a stream.
+  return;
 }
 
 function startLiveRecycle() {
+  // Disabled for Protect stability. Do not periodically recreate live streams.
   stopLiveRecycle();
-  // Long-lived HA camera_proxy_stream responses can stall/black out after sustained
-  // viewing. Recycle conservatively rather than rapid retrying.
-  camLiveRecycleTimer = setInterval(refreshLiveStreams, 10 * 60 * 1000);
+  return;
 }
 
 function stopLiveRecycle() {
@@ -444,39 +428,29 @@ function stopLiveRecycle() {
 
 /* ── Failure handling ───────────────────────────────────────── */
 function attachFailureHandler(img, entityId) {
-  let failCount = 0;
-  const maxFails = Math.max(3, parseInt(window.OW.uiConfig.cam_fail_hide_seconds) || 5) * 2;
-
+  let logged = false;
   img.onerror = () => {
-    failCount++;
-    if (camHidden.has(entityId)) return;
-    if (failCount >= maxFails) {
-      camHidden.add(entityId);
-      window.OW.logEvent('error', `Camera hidden after persistent failure: ${entityId}`, 'system');
-      const tile = document.getElementById(`cam-tile-${entityId.replace(/\W/g, '_')}`);
-      if (tile) tile.remove();
-      // Auto-retry after 60s in case it was a temporary auth/network issue
-      setTimeout(() => {
-        if (camHidden.has(entityId)) {
-          camHidden.delete(entityId);
-          camFailCount[entityId] = 0;
-          renderCameraGrid();
-        }
-      }, 60000);
-    } else {
-      // Retry with exponential backoff up to 5s.
-      // In live mode: retry stream. Ingress browsers always use snapshot.
-      const delay = Math.min(1000 * failCount, 5000);
-      setTimeout(() => {
-        if (camHidden.has(entityId)) return;
-        const tileEnt = tileEntityFor(entityId);
-        img.src = (camMode === 'live' && !isIngressBrowser())
-          ? camStreamUrl(tileEnt)
-          : camSnapshotUrl(tileEnt);
-      }, delay);
+    if (!logged) {
+      logged = true;
+      window.OW?.logEvent?.('warn', `Camera stream failed; retry suppressed to protect UniFi Protect: ${entityId}`, 'system');
     }
+
+    // Do not retry live streams automatically. Each retry opens a new HA camera_proxy_stream
+    // request, and HA/UniFi Protect can internally call the Protect snapshot endpoint.
+    if (camMode === 'live' && !isIngressBrowser()) {
+      img.dataset.owFailed = 'true';
+      img.style.objectFit = 'contain';
+      img.src = camSnapshotUrl(entityId);
+      return;
+    }
+
+    // Snapshot/Ingress already uses a local placeholder. Do not retry.
+    img.dataset.owFailed = 'true';
   };
-  img.onload = () => { failCount = 0; };
+
+  img.onload = () => {
+    img.dataset.owFailed = 'false';
+  };
 }
 
 /* ── Modal ───────────────────────────────────────────────────── */
