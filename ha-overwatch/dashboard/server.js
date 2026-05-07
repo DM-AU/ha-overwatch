@@ -277,10 +277,10 @@ const serverHaStates = {};
  * Shared across all browser clients — 5 browsers requesting the same
  * camera snapshot within the TTL window get one upstream HA request.
  * ────────────────────────────────────────────────────────────── */
-const SNAPSHOT_CACHE_TTL_MS   = 8000;   // serve cached snapshot for 8s
-const SNAPSHOT_STALE_TTL_MS   = 60000;  // keep stale snapshot for 60s as fallback
-const CAMERA_429_BACKOFF_MS   = 90000;  // back off 90s after a 429
-const CAMERA_ERROR_BACKOFF_MS = 15000;  // back off 15s after other errors
+const SNAPSHOT_CACHE_TTL_MS   = 30000;  // serve cached snapshot for 30s
+const SNAPSHOT_STALE_TTL_MS   = 300000; // keep stale snapshot for 5min as fallback
+const CAMERA_429_BACKOFF_MS   = 300000; // back off 5min after a 429
+const CAMERA_ERROR_BACKOFF_MS = 60000;  // back off 60s after other errors
 
 const cameraSnapshotCache   = new Map(); // entityId → { buf, contentType, fetchedAt }
 const cameraSnapshotInflight = new Map(); // entityId → Promise<void>
