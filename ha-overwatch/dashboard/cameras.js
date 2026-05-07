@@ -163,7 +163,12 @@ function camSnapshotUrl(entityId) {
   return `${haUrl}/api/camera_proxy/${entityId}`;
 }
 
-// HA ingress proxy cannot handle MJPEG streams — detect and use snapshot instead
+// Detect Home Assistant add-on ingress.
+// Important: do NOT force snapshot mode here. The add-on camera stream is served
+// through HA-Overwatch's own /ow/camera_proxy_stream backend route, so live mode
+// must still be allowed. If a specific browser/proxy cannot stream, the normal
+// image error handler will retry/fallback behaviour instead of silently locking
+// the whole camera page to snapshots.
 function isIngressBrowser() {
   return window.location.pathname.includes('/api/hassio_ingress/');
 }
@@ -354,7 +359,7 @@ function renderCameraGrid() {
       const media = document.createElement('div');
       media.className = 'cam-tile-media';
 
-      if (camMode === 'live' && !isIngressBrowser()) {
+      if (camMode === 'live') {
         const img = document.createElement('img');
         img.className = 'cam-tile-img';
         img.src = camStreamUrl(tileEntity);
@@ -447,7 +452,7 @@ function attachFailureHandler(img, entityId) {
       setTimeout(() => {
         if (camHidden.has(entityId)) return;
         const tileEnt = tileEntityFor(entityId);
-        img.src = (camMode === 'live' && !isIngressBrowser())
+        img.src = (camMode === 'live')
           ? camStreamUrl(tileEnt)
           : camSnapshotUrl(tileEnt);
       }, delay);
@@ -480,7 +485,7 @@ function openCameraModal(entityId) {
 function updateModalMode(img, modeBtn, entityId) {
   const highResId = entityId; // modal always uses high-res
   modeBtn.textContent = camModalMode === 'live' ? 'Live' : 'Snapshot';
-  if (camModalMode === 'live' && !isIngressBrowser()) {
+  if (camModalMode === 'live') {
     img.src = camStreamUrl(highResId);
   } else {
     img.src = camSnapshotUrl(highResId);
@@ -1085,7 +1090,7 @@ function openCameraFullscreen(entityId) {
   // Remove any existing fullscreen overlay
   document.getElementById('camFullscreenOverlay')?.remove();
 
-  const isLive = camMode === 'live' && !isIngressBrowser();
+  const isLive = camMode === 'live';
   const overlay = document.createElement('div');
   overlay.id = 'camFullscreenOverlay';
   overlay.style.cssText = `
@@ -1180,10 +1185,15 @@ async function initCameraPage() {
     camPinned = new Set(JSON.parse(stored || OW.uiConfig.cam_pinned || '[]'));
   } catch { camPinned = new Set(); }
 
-  // Use v2 key to clear stale 'snapshot' values saved during testing.
-  // New key defaults to 'live' for all browsers on first load.
-  if (!localStorage.getItem('ow_cam_mode_v2')) {
-    localStorage.setItem('ow_cam_mode_v2', 'live');
+  // Camera display mode.
+  // Use v2 key to ignore stale old values saved during testing.
+  // Default to live unless the user/config explicitly selected snapshot.
+  const storedCamMode = localStorage.getItem('ow_cam_mode_v2');
+  if (storedCamMode === 'live' || storedCamMode === 'snapshot') {
+    camMode = storedCamMode;
+  } else {
+    camMode = (OW.uiConfig.cam_default_mode === 'snapshot') ? 'snapshot' : 'live';
+    localStorage.setItem('ow_cam_mode_v2', camMode);
   }
 
   // Expose for settings panel source toggle
@@ -1237,11 +1247,20 @@ async function initCameraPage() {
 
   // Allow settings panel to change mode live
   window._camSetMode = (mode) => {
-    if (camMode === mode) return;
+    if (mode !== 'live' && mode !== 'snapshot') return;
+
     camMode = mode;
-    if (mode === 'live') { stopSnapshotRefresh(); } else { startSnapshotRefresh(); }
+    localStorage.setItem('ow_cam_mode_v2', mode);
+
+    if (mode === 'live') {
+      stopSnapshotRefresh();
+    } else {
+      startSnapshotRefresh();
+    }
+
     const grid = document.getElementById('cameraGrid');
     if (grid) grid.innerHTML = '';
+
     renderCameraGrid();
     renderCameraStatusBar();
   };
