@@ -1235,12 +1235,12 @@ async function initCameraPage() {
   // Camera display mode.
   // v3 deliberately ignores stale v2 values from earlier broken builds that could
   // leave the dashboard stuck in snapshot mode after refresh.
-  const storedCamMode = localStorage.getItem(CAM_DISPLAY_MODE_KEY);
+  const storedCamMode = localStorage.getItem('ow_cam_mode_v3');
   if (storedCamMode === 'live' || storedCamMode === 'snapshot') {
     camMode = storedCamMode;
   } else {
     camMode = (OW.uiConfig.cam_default_mode === 'snapshot') ? 'snapshot' : 'live';
-    localStorage.setItem(CAM_DISPLAY_MODE_KEY, camMode);
+    localStorage.setItem('ow_cam_mode_v3', camMode);
   }
 
   // HA add-on ingress cannot reliably carry the MJPEG/image stream response.
@@ -1310,7 +1310,7 @@ async function initCameraPage() {
 
     // Persist the user's preference in v3. If this is HA add-on ingress, render
     // snapshots for this session because ingress cannot keep live streams open.
-    localStorage.setItem(CAM_DISPLAY_MODE_KEY, mode);
+    localStorage.setItem('ow_cam_mode_v3', mode);
     camMode = (isIngressBrowser() && mode === 'live') ? 'snapshot' : mode;
 
     if (camMode === 'live') {
