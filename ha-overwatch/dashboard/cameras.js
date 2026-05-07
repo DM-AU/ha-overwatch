@@ -153,12 +153,14 @@ function waitForOW(cb, attempts = 0) {
 
 /* ── HA camera snapshot URL ─────────────────────────────────── */
 function camSnapshotUrl(entityId) {
-  // Use apiPath() same as all other server API calls — works in both addon and standalone mode
+  // No Date.now() cache-buster — backend snapshot cache handles freshness.
+  // Adding a timestamp would defeat server-side coalescing and cause every browser
+  // to make independent upstream HA requests.
   if (window.OW.isAddonMode) {
-    return window.OW.apiPath(`ow/camera_proxy/${entityId}`) + `?t=${Date.now()}`;
+    return window.OW.apiPath(`ow/camera_proxy/${entityId}`);
   }
   const haUrl = (window.OW.uiConfig.ha_url || '').replace(/\/$/, '');
-  return `${haUrl}/api/camera_proxy/${entityId}?t=${Date.now()}`;
+  return `${haUrl}/api/camera_proxy/${entityId}`;
 }
 
 function camStreamUrl(entityId) {
@@ -384,9 +386,10 @@ function renderCameraGrid() {
 /* ── Snapshot refresh ───────────────────────────────────────── */
 function startSnapshotRefresh() {
   stopSnapshotRefresh();
-  const interval = (parseInt(localStorage.getItem("ow_snap_interval") || window.OW.uiConfig.cam_snapshot_interval) || 2) * 1000;
+  const interval = Math.max(5000, (parseInt(localStorage.getItem("ow_snap_interval") || window.OW.uiConfig.cam_snapshot_interval) || 10) * 1000);
   camSnapshotTimer = setInterval(() => {
     if (camMode !== 'snapshot') return;
+    if (document.hidden) return; // pause when tab is hidden — no upstream requests needed
     document.querySelectorAll('.cam-tile-img').forEach(img => {
       const tile     = img.closest('.cam-tile');
       if (!tile) return;
@@ -1107,10 +1110,10 @@ function openCameraFullscreen(entityId) {
     img.src = camSnapshotUrl(entityId); // always high-res in fullscreen
     img.style.cssText = 'max-width:100%;max-height:100%;object-fit:contain;';
     // Refresh snapshot at configured interval
-    const intervalMs = (parseInt(localStorage.getItem('ow_snap_interval') || window.OW?.uiConfig?.cam_snapshot_interval || 2) || 2) * 1000;
+    const intervalMs = Math.max(5000, (parseInt(localStorage.getItem('ow_snap_interval') || window.OW?.uiConfig?.cam_snapshot_interval || 10) || 10) * 1000);
     const timer = setInterval(() => {
       if (!document.body.contains(overlay)) { clearInterval(timer); return; }
-      img.src = camSnapshotUrl(entityId) + '&r=' + Date.now();
+      img.src = camSnapshotUrl(entityId); // backend cache handles freshness
     }, intervalMs);
     overlay.addEventListener('remove', () => clearInterval(timer));
     media.appendChild(img);
@@ -1200,6 +1203,23 @@ async function initCameraPage() {
       camStatusOpen = false;
       dd.style.display = 'none';
       localStorage.setItem('cam_status_open', 'false');
+    }
+  });
+
+  // Pause camera updates when tab is hidden — reduces HA/Protect load significantly
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      // Tab hidden: stop snapshot refresh and slow down camUpdate
+      stopSnapshotRefresh();
+      if (camUpdateInterval) { clearInterval(camUpdateInterval); camUpdateInterval = null; }
+      camUpdateInterval = setInterval(camUpdate, 30000); // 30s when hidden
+    } else {
+      // Tab visible again: resume normal operation with jitter
+      if (camUpdateInterval) { clearInterval(camUpdateInterval); camUpdateInterval = null; }
+      camUpdateInterval = setInterval(camUpdate, 2000);
+      if (camMode === 'snapshot') {
+        setTimeout(startSnapshotRefresh, Math.random() * 1500); // jitter to avoid sync
+      }
     }
   });
 
