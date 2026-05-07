@@ -127,7 +127,7 @@ async function camSetEnabled(type, key, state) {
 }
 
 /* ── Module state ────────────────────────────────────────────── */
-let camMode        = 'live';       // live by default
+let camMode        = 'snapshot';   // 'snapshot' | 'live'
 let camPinned      = new Set();    // Set of pinned camera entity ids
 let camToggled     = {};           // { entityId: bool } — false = user disabled
 let camZoneToggled = {};           // { zoneId: bool } — false = zone disabled on cam page
@@ -138,6 +138,7 @@ let camLastTrigger = {};           // { entityId: timestamp }
 let camLowResMap   = {};           // { highResId: lowResId }
 let camMaxVisible  = 0;
 let camSnapshotTimer = null;
+let camLiveRecycleTimer = null;
 let camStatusOpen  = localStorage.getItem('cam_status_open') !== 'false'; // default open, persisted
 let camModalOpen   = false;
 let camModalEntityId = null;
@@ -153,23 +154,33 @@ function waitForOW(cb, attempts = 0) {
 
 /* ── HA camera snapshot URL ─────────────────────────────────── */
 function camSnapshotUrl(entityId) {
-  // Snapshots are disabled. Never call /ow/camera_proxy or HA /api/camera_proxy
-  // from the frontend. This placeholder performs no network request.
-  const label = String(entityId || 'camera').replace(/[<>&"']/g, '');
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360" viewBox="0 0 640 360">
-    <rect width="640" height="360" fill="#111"/>
-    <text x="320" y="166" fill="#777" font-family="Arial, sans-serif" font-size="24" text-anchor="middle">Snapshots disabled</text>
-    <text x="320" y="202" fill="#555" font-family="Arial, sans-serif" font-size="16" text-anchor="middle">${label}</text>
-  </svg>`;
-  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+  // Always prefer the HA-Overwatch backend proxy when available.
+  // This is required for shared server-side snapshot cache/coalescing/backoff.
+  // Falling back to HA's /api/camera_proxy directly bypasses that protection and
+  // can still hammer UniFi Protect with snapshot requests.
+  if (window.OW?.apiPath) {
+    return window.OW.apiPath(`ow/camera_proxy/${entityId}`);
+  }
+  const haUrl = (window.OW?.uiConfig?.ha_url || '').replace(/\/$/, '');
+  return `${haUrl}/api/camera_proxy/${entityId}`;
+}
+
+// HA add-on ingress cannot reliably carry long-lived camera streams.
+// Ingress browsers are intentionally forced to snapshot rendering. External/direct
+// Overwatch URLs can still use live streams.
+function isIngressBrowser() {
+  return window.location.pathname.includes('/api/hassio_ingress/');
 }
 
 function camStreamUrl(entityId) {
-  if (window.OW.isAddonMode) {
-    return window.OW.apiPath(`ow/camera_proxy_stream/${entityId}`);
+  // Cache-buster ensures browser makes a fresh stream connection each time,
+  // not a cached response from a previous snapshot load of the same URL.
+  const cb = `?_=${Date.now()}`;
+  if (window.OW?.apiPath) {
+    return window.OW.apiPath(`ow/camera_proxy_stream/${entityId}`) + cb;
   }
-  const haUrl = (window.OW.uiConfig.ha_url || '').replace(/\/$/, '');
-  return `${haUrl}/api/camera_proxy_stream/${entityId}`;
+  const haUrl = (window.OW?.uiConfig?.ha_url || '').replace(/\/$/, '');
+  return `${haUrl}/api/camera_proxy_stream/${entityId}${cb}`;
 }
 
 /* ── Tile entity resolution ──────────────────────────────────── */
@@ -347,7 +358,7 @@ function renderCameraGrid() {
       const media = document.createElement('div');
       media.className = 'cam-tile-media';
 
-      if (camMode === 'live') {
+      if (camMode === 'live' && !isIngressBrowser()) {
         const img = document.createElement('img');
         img.className = 'cam-tile-img';
         img.src = camStreamUrl(tileEntity);
@@ -386,13 +397,78 @@ function renderCameraGrid() {
 
 /* ── Snapshot refresh ───────────────────────────────────────── */
 function startSnapshotRefresh() {
-  // Snapshot refresh disabled. Do not periodically assign snapshot URLs.
   stopSnapshotRefresh();
-  return;
+
+  // Snapshot mode is intentionally slow. UniFi Protect rate-limits snapshots hard,
+  // and HA add-on ingress is forced to snapshot mode because it cannot keep live
+  // stream transports open reliably. Keep ingress especially conservative.
+  const configuredSec = parseInt(localStorage.getItem("ow_snap_interval") || window.OW.uiConfig.cam_snapshot_interval) || 30;
+  const minSec = isIngressBrowser() ? 60 : 30;
+  const interval = Math.max(minSec * 1000, configuredSec * 1000);
+
+  camSnapshotTimer = setInterval(() => {
+    if (camMode !== 'snapshot') return;
+    if (document.hidden) return; // pause when tab is hidden — no upstream requests needed
+
+    // Stagger tile refreshes so a wall view does not stampede the backend/Protect.
+    const imgs = [...document.querySelectorAll('.cam-tile-img')];
+    imgs.forEach((img, idx) => {
+      setTimeout(() => {
+        if (camMode !== 'snapshot' || document.hidden) return;
+        const tile = img.closest('.cam-tile');
+        if (!tile) return;
+        const entityId = tile.dataset.entityId;
+        const tileEnt = tileEntityFor(entityId);
+        img.src = camSnapshotUrl(tileEnt);
+      }, idx * 750);
+    });
+
+    // Refresh modal if open and in snapshot mode.
+    if (camModalOpen && camModalMode === 'snapshot') {
+      const modalImg = document.getElementById('camModalImg');
+      if (modalImg && camModalEntityId) {
+        setTimeout(() => {
+          if (camModalOpen && camModalMode === 'snapshot' && !document.hidden) {
+            modalImg.src = camSnapshotUrl(tileEntityFor(camModalEntityId));
+          }
+        }, 500);
+      }
+    }
+  }, interval);
 }
 
 function stopSnapshotRefresh() {
   if (camSnapshotTimer) { clearInterval(camSnapshotTimer); camSnapshotTimer = null; }
+}
+
+function refreshLiveStreams() {
+  if (camMode !== 'live') return;
+  if (document.hidden) return;
+  if (isIngressBrowser()) return;
+
+  document.querySelectorAll('.cam-tile-img').forEach(img => {
+    const tile = img.closest('.cam-tile');
+    if (!tile) return;
+    const entityId = tile.dataset.entityId;
+    const tileEnt = tileEntityFor(entityId);
+    img.src = camStreamUrl(tileEnt);
+  });
+
+  if (camModalOpen && camModalMode === 'live' && camModalEntityId) {
+    const modalImg = document.getElementById('camModalImg');
+    if (modalImg) modalImg.src = camStreamUrl(camModalEntityId);
+  }
+}
+
+function startLiveRecycle() {
+  stopLiveRecycle();
+  // Long-lived HA camera_proxy_stream responses can stall/black out after sustained
+  // viewing. Recycle conservatively rather than rapid retrying.
+  camLiveRecycleTimer = setInterval(refreshLiveStreams, 10 * 60 * 1000);
+}
+
+function stopLiveRecycle() {
+  if (camLiveRecycleTimer) { clearInterval(camLiveRecycleTimer); camLiveRecycleTimer = null; }
 }
 
 /* ── Failure handling ───────────────────────────────────────── */
@@ -418,13 +494,14 @@ function attachFailureHandler(img, entityId) {
       }, 60000);
     } else {
       // Retry with exponential backoff up to 5s.
-      // In live mode: ONLY retry the stream, never snapshot.
-      // Snapshot fallback hammers Protect's snapshot API causing 429 rate limiting.
+      // In live mode: retry stream. Ingress browsers always use snapshot.
       const delay = Math.min(1000 * failCount, 5000);
       setTimeout(() => {
         if (camHidden.has(entityId)) return;
         const tileEnt = tileEntityFor(entityId);
-        img.src = camMode === 'live' ? camStreamUrl(tileEnt) : camSnapshotUrl(tileEnt);
+        img.src = (camMode === 'live' && !isIngressBrowser())
+          ? camStreamUrl(tileEnt)
+          : camSnapshotUrl(tileEnt);
       }, delay);
     }
   };
@@ -455,7 +532,7 @@ function openCameraModal(entityId) {
 function updateModalMode(img, modeBtn, entityId) {
   const highResId = entityId; // modal always uses high-res
   modeBtn.textContent = camModalMode === 'live' ? 'Live' : 'Snapshot';
-  if (camModalMode === 'live') {
+  if (camModalMode === 'live' && !isIngressBrowser()) {
     img.src = camStreamUrl(highResId);
   } else {
     img.src = camSnapshotUrl(highResId);
@@ -1060,7 +1137,7 @@ function openCameraFullscreen(entityId) {
   // Remove any existing fullscreen overlay
   document.getElementById('camFullscreenOverlay')?.remove();
 
-  const isLive = camMode === 'live';
+  const isLive = camMode === 'live' && !isIngressBrowser();
   const overlay = document.createElement('div');
   overlay.id = 'camFullscreenOverlay';
   overlay.style.cssText = `
@@ -1094,10 +1171,10 @@ function openCameraFullscreen(entityId) {
     img.src = camSnapshotUrl(entityId); // always high-res in fullscreen
     img.style.cssText = 'max-width:100%;max-height:100%;object-fit:contain;';
     // Refresh snapshot at configured interval
-    const intervalMs = (parseInt(localStorage.getItem('ow_snap_interval') || window.OW?.uiConfig?.cam_snapshot_interval || 2) || 2) * 1000;
+    const intervalMs = Math.max((isIngressBrowser() ? 60 : 30) * 1000, (parseInt(localStorage.getItem('ow_snap_interval') || window.OW?.uiConfig?.cam_snapshot_interval || 30) || 30) * 1000);
     const timer = setInterval(() => {
       if (!document.body.contains(overlay)) { clearInterval(timer); return; }
-      img.src = camSnapshotUrl(entityId) + '&r=' + Date.now();
+      img.src = camSnapshotUrl(entityId); // backend cache handles freshness
     }, intervalMs);
     overlay.addEventListener('remove', () => clearInterval(timer));
     media.appendChild(img);
@@ -1155,10 +1232,23 @@ async function initCameraPage() {
     camPinned = new Set(JSON.parse(stored || OW.uiConfig.cam_pinned || '[]'));
   } catch { camPinned = new Set(); }
 
-  // Live by default on every normal/direct dashboard load.
-  // Ignore stale snapshot values from older builds.
-  localStorage.setItem('ow_cam_mode_v4', 'live');
-  camMode = isIngressBrowser() ? 'snapshot' : 'live';
+  // Camera display mode.
+  // v4 deliberately ignores stale v2/v3 values from earlier broken builds that could
+  // leave the dashboard stuck in snapshot mode after refresh.
+  const storedCamMode = localStorage.getItem('ow_cam_mode_v4');
+  if (storedCamMode === 'live' || storedCamMode === 'snapshot') {
+    camMode = storedCamMode;
+  } else {
+    camMode = isIngressBrowser() ? 'snapshot' : 'live';
+    localStorage.setItem('ow_cam_mode_v4', camMode);
+  }
+
+  // HA add-on ingress cannot reliably carry the MJPEG/image stream response.
+  // Force snapshot only for this ingress browser session; do not persist it,
+  // otherwise normal external/direct dashboards would also be changed.
+  if (isIngressBrowser() && camMode === 'live') {
+    camMode = 'snapshot';
+  }
 
   // Expose for settings panel source toggle
   window.renderCameraStatusBar = renderCameraStatusBar;
@@ -1171,8 +1261,9 @@ async function initCameraPage() {
   renderCameraGrid();
   bindModal();
 
-  // Snapshot polling disabled. Live mode is rendered by default.
-  stopSnapshotRefresh();
+  // Start the correct media maintenance timer for the current mode
+  if (camMode === 'snapshot') startSnapshotRefresh();
+  else startLiveRecycle();
 
   // Poll every 2s for zone state changes
   camUpdateInterval = setInterval(camUpdate, 2000);
@@ -1189,17 +1280,50 @@ async function initCameraPage() {
     }
   });
 
+  // Pause camera updates when tab is hidden — reduces HA/Protect load significantly
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      // Tab hidden: stop snapshot refresh and slow down camUpdate
+      stopSnapshotRefresh();
+      stopLiveRecycle();
+      if (camUpdateInterval) { clearInterval(camUpdateInterval); camUpdateInterval = null; }
+      camUpdateInterval = setInterval(camUpdate, 30000); // 30s when hidden
+    } else {
+      // Tab visible again: resume normal operation with jitter
+      if (camUpdateInterval) { clearInterval(camUpdateInterval); camUpdateInterval = null; }
+      camUpdateInterval = setInterval(camUpdate, 2000);
+      if (camMode === 'snapshot') {
+        setTimeout(startSnapshotRefresh, Math.random() * 1500); // jitter to avoid sync
+      } else {
+        startLiveRecycle();
+        setTimeout(refreshLiveStreams, 500);
+      }
+    }
+  });
+
   // Expose update function for app.js to call on HA state changes
   window.camUpdate = camUpdate;
 
   // Allow settings panel to change mode live
   window._camSetMode = (mode) => {
     if (mode !== 'live' && mode !== 'snapshot') return;
+
+    // Persist the user's preference in v4. If this is HA add-on ingress, render
+    // snapshots for this session because ingress cannot keep live streams open.
     localStorage.setItem('ow_cam_mode_v4', mode);
-    camMode = isIngressBrowser() ? 'snapshot' : mode;
-    stopSnapshotRefresh();
+    camMode = (isIngressBrowser() && mode === 'live') ? 'snapshot' : mode;
+
+    if (camMode === 'live') {
+      stopSnapshotRefresh();
+      startLiveRecycle();
+    } else {
+      stopLiveRecycle();
+      startSnapshotRefresh();
+    }
+
     const grid = document.getElementById('cameraGrid');
     if (grid) grid.innerHTML = '';
+
     renderCameraGrid();
     renderCameraStatusBar();
   };
