@@ -3381,7 +3381,7 @@ function renderZonePopupContent() {
   const zone = zones.find(z => z.id === _zonePopupZoneId);
   if (!zone) { closeZonePopup(); return; }
 
-  const showThumbs = localStorage.getItem('ow_zone_popup_thumbs') === 'true';
+  const showThumbs = false; // snapshots disabled from zone popup
   const zState     = getZoneState(zone);
   const isArmed    = zState !== 'disabled';
   const sensors_   = zone.sensors  || [];
@@ -3469,7 +3469,7 @@ function renderZonePopupContent() {
       ${cameras_.map(e => {
         const resolvedId = getCamLowRes(e);
         const thumbUrl = showThumbs
-          ? (window.OW?.apiPath ? window.OW.apiPath(`ow/camera_proxy/${resolvedId}`) : `ow/camera_proxy/${resolvedId}`) + `?t=${Date.now()}`
+          ? (window.OW?.apiPath ? null : null) + `?t=${Date.now()}`
           : null;
         return `<div style="margin-bottom:6px;">
           ${showThumbs ? `<img data-cam="${escapeHtml(e)}" src="${thumbUrl}" style="width:100%;height:120px;object-fit:cover;border-radius:6px;background:#111;display:block;margin-bottom:4px;" onerror="this.style.display='none'">` : ''}
@@ -3581,8 +3581,7 @@ function renderZonePopupContent() {
       popup.querySelectorAll('img[data-cam]').forEach(img => {
         const e    = img.dataset.cam;
         const res  = getCamLowRes(e);
-        const base = window.OW?.apiPath ? window.OW.apiPath(`ow/camera_proxy/${res}`) : `ow/camera_proxy/${res}`;
-        img.src = `${base}?t=${Date.now()}`;
+        img.removeAttribute('src');
       });
     }, intervalMs);
   }
@@ -6606,8 +6605,8 @@ function renderSettingsPanel() {
           <div class="settings-field">
             <label>Camera mode</label>
             <div class="settings-toggle-row">
-              <button class="settings-toggle ${eff('ow_cam_mode_v2','cam_default_mode','live') !== 'live' ? 'active' : ''}" data-cammode="snapshot">Snapshot</button>
-              <button class="settings-toggle ${eff('ow_cam_mode_v2','cam_default_mode','live') === 'live' ? 'active' : ''}" data-cammode="live">Live</button>
+              <button class="settings-toggle ${eff('ow_cam_mode_v4','cam_default_mode','live') !== 'live' ? 'active' : ''}" data-cammode="snapshot">Snapshot</button>
+              <button class="settings-toggle ${eff('ow_cam_mode_v4','cam_default_mode','live') === 'live' ? 'active' : ''}" data-cammode="live">Live</button>
             </div>
             <div style="font-size:11px;color:#777;margin-top:4px;"><b>Snapshot:</b> lower bandwidth, periodic refresh.<br><b>Live:</b> MJPEG stream, instant but more resources.</div>
           </div>
@@ -6770,7 +6769,7 @@ function renderSettingsPanel() {
     btn.onclick = () => {
       panel.querySelectorAll(".settings-toggle[data-cammode]").forEach(b => b.classList.remove("active"));
       btn.classList.add("active");
-      localStorage.setItem('ow_cam_mode_v2', btn.dataset.cammode);
+      localStorage.setItem('ow_cam_mode_v4', btn.dataset.cammode);
       if (window._camSetMode) window._camSetMode(btn.dataset.cammode);
     };
   });
@@ -6786,7 +6785,7 @@ function renderSettingsPanel() {
     btn.onclick = () => {
       panel.querySelectorAll(".settings-toggle[data-cammode]").forEach(b => b.classList.remove("active"));
       btn.classList.add("active");
-      localStorage.setItem('ow_cam_mode_v2', btn.dataset.cammode);
+      localStorage.setItem('ow_cam_mode_v4', btn.dataset.cammode);
       if (window._camSetMode) window._camSetMode(btn.dataset.cammode);
     };
   });
@@ -6865,7 +6864,8 @@ function renderSettingsPanel() {
   };
   const zonePopupThumbsChk = document.getElementById('zonePopupThumbsChk');
   if (zonePopupThumbsChk) zonePopupThumbsChk.onchange = () => {
-    localStorage.setItem('ow_zone_popup_thumbs', zonePopupThumbsChk.checked ? 'true' : 'false');
+    localStorage.setItem('ow_zone_popup_thumbs', 'false');
+    zonePopupThumbsChk.checked = false;
     refreshZonePopupIfOpen();
   };
 
