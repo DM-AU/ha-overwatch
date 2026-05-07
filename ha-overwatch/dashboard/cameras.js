@@ -163,12 +163,20 @@ function camSnapshotUrl(entityId) {
   return `${haUrl}/api/camera_proxy/${entityId}`;
 }
 
+// HA ingress proxy cannot handle MJPEG streams — detect and use snapshot instead
+function isIngressBrowser() {
+  return window.location.pathname.includes('/api/hassio_ingress/');
+}
+
 function camStreamUrl(entityId) {
+  // Cache-buster ensures browser makes a fresh stream connection each time,
+  // not a cached response from a previous snapshot load of the same URL.
+  const cb = `?_=${Date.now()}`;
   if (window.OW.isAddonMode) {
-    return window.OW.apiPath(`ow/camera_proxy_stream/${entityId}`);
+    return window.OW.apiPath(`ow/camera_proxy_stream/${entityId}`) + cb;
   }
   const haUrl = (window.OW.uiConfig.ha_url || '').replace(/\/$/, '');
-  return `${haUrl}/api/camera_proxy_stream/${entityId}`;
+  return `${haUrl}/api/camera_proxy_stream/${entityId}${cb}`;
 }
 
 /* ── Tile entity resolution ──────────────────────────────────── */
@@ -346,7 +354,7 @@ function renderCameraGrid() {
       const media = document.createElement('div');
       media.className = 'cam-tile-media';
 
-      if (camMode === 'live') {
+      if (camMode === 'live' && !isIngressBrowser()) {
         const img = document.createElement('img');
         img.className = 'cam-tile-img';
         img.src = camStreamUrl(tileEntity);
@@ -434,13 +442,14 @@ function attachFailureHandler(img, entityId) {
       }, 60000);
     } else {
       // Retry with exponential backoff up to 5s.
-      // In live mode: ONLY retry the stream, never snapshot.
-      // Snapshot fallback hammers Protect's snapshot API causing 429 rate limiting.
+      // In live mode: retry stream. Ingress browsers always use snapshot.
       const delay = Math.min(1000 * failCount, 5000);
       setTimeout(() => {
         if (camHidden.has(entityId)) return;
         const tileEnt = tileEntityFor(entityId);
-        img.src = camMode === 'live' ? camStreamUrl(tileEnt) : camSnapshotUrl(tileEnt);
+        img.src = (camMode === 'live' && !isIngressBrowser())
+          ? camStreamUrl(tileEnt)
+          : camSnapshotUrl(tileEnt);
       }, delay);
     }
   };
@@ -471,7 +480,7 @@ function openCameraModal(entityId) {
 function updateModalMode(img, modeBtn, entityId) {
   const highResId = entityId; // modal always uses high-res
   modeBtn.textContent = camModalMode === 'live' ? 'Live' : 'Snapshot';
-  if (camModalMode === 'live') {
+  if (camModalMode === 'live' && !isIngressBrowser()) {
     img.src = camStreamUrl(highResId);
   } else {
     img.src = camSnapshotUrl(highResId);
@@ -1076,7 +1085,7 @@ function openCameraFullscreen(entityId) {
   // Remove any existing fullscreen overlay
   document.getElementById('camFullscreenOverlay')?.remove();
 
-  const isLive = camMode === 'live';
+  const isLive = camMode === 'live' && !isIngressBrowser();
   const overlay = document.createElement('div');
   overlay.id = 'camFullscreenOverlay';
   overlay.style.cssText = `
