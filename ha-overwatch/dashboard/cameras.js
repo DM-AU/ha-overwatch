@@ -153,22 +153,21 @@ function waitForOW(cb, attempts = 0) {
 
 /* ── HA camera snapshot URL ─────────────────────────────────── */
 function camSnapshotUrl(entityId) {
-  // No Date.now() cache-buster — backend snapshot cache handles freshness.
-  // Adding a timestamp would defeat server-side coalescing and cause every browser
-  // to make independent upstream HA requests.
-  if (window.OW.isAddonMode) {
+  // Always prefer the HA-Overwatch backend proxy when available.
+  // This is required for shared server-side snapshot cache/coalescing/backoff.
+  // Falling back to HA's /api/camera_proxy directly bypasses that protection and
+  // can still hammer UniFi Protect with snapshot requests.
+  if (window.OW?.apiPath) {
     return window.OW.apiPath(`ow/camera_proxy/${entityId}`);
   }
-  const haUrl = (window.OW.uiConfig.ha_url || '').replace(/\/$/, '');
+  const haUrl = (window.OW?.uiConfig?.ha_url || '').replace(/\/$/, '');
   return `${haUrl}/api/camera_proxy/${entityId}`;
 }
 
 // Detect Home Assistant add-on ingress.
-// Important: do NOT force snapshot mode here. The add-on camera stream is served
-// through HA-Overwatch's own /ow/camera_proxy_stream backend route, so live mode
-// must still be allowed. If a specific browser/proxy cannot stream, the normal
-// image error handler will retry/fallback behaviour instead of silently locking
-// the whole camera page to snapshots.
+// Supervisor ingress does not reliably support long-lived MJPEG/image stream
+// responses. In ingress we intentionally render snapshots instead of live
+// streams to prevent Supervisor "Cannot write to closing transport" errors.
 function isIngressBrowser() {
   return window.location.pathname.includes('/api/hassio_ingress/');
 }
@@ -177,10 +176,10 @@ function camStreamUrl(entityId) {
   // Cache-buster ensures browser makes a fresh stream connection each time,
   // not a cached response from a previous snapshot load of the same URL.
   const cb = `?_=${Date.now()}`;
-  if (window.OW.isAddonMode) {
+  if (window.OW?.apiPath) {
     return window.OW.apiPath(`ow/camera_proxy_stream/${entityId}`) + cb;
   }
-  const haUrl = (window.OW.uiConfig.ha_url || '').replace(/\/$/, '');
+  const haUrl = (window.OW?.uiConfig?.ha_url || '').replace(/\/$/, '');
   return `${haUrl}/api/camera_proxy_stream/${entityId}${cb}`;
 }
 
@@ -359,7 +358,7 @@ function renderCameraGrid() {
       const media = document.createElement('div');
       media.className = 'cam-tile-media';
 
-      if (camMode === 'live') {
+      if (camMode === 'live' && !isIngressBrowser()) {
         const img = document.createElement('img');
         img.className = 'cam-tile-img';
         img.src = camStreamUrl(tileEntity);
@@ -452,7 +451,7 @@ function attachFailureHandler(img, entityId) {
       setTimeout(() => {
         if (camHidden.has(entityId)) return;
         const tileEnt = tileEntityFor(entityId);
-        img.src = (camMode === 'live')
+        img.src = (camMode === 'live' && !isIngressBrowser())
           ? camStreamUrl(tileEnt)
           : camSnapshotUrl(tileEnt);
       }, delay);
@@ -485,7 +484,7 @@ function openCameraModal(entityId) {
 function updateModalMode(img, modeBtn, entityId) {
   const highResId = entityId; // modal always uses high-res
   modeBtn.textContent = camModalMode === 'live' ? 'Live' : 'Snapshot';
-  if (camModalMode === 'live') {
+  if (camModalMode === 'live' && !isIngressBrowser()) {
     img.src = camStreamUrl(highResId);
   } else {
     img.src = camSnapshotUrl(highResId);
@@ -1090,7 +1089,7 @@ function openCameraFullscreen(entityId) {
   // Remove any existing fullscreen overlay
   document.getElementById('camFullscreenOverlay')?.remove();
 
-  const isLive = camMode === 'live';
+  const isLive = camMode === 'live' && !isIngressBrowser();
   const overlay = document.createElement('div');
   overlay.id = 'camFullscreenOverlay';
   overlay.style.cssText = `
@@ -1196,6 +1195,13 @@ async function initCameraPage() {
     localStorage.setItem('ow_cam_mode_v2', camMode);
   }
 
+  // HA add-on ingress cannot reliably carry the MJPEG/image stream response.
+  // Force snapshot only for this ingress browser session; do not persist it,
+  // otherwise normal external/direct dashboards would also be changed.
+  if (isIngressBrowser() && camMode === 'live') {
+    camMode = 'snapshot';
+  }
+
   // Expose for settings panel source toggle
   window.renderCameraStatusBar = renderCameraStatusBar;
   window.openCameraModal       = openCameraModal;
@@ -1249,10 +1255,13 @@ async function initCameraPage() {
   window._camSetMode = (mode) => {
     if (mode !== 'live' && mode !== 'snapshot') return;
 
-    camMode = mode;
+    // Persist the user's preference, but if this is the HA add-on ingress
+    // browser, render snapshots for this session because ingress cannot keep
+    // the live stream transport open reliably.
     localStorage.setItem('ow_cam_mode_v2', mode);
+    camMode = (isIngressBrowser() && mode === 'live') ? 'snapshot' : mode;
 
-    if (mode === 'live') {
+    if (camMode === 'live') {
       stopSnapshotRefresh();
     } else {
       startSnapshotRefresh();
