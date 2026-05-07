@@ -154,15 +154,20 @@ function waitForOW(cb, attempts = 0) {
 
 /* ── HA camera snapshot URL ─────────────────────────────────── */
 function camSnapshotUrl(entityId) {
-  // Always prefer the HA-Overwatch backend proxy when available.
-  // This is required for shared server-side snapshot cache/coalescing/backoff.
-  // Falling back to HA's /api/camera_proxy directly bypasses that protection and
-  // can still hammer UniFi Protect with snapshot requests.
-  if (window.OW?.apiPath) {
-    return window.OW.apiPath(`ow/camera_proxy/${entityId}`);
-  }
-  const haUrl = (window.OW?.uiConfig?.ha_url || '').replace(/\/$/, '');
-  return `${haUrl}/api/camera_proxy/${entityId}`;
+  // HA add-on ingress cannot display the live camera stream reliably, and snapshots
+  // are disabled to prevent UniFi Protect 429 rate limiting. Return a local SVG
+  // placeholder only; never call snapshot proxy endpoints here.
+  const label = String(entityId || 'camera').replace(/[<>&"']/g, '');
+  const directUrl = 'http://HA_IP:8099';
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="900" height="506" viewBox="0 0 900 506">
+    <rect width="900" height="506" fill="#080808"/>
+    <rect x="36" y="36" width="828" height="434" rx="18" fill="#111" stroke="#2a2a2a" stroke-width="2"/>
+    <text x="450" y="190" fill="#d0d0d0" font-family="Arial, sans-serif" font-size="34" text-anchor="middle">Camera view unavailable in HA add-on</text>
+    <text x="450" y="238" fill="#8a8a8a" font-family="Arial, sans-serif" font-size="21" text-anchor="middle">Use the direct HA-Overwatch dashboard instead:</text>
+    <text x="450" y="282" fill="#4db8ff" font-family="Arial, sans-serif" font-size="27" font-weight="700" text-anchor="middle">${directUrl}</text>
+    <text x="450" y="340" fill="#666" font-family="Arial, sans-serif" font-size="16" text-anchor="middle">${label}</text>
+  </svg>`;
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
 }
 
 // HA add-on ingress cannot reliably carry long-lived camera streams.
@@ -397,44 +402,10 @@ function renderCameraGrid() {
 
 /* ── Snapshot refresh ───────────────────────────────────────── */
 function startSnapshotRefresh() {
+  // Snapshot refresh disabled. Add-on/Ingress users see the local placeholder;
+  // external/direct users should use live mode. Do not poll /ow/camera_proxy.
   stopSnapshotRefresh();
-
-  // Snapshot mode is intentionally slow. UniFi Protect rate-limits snapshots hard,
-  // and HA add-on ingress is forced to snapshot mode because it cannot keep live
-  // stream transports open reliably. Keep ingress especially conservative.
-  const configuredSec = parseInt(localStorage.getItem("ow_snap_interval") || window.OW.uiConfig.cam_snapshot_interval) || 30;
-  const minSec = isIngressBrowser() ? 60 : 30;
-  const interval = Math.max(minSec * 1000, configuredSec * 1000);
-
-  camSnapshotTimer = setInterval(() => {
-    if (camMode !== 'snapshot') return;
-    if (document.hidden) return; // pause when tab is hidden — no upstream requests needed
-
-    // Stagger tile refreshes so a wall view does not stampede the backend/Protect.
-    const imgs = [...document.querySelectorAll('.cam-tile-img')];
-    imgs.forEach((img, idx) => {
-      setTimeout(() => {
-        if (camMode !== 'snapshot' || document.hidden) return;
-        const tile = img.closest('.cam-tile');
-        if (!tile) return;
-        const entityId = tile.dataset.entityId;
-        const tileEnt = tileEntityFor(entityId);
-        img.src = camSnapshotUrl(tileEnt);
-      }, idx * 750);
-    });
-
-    // Refresh modal if open and in snapshot mode.
-    if (camModalOpen && camModalMode === 'snapshot') {
-      const modalImg = document.getElementById('camModalImg');
-      if (modalImg && camModalEntityId) {
-        setTimeout(() => {
-          if (camModalOpen && camModalMode === 'snapshot' && !document.hidden) {
-            modalImg.src = camSnapshotUrl(tileEntityFor(camModalEntityId));
-          }
-        }, 500);
-      }
-    }
-  }, interval);
+  return;
 }
 
 function stopSnapshotRefresh() {
