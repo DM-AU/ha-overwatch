@@ -277,14 +277,164 @@ const serverHaStates = {};
  * Shared across all browser clients — 5 browsers requesting the same
  * camera snapshot within the TTL window get one upstream HA request.
  * ────────────────────────────────────────────────────────────── */
-const SNAPSHOT_CACHE_TTL_MS   = 8000;   // serve cached snapshot for 8s
-const SNAPSHOT_STALE_TTL_MS   = 60000;  // keep stale snapshot for 60s as fallback
-const CAMERA_429_BACKOFF_MS   = 90000;  // back off 90s after a 429
-const CAMERA_ERROR_BACKOFF_MS = 15000;  // back off 15s after other errors
+const SNAPSHOT_CACHE_TTL_MS   = 2000;   // snapshot-grid-v1: per-camera upstream min interval
+const SNAPSHOT_STALE_TTL_MS   = 30000;  // stale fallback window
+const CAMERA_429_BACKOFF_MS   = 10000;  // short backoff, serve stale during backoff
+const CAMERA_ERROR_BACKOFF_MS = 5000;   // transient error backoff
 
 const cameraSnapshotCache   = new Map(); // entityId → { buf, contentType, fetchedAt }
 const cameraSnapshotInflight = new Map(); // entityId → Promise<void>
 const cameraBackoff         = new Map(); // entityId → { until, reason, lastStatus }
+
+const SNAPSHOT_MAX_BYTES = 2 * 1024 * 1024; // hard cap per image buffer
+const SNAPSHOT_GLOBAL_CONCURRENCY = 2;
+let snapshotActiveFetches = 0;
+const snapshotQueue = [];
+
+function snapshotCorsHeaders(extra = {}) {
+  return {
+    "Access-Control-Allow-Origin": "*",
+    "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+    "Pragma": "no-cache",
+    "Expires": "0",
+    ...extra,
+  };
+}
+
+function sendSnapshotPlaceholder(res, entity, status = 503, reason = "snapshot_unavailable") {
+  const safe = String(entity || 'camera').replace(/[<>&"']/g, '');
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="900" height="506" viewBox="0 0 900 506">
+    <rect width="900" height="506" fill="#101010"/>
+    <rect x="36" y="36" width="828" height="434" rx="18" fill="#151515" stroke="#333" stroke-width="2"/>
+    <text x="450" y="214" fill="#aaa" font-family="Arial, sans-serif" font-size="28" text-anchor="middle">Snapshot temporarily unavailable</text>
+    <text x="450" y="258" fill="#666" font-family="Arial, sans-serif" font-size="16" text-anchor="middle">${safe}</text>
+    <text x="450" y="300" fill="#555" font-family="Arial, sans-serif" font-size="14" text-anchor="middle">${reason}</text>
+  </svg>`;
+  const buf = Buffer.from(svg, 'utf8');
+  res.writeHead(status, snapshotCorsHeaders({
+    "Content-Type": "image/svg+xml;charset=utf-8",
+    "Content-Length": buf.length,
+    "X-OW-Snapshot-Cache": reason,
+  }));
+  res.end(buf);
+}
+
+function sendSnapshotBuffer(res, entity, entry, cacheState) {
+  res.writeHead(200, snapshotCorsHeaders({
+    "Content-Type": entry.contentType || "image/jpeg",
+    "Content-Length": entry.buf.length,
+    "X-OW-Snapshot-Cache": cacheState,
+    "X-OW-Snapshot-Age-Ms": String(Date.now() - entry.fetchedAt),
+  }));
+  res.end(entry.buf);
+}
+
+function scheduleSnapshotJob(fn) {
+  return new Promise((resolve, reject) => {
+    const run = () => {
+      snapshotActiveFetches++;
+      Promise.resolve()
+        .then(fn)
+        .then(resolve, reject)
+        .finally(() => {
+          snapshotActiveFetches--;
+          const next = snapshotQueue.shift();
+          if (next) next();
+        });
+    };
+    if (snapshotActiveFetches < SNAPSHOT_GLOBAL_CONCURRENCY) run();
+    else snapshotQueue.push(run);
+  });
+}
+
+function fetchSnapshotFromHA(entity) {
+  const cfg = getHAConfig(loadConfig());
+  if (!cfg.ha_url || !cfg.ha_token) return Promise.reject(new Error("HA not configured"));
+
+  const userCfg = loadConfig();
+  const userToken = userCfg.ha_token || "";
+  const proxyHaUrl = (userToken ? userCfg.ha_url : cfg.ha_url || "").replace(/\/$/, "");
+  const authToken = userToken || cfg.ha_token;
+  let parsed;
+  try { parsed = new URL(proxyHaUrl); } catch { return Promise.reject(new Error("Invalid HA URL")); }
+  const isHttps = parsed.protocol === "https:";
+  const lib = isHttps ? https : http;
+  const endpoint = `/api/camera_proxy/${entity}`;
+
+  return scheduleSnapshotJob(() => new Promise((resolve, reject) => {
+    const haReq = lib.request({
+      hostname: parsed.hostname,
+      port: parsed.port || (isHttps ? 443 : 80),
+      path: endpoint,
+      method: "GET",
+      headers: {
+        "Authorization": `Bearer ${authToken}`,
+        "Accept": "image/jpeg,image/*,*/*",
+      },
+    }, haRes => {
+      const status = haRes.statusCode || 0;
+      const chunks = [];
+      let total = 0;
+
+      haRes.on("data", c => {
+        total += c.length;
+        if (total > SNAPSHOT_MAX_BYTES) {
+          haReq.destroy(new Error("snapshot too large"));
+          return;
+        }
+        chunks.push(c);
+      });
+
+      haRes.on("end", () => {
+        if (status === 429) {
+          const e = new Error("snapshot 429");
+          e.statusCode = 429;
+          reject(e);
+          return;
+        }
+        if (status < 200 || status >= 300) {
+          const e = new Error(`snapshot upstream ${status}`);
+          e.statusCode = status;
+          reject(e);
+          return;
+        }
+        const buf = Buffer.concat(chunks);
+        if (!buf.length) {
+          reject(new Error("empty snapshot"));
+          return;
+        }
+        resolve({
+          buf,
+          contentType: haRes.headers["content-type"] || "image/jpeg",
+          fetchedAt: Date.now(),
+        });
+      });
+    });
+    haReq.setTimeout(4500, () => haReq.destroy(new Error("snapshot timeout")));
+    haReq.on("error", reject);
+    haReq.end();
+  }));
+}
+
+function refreshSnapshotSingleFlight(entity) {
+  if (cameraSnapshotInflight.has(entity)) return cameraSnapshotInflight.get(entity);
+  const p = fetchSnapshotFromHA(entity)
+    .then(entry => {
+      cameraSnapshotCache.set(entity, entry);
+      cameraBackoff.delete(entity);
+      return entry;
+    })
+    .catch(e => {
+      const status = e.statusCode || 0;
+      const backoffMs = status === 429 ? CAMERA_429_BACKOFF_MS : CAMERA_ERROR_BACKOFF_MS;
+      cameraBackoff.set(entity, { until: Date.now() + backoffMs, reason: e.message, lastStatus: status });
+      throw e;
+    })
+    .finally(() => cameraSnapshotInflight.delete(entity));
+  cameraSnapshotInflight.set(entity, p);
+  return p;
+}
+
 
 // Declared at module scope so /ow/triggered works before startHAListener connects
 const globalTriggeredZones = {};
@@ -1138,196 +1288,58 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  /* ── Camera proxy ────────────────────────────────────────── */
-  if (pathname.startsWith("/ow/camera_proxy")) {
-    try {
-      const cfg      = getHAConfig(loadConfig());
-      if (!cfg.ha_url || !cfg.ha_token) { err(res, "HA not configured", 503); return; }
-      const isStream = pathname.startsWith("/ow/camera_proxy_stream");
-      const prefix   = isStream ? "/ow/camera_proxy_stream/" : "/ow/camera_proxy/";
-      const entity   = pathname.slice(prefix.length).split("?")[0];
-      if (!entity) { err(res, "Missing entity", 400); return; }
+  /* ── Snapshot-grid-v1 camera cache ───────────────────────── */
+  if (pathname.startsWith("/ow/snap-cache/")) {
+    const entity = decodeURIComponent(pathname.slice("/ow/snap-cache/".length).split("?")[0] || "");
+    if (!entity) { sendSnapshotPlaceholder(res, "camera", 400, "missing_entity"); return; }
 
-      const userCfg    = loadConfig();
-      const userToken  = userCfg.ha_token || "";
-      const proxyHaUrl = (userToken ? userCfg.ha_url : cfg.ha_url || "").replace(/\/$/, "");
-      const authToken  = userToken || cfg.ha_token;
+    const now = Date.now();
+    const cached = cameraSnapshotCache.get(entity);
+    const backoff = cameraBackoff.get(entity);
 
-      const endpoint = isStream
-        ? `/api/camera_proxy_stream/${entity}`
-        : `/api/camera_proxy/${entity}`;
-
-      let parsed;
-      try { parsed = new URL(proxyHaUrl); } catch { err(res, "Invalid HA URL", 500); return; }
-      const isHttps = parsed.protocol === "https:";
-      const lib     = isHttps ? https : http;
-
-      // ── Streams: pass through directly, no caching ──────────
-      if (isStream) {
-        console.log(`[CAM PROXY] stream → ${entity}`);
-        const haReq = lib.request({
-          hostname: parsed.hostname,
-          port:     parsed.port || (isHttps ? 443 : 80),
-          path:     endpoint,
-          method:   "GET",
-          headers:  { "Authorization": `Bearer ${authToken}`, "Accept": "image/jpeg,image/*,*/*" },
-        }, haRes => {
-          const fwdHeaders = { "Cache-Control": "no-cache", "Access-Control-Allow-Origin": "*" };
-          if (haRes.headers["content-type"]) fwdHeaders["Content-Type"] = haRes.headers["content-type"];
-          res.writeHead(haRes.statusCode, fwdHeaders);
-          haRes.pipe(res);
-          res.on("close", () => { try { haReq.destroy(); } catch {} });
-        });
-        haReq.on("error", e => { console.error("[CAM PROXY] stream error:", e.message); try { res.destroy(); } catch {} });
-        haReq.end();
-        return;
-      }
-
-      // ── Snapshot upstream kill switch ───────────────────────
-      // UniFi Protect 429s are caused by HA /api/camera_proxy snapshot calls.
-      // Do NOT fetch upstream snapshots from HA. Streams remain enabled via
-      // /ow/camera_proxy_stream/<entity>; snapshots return stale cache only, or
-      // 503 if no stale cache exists.
-      const now   = Date.now();
-      const CORS  = { "Access-Control-Allow-Origin": "*", "Cache-Control": "no-store" };
-      const stale = cameraSnapshotCache.get(entity);
-
-      if (stale && stale.buf && stale.buf.length) {
-        console.log(`[CAM PROXY] snapshot upstream disabled; stale-only → ${entity}`);
-        res.writeHead(200, {
-          ...CORS,
-          "Content-Type": stale.contentType || "image/jpeg",
-          "Content-Length": stale.buf.length,
-          "X-OW-Camera-Cache": "stale-only",
-          "X-OW-Snapshot-Upstream": "disabled",
-        });
-        res.end(stale.buf);
-        return;
-      }
-
-      console.warn(`[CAM PROXY] snapshot upstream disabled; no stale cache → ${entity}`);
-      res.writeHead(503, {
-        ...CORS,
-        "Content-Type": "application/json",
-        "X-OW-Snapshot-Upstream": "disabled",
-      });
-      res.end(JSON.stringify({
-        error: "snapshot_upstream_disabled",
-        entity,
-        message: "Snapshot upstream fetches are disabled to prevent UniFi Protect 429 rate limiting. Use live stream routes only.",
-      }));
+    if (cached && (now - cached.fetchedAt) < SNAPSHOT_CACHE_TTL_MS) {
+      sendSnapshotBuffer(res, entity, cached, "hit");
       return;
+    }
 
-      // ── Snapshots: cache + coalescing + 429 backoff ─────────
-
-      // Helper: send a cached buffer to a client
-      function serveCached(entry, extraHeaders = {}) {
-        res.writeHead(200, { ...CORS, "Content-Type": entry.contentType, "Content-Length": entry.buf.length, ...extraHeaders });
-        res.end(entry.buf);
+    if (backoff && backoff.until > now) {
+      if (cached && (now - cached.fetchedAt) < SNAPSHOT_STALE_TTL_MS) {
+        sendSnapshotBuffer(res, entity, cached, `stale-backoff-${backoff.lastStatus || 'err'}`);
+      } else {
+        sendSnapshotPlaceholder(res, entity, 200, `backoff_${backoff.lastStatus || 'error'}`);
       }
+      return;
+    }
 
-      // 1. Check backoff
-      const backoff = cameraBackoff.get(entity);
-      if (backoff && backoff.until > now) {
-        const stale = cameraSnapshotCache.get(entity);
-        if (stale && (now - stale.fetchedAt) < SNAPSHOT_STALE_TTL_MS) {
-          serveCached(stale, { "X-OW-Camera-Cache": "stale", "X-OW-Camera-Backoff": "true", "Retry-After": Math.ceil((backoff.until - now) / 1000) });
-        } else {
-          res.writeHead(503, { ...CORS, "Content-Type": "application/json", "X-OW-Camera-Backoff": "true", "Retry-After": Math.ceil((backoff.until - now) / 1000) });
-          res.end(JSON.stringify({ error: "camera_backoff", reason: backoff.reason, retry_after: Math.ceil((backoff.until - now) / 1000) }));
-        }
-        return;
+    // Initial request waits for the first image. Later stale requests return immediately
+    // and refresh in background so browser count does not multiply upstream fetches.
+    if (!cached) {
+      try {
+        const fresh = await refreshSnapshotSingleFlight(entity);
+        sendSnapshotBuffer(res, entity, fresh, "miss-filled");
+      } catch (e) {
+        console.warn(`[SNAP CACHE] initial fetch failed ${entity}: ${e.message}`);
+        sendSnapshotPlaceholder(res, entity, 200, e.statusCode === 429 ? "protect_429" : "fetch_failed");
       }
+      return;
+    }
 
-      // 2. Fresh cache hit
-      const cached = cameraSnapshotCache.get(entity);
-      if (cached && (now - cached.fetchedAt) < SNAPSHOT_CACHE_TTL_MS) {
-        serveCached(cached, { "X-OW-Camera-Cache": "hit" });
-        return;
-      }
-
-      // 3. Coalesce — if a fetch is already in flight, wait for it then serve from cache
-      if (cameraSnapshotInflight.has(entity)) {
-        try {
-          await cameraSnapshotInflight.get(entity);
-          const entry = cameraSnapshotCache.get(entity);
-          if (entry) { serveCached(entry, { "X-OW-Camera-Cache": "coalesced" }); }
-          else { err(res, "Snapshot unavailable", 503); }
-        } catch {
-          const stale = cameraSnapshotCache.get(entity);
-          if (stale) { serveCached(stale, { "X-OW-Camera-Cache": "stale" }); }
-          else { err(res, "Snapshot fetch failed", 502); }
-        }
-        return;
-      }
-
-      // 4. Fetch upstream — one request per camera at a time
-      console.log(`[CAM PROXY] snap fetch → ${entity}`);
-      let resolveInflight, rejectInflight;
-      const inflightPromise = new Promise((res, rej) => { resolveInflight = res; rejectInflight = rej; });
-      cameraSnapshotInflight.set(entity, inflightPromise);
-
-      const haReq = lib.request({
-        hostname: parsed.hostname,
-        port:     parsed.port || (isHttps ? 443 : 80),
-        path:     endpoint,
-        method:   "GET",
-        headers:  { "Authorization": `Bearer ${authToken}`, "Accept": "image/jpeg,image/*,*/*" },
-      }, haRes => {
-        const status = haRes.statusCode;
-        if (status === 429) {
-          cameraBackoff.set(entity, { until: Date.now() + CAMERA_429_BACKOFF_MS, reason: "429", lastStatus: 429 });
-          console.warn(`[CAM PROXY] 429 for ${entity} — backing off ${CAMERA_429_BACKOFF_MS / 1000}s`);
-          cameraSnapshotInflight.delete(entity);
-          rejectInflight(new Error("429"));
-          const stale = cameraSnapshotCache.get(entity);
-          if (stale && (Date.now() - stale.fetchedAt) < SNAPSHOT_STALE_TTL_MS) {
-            serveCached(stale, { "X-OW-Camera-Cache": "stale", "X-OW-Camera-Backoff": "true" });
-          } else {
-            res.writeHead(429, { ...CORS, "Content-Type": "application/json" });
-            res.end(JSON.stringify({ error: "rate_limited" }));
-          }
-          haRes.resume();
-          return;
-        }
-        if (status !== 200) {
-          cameraBackoff.set(entity, { until: Date.now() + CAMERA_ERROR_BACKOFF_MS, reason: "http_" + status, lastStatus: status });
-          cameraSnapshotInflight.delete(entity);
-          rejectInflight(new Error("status " + status));
-          const stale = cameraSnapshotCache.get(entity);
-          if (stale) { serveCached(stale, { "X-OW-Camera-Cache": "stale" }); }
-          else { err(res, "Upstream " + status, 502); }
-          haRes.resume();
-          return;
-        }
-        const contentType = haRes.headers["content-type"] || "image/jpeg";
-        const chunks = [];
-        haRes.on("data", chunk => chunks.push(chunk));
-        haRes.on("end", () => {
-          const buf = Buffer.concat(chunks);
-          const entry = { buf, contentType, fetchedAt: Date.now() };
-          cameraSnapshotCache.set(entity, entry);
-          cameraSnapshotInflight.delete(entity);
-          resolveInflight();
-          serveCached(entry, { "X-OW-Camera-Cache": "miss" });
-        });
-        haRes.on("error", e => {
-          cameraSnapshotInflight.delete(entity);
-          rejectInflight(e);
-          err(res, "Upstream read error", 502);
-        });
+    if (!cameraSnapshotInflight.has(entity)) {
+      refreshSnapshotSingleFlight(entity).catch(e => {
+        console.warn(`[SNAP CACHE] background refresh failed ${entity}: ${e.message}`);
       });
-      haReq.on("error", e => {
-        console.error("[CAM PROXY] snap error:", e.message);
-        cameraBackoff.set(entity, { until: Date.now() + CAMERA_ERROR_BACKOFF_MS, reason: "network", lastStatus: 0 });
-        cameraSnapshotInflight.delete(entity);
-        rejectInflight(e);
-        const stale = cameraSnapshotCache.get(entity);
-        if (stale) { serveCached(stale, { "X-OW-Camera-Cache": "stale" }); }
-        else { err(res, "Proxy error", 502); }
-      });
-      haReq.end();
-    } catch (e) { console.error("[CAM PROXY] exception:", e.message); err(res, e.message, 500); }
+    }
+    sendSnapshotBuffer(res, entity, cached, "stale-refreshing");
+    return;
+  }
+
+  /* ── Old HA camera proxy routes disabled in snapshot-grid-v1 ─ */
+  if (pathname.startsWith("/ow/camera_proxy")) {
+    res.writeHead(410, snapshotCorsHeaders({ "Content-Type": "application/json" }));
+    res.end(JSON.stringify({
+      error: "camera_proxy_disabled",
+      message: "snapshot-grid-v1 uses /ow/snap-cache/<entity>; HA live stream proxy is disabled."
+    }));
     return;
   }
 

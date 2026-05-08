@@ -6767,8 +6767,8 @@ function renderSettingsPanel() {
     btn.onclick = () => {
       panel.querySelectorAll(".settings-toggle[data-cammode]").forEach(b => b.classList.remove("active"));
       btn.classList.add("active");
-      localStorage.setItem('ow_cam_mode_v4', btn.dataset.cammode);
-      if (window._camSetMode) window._camSetMode(btn.dataset.cammode);
+      localStorage.setItem('ow_cam_mode_v4', 'snapshot');
+      if (window._camSetMode) window._camSetMode('snapshot');
     };
   });
 
@@ -6783,8 +6783,8 @@ function renderSettingsPanel() {
     btn.onclick = () => {
       panel.querySelectorAll(".settings-toggle[data-cammode]").forEach(b => b.classList.remove("active"));
       btn.classList.add("active");
-      localStorage.setItem('ow_cam_mode_v4', btn.dataset.cammode);
-      if (window._camSetMode) window._camSetMode(btn.dataset.cammode);
+      localStorage.setItem('ow_cam_mode_v4', 'snapshot');
+      if (window._camSetMode) window._camSetMode('snapshot');
     };
   });
 
