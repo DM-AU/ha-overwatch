@@ -127,7 +127,7 @@ async function camSetEnabled(type, key, state) {
 }
 
 /* ── Module state ────────────────────────────────────────────── */
-let camMode        = 'snapshot';   // snapshot-grid-v1: snapshot only
+let camMode        = 'snapshot';   // snapshot-grid-v1.1: snapshot only
 let camPinned      = new Set();    // Set of pinned camera entity ids
 let camToggled     = {};           // { entityId: bool } — false = user disabled
 let camZoneToggled = {};           // { zoneId: bool } — false = zone disabled on cam page
@@ -142,7 +142,7 @@ let camLiveRecycleTimer = null;
 let camStatusOpen  = localStorage.getItem('cam_status_open') !== 'false'; // default open, persisted
 let camModalOpen   = false;
 let camModalEntityId = null;
-let camModalMode   = 'snapshot';   // snapshot-grid-v1: snapshot only
+let camModalMode   = 'snapshot';   // snapshot-grid-v1.1: snapshot only
 let camStatusBody  = null;
 
 /* ── Wait for OW to be ready ────────────────────────────────── */
@@ -152,7 +152,7 @@ function waitForOW(cb, attempts = 0) {
   setTimeout(() => waitForOW(cb, attempts + 1), 100);
 }
 
-/* ── Snapshot-grid-v1 URL helpers ───────────────────────────── */
+/* ── Snapshot-grid-v1.1 URL helpers ─────────────────────────── */
 function camSnapshotUrl(entityId) {
   const id = encodeURIComponent(entityId || 'camera');
   const cb = `?_=${Date.now()}`;
@@ -160,13 +160,11 @@ function camSnapshotUrl(entityId) {
   return `ow/snap-cache/${id}${cb}`;
 }
 
-// Live mode is intentionally disabled for UniFi Protect stability.
-// Keep this function as a compatibility alias so any stale callers still use the
-// bounded server-side snapshot cache, never HA disabled_live_stream.
 function isIngressBrowser() {
   return window.location.pathname.includes('/api/hassio_ingress/');
 }
 
+// Compatibility only. Live transport is disabled; stale callers use snap-cache.
 function camStreamUrl(entityId) {
   return camSnapshotUrl(entityId);
 }
@@ -377,8 +375,9 @@ function renderCameraGrid() {
 /* ── Snapshot refresh ───────────────────────────────────────── */
 function startSnapshotRefresh() {
   stopSnapshotRefresh();
-  const configuredSec = parseFloat(localStorage.getItem("ow_snap_interval") || window.OW?.uiConfig?.cam_snapshot_interval || 2) || 2;
-  const intervalMs = Math.max(750, Math.min(2000, configuredSec * 1000));
+  const configuredSec = parseFloat(localStorage.getItem("ow_snap_interval") || window.OW?.uiConfig?.cam_snapshot_interval || 1) || 1;
+  // Browser polling can be 1-2s. Server bounds upstream fetches globally.
+  const intervalMs = Math.max(1000, Math.min(2000, configuredSec * 1000));
 
   camSnapshotTimer = setInterval(() => {
     if (document.hidden) return;
@@ -402,18 +401,17 @@ function stopSnapshotRefresh() {
 }
 
 function refreshLiveStreams() {
-  // snapshot-grid-v1: HA live streams are disabled. Use snap-cache refresh instead.
-  if (!document.hidden) {
-    document.querySelectorAll('.cam-tile-img').forEach(img => {
-      const tile = img.closest('.cam-tile');
-      if (!tile) return;
-      img.src = camSnapshotUrl(tileEntityFor(tile.dataset.entityId));
-    });
-  }
+  // snapshot-grid-v1.1: HA live streams are disabled. Use snap-cache refresh instead.
+  if (document.hidden) return;
+  document.querySelectorAll('.cam-tile-img').forEach(img => {
+    const tile = img.closest('.cam-tile');
+    if (!tile) return;
+    img.src = camSnapshotUrl(tileEntityFor(tile.dataset.entityId));
+  });
 }
 
 function startLiveRecycle() {
-  // snapshot-grid-v1: no HA disabled_live_stream recycle.
+  // snapshot-grid-v1.1: no HA live stream recycle.
   stopLiveRecycle();
 }
 
@@ -1063,7 +1061,7 @@ function openCameraFullscreen(entityId) {
   // Remove any existing fullscreen overlay
   document.getElementById('camFullscreenOverlay')?.remove();
 
-  const isLive = false; // snapshot-grid-v1: live disabled
+  const isLive = false; // snapshot-grid-v1.1: live disabled
   const overlay = document.createElement('div');
   overlay.id = 'camFullscreenOverlay';
   overlay.style.cssText = `
@@ -1158,7 +1156,7 @@ async function initCameraPage() {
     camPinned = new Set(JSON.parse(stored || OW.uiConfig.cam_pinned || '[]'));
   } catch { camPinned = new Set(); }
 
-  // Camera display mode — snapshot-grid-v1 is snapshot only.
+  // Camera display mode — snapshot-grid-v1.1 is snapshot only.
   camMode = 'snapshot';
   camModalMode = 'snapshot';
   localStorage.setItem('ow_cam_mode_v5', 'snapshot');
@@ -1175,7 +1173,7 @@ async function initCameraPage() {
   renderCameraGrid();
   bindModal();
 
-  // snapshot-grid-v1: start bounded snapshot refresh only
+  // snapshot-grid-v1.1: start bounded snapshot refresh only
   startSnapshotRefresh();
 
   // Poll every 2s for zone state changes

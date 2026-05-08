@@ -277,17 +277,17 @@ const serverHaStates = {};
  * Shared across all browser clients — 5 browsers requesting the same
  * camera snapshot within the TTL window get one upstream HA request.
  * ────────────────────────────────────────────────────────────── */
-const SNAPSHOT_CACHE_TTL_MS   = 2000;   // snapshot-grid-v1: per-camera upstream min interval
+const SNAPSHOT_CACHE_TTL_MS   = 1000;   // snapshot-grid-v1.1: per-camera upstream min interval
 const SNAPSHOT_STALE_TTL_MS   = 30000;  // stale fallback window
-const CAMERA_429_BACKOFF_MS   = 10000;  // short backoff, serve stale during backoff
-const CAMERA_ERROR_BACKOFF_MS = 5000;   // transient error backoff
+const CAMERA_429_BACKOFF_MS   = 8000;   // short 429 backoff; stale served during backoff
+const CAMERA_ERROR_BACKOFF_MS = 3000;   // transient error backoff
 
 const cameraSnapshotCache   = new Map(); // entityId → { buf, contentType, fetchedAt }
 const cameraSnapshotInflight = new Map(); // entityId → Promise<void>
 const cameraBackoff         = new Map(); // entityId → { until, reason, lastStatus }
 
-const SNAPSHOT_MAX_BYTES = 2 * 1024 * 1024; // hard cap per image buffer
-const SNAPSHOT_GLOBAL_CONCURRENCY = 2;
+const SNAPSHOT_MAX_BYTES = 8 * 1024 * 1024; // high-res Protect snapshots can exceed 2MB
+const SNAPSHOT_GLOBAL_CONCURRENCY = 4;
 let snapshotActiveFetches = 0;
 const snapshotQueue = [];
 
@@ -403,14 +403,10 @@ function fetchSnapshotFromHA(entity) {
           reject(new Error("empty snapshot"));
           return;
         }
-        resolve({
-          buf,
-          contentType: haRes.headers["content-type"] || "image/jpeg",
-          fetchedAt: Date.now(),
-        });
+        resolve({ buf, contentType: haRes.headers["content-type"] || "image/jpeg", fetchedAt: Date.now() });
       });
     });
-    haReq.setTimeout(4500, () => haReq.destroy(new Error("snapshot timeout")));
+    haReq.setTimeout(3000, () => haReq.destroy(new Error("snapshot timeout")));
     haReq.on("error", reject);
     haReq.end();
   }));
@@ -1288,7 +1284,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  /* ── Snapshot-grid-v1 camera cache ───────────────────────── */
+  /* ── Snapshot-grid-v1.1 camera cache ─────────────────────── */
   if (pathname.startsWith("/ow/snap-cache/")) {
     const entity = decodeURIComponent(pathname.slice("/ow/snap-cache/".length).split("?")[0] || "");
     if (!entity) { sendSnapshotPlaceholder(res, "camera", 400, "missing_entity"); return; }
@@ -1311,8 +1307,6 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // Initial request waits for the first image. Later stale requests return immediately
-    // and refresh in background so browser count does not multiply upstream fetches.
     if (!cached) {
       try {
         const fresh = await refreshSnapshotSingleFlight(entity);
@@ -1333,12 +1327,12 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  /* ── Old HA camera proxy routes disabled in snapshot-grid-v1 ─ */
+  /* ── Old HA camera proxy routes disabled in snapshot-grid-v1.1 ─ */
   if (pathname.startsWith("/ow/camera_proxy")) {
     res.writeHead(410, snapshotCorsHeaders({ "Content-Type": "application/json" }));
     res.end(JSON.stringify({
       error: "camera_proxy_disabled",
-      message: "snapshot-grid-v1 uses /ow/snap-cache/<entity>; HA live stream proxy is disabled."
+      message: "snapshot-grid-v1.1 uses /ow/snap-cache/<entity>; HA live stream proxy is disabled."
     }));
     return;
   }
