@@ -277,16 +277,16 @@ const serverHaStates = {};
  * Shared across all browser clients — 5 browsers requesting the same
  * camera snapshot within the TTL window get one upstream HA request.
  * ────────────────────────────────────────────────────────────── */
-const SNAPSHOT_CACHE_TTL_MS   = 1000;   // snapshot-grid-v1.2: per-camera upstream min interval
-const SNAPSHOT_STALE_TTL_MS   = 45000;  // v1.2: longer stale fallback for slow 180 cameras
-const CAMERA_429_BACKOFF_MS   = 8000;   // v1.2: short 429 backoff; stale served during backoff
-const CAMERA_ERROR_BACKOFF_MS = 3000;   // v1.2: transient error backoff
+const SNAPSHOT_CACHE_TTL_MS   = 1000;   // snapshot-grid-v1.3: per-camera upstream min interval
+const SNAPSHOT_STALE_TTL_MS   = 45000;  // v1.3: longer stale fallback for slow 180 cameras
+const CAMERA_429_BACKOFF_MS   = 8000;   // v1.3: short 429 backoff; stale served during backoff
+const CAMERA_ERROR_BACKOFF_MS = 3000;   // v1.3: transient error backoff
 
 const cameraSnapshotCache   = new Map(); // entityId → { buf, contentType, fetchedAt }
 const cameraSnapshotInflight = new Map(); // entityId → Promise<void>
 const cameraBackoff         = new Map(); // entityId → { until, reason, lastStatus }
 
-const SNAPSHOT_MAX_BYTES = 12 * 1024 * 1024; // v1.2: Reolink 180 snapshots can be >5MB
+const SNAPSHOT_MAX_BYTES = 12 * 1024 * 1024; // v1.3: Reolink 180 snapshots can be >5MB
 const SNAPSHOT_GLOBAL_CONCURRENCY = 3;
 let snapshotActiveFetches = 0;
 const snapshotQueue = [];
@@ -710,7 +710,22 @@ const server = http.createServer(async (req, res) => {
 
   /* ── /ow/triggered — coordinator polls for zone triggered states ── */
   if (pathname === "/ow/triggered" && req.method === "GET") {
-    json(res, globalTriggeredZones);
+    // v1.3 fix: always return every configured zone, not only zones that have
+    // changed since listener startup. Direct :8099 dashboards rely on a stable
+    // complete key set; missing keys caused zones/doors/lights to look stale.
+    let allZones = [];
+    try { allZones = typeof loadZones === "function" ? loadZones() : []; } catch {}
+    const out = {};
+    for (const zone of allZones) {
+      const slug = nameSlug(zone.name) || zone.id;
+      out[slug] = !!globalTriggeredZones[slug];
+    }
+    // Preserve transient/renamed keys for already-open browsers, but configured
+    // zones above are authoritative.
+    Object.keys(globalTriggeredZones || {}).forEach(k => {
+      if (!(k in out)) out[k] = !!globalTriggeredZones[k];
+    });
+    json(res, out);
     return;
   }
 
@@ -1272,7 +1287,7 @@ const server = http.createServer(async (req, res) => {
     }
     json(res, {
       ok: true,
-      version: "snapshot-grid-v1.2",
+      version: "snapshot-grid-v1.3",
       ttlMs: SNAPSHOT_CACHE_TTL_MS,
       staleTtlMs: SNAPSHOT_STALE_TTL_MS,
       maxBytes: SNAPSHOT_MAX_BYTES,
@@ -1284,7 +1299,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  /* ── Snapshot-grid-v1.2 camera cache ─────────────────────── */
+  /* ── Snapshot-grid-v1.3 camera cache ─────────────────────── */
   if (pathname.startsWith("/ow/snap-cache/")) {
     const entity = decodeURIComponent(pathname.slice("/ow/snap-cache/".length).split("?")[0] || "");
     if (!entity) { sendSnapshotPlaceholder(res, "camera", 400, "missing_entity"); return; }
@@ -1309,10 +1324,10 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  /* ── Old HA camera proxy routes disabled in snapshot-grid-v1.2 ─ */
+  /* ── Old HA camera proxy routes disabled in snapshot-grid-v1.3 ─ */
   if (pathname.startsWith("/ow/camera_proxy")) {
     res.writeHead(410, snapshotCorsHeaders({ "Content-Type": "application/json" }));
-    res.end(JSON.stringify({ error: "camera_proxy_disabled", message: "snapshot-grid-v1.2 uses /ow/snap-cache/<entity>; HA live stream proxy is disabled." }));
+    res.end(JSON.stringify({ error: "camera_proxy_disabled", message: "snapshot-grid-v1.3 uses /ow/snap-cache/<entity>; HA live stream proxy is disabled." }));
     return;
   }
 
