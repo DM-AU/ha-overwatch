@@ -127,7 +127,7 @@ async function camSetEnabled(type, key, state) {
 }
 
 /* ── Module state ────────────────────────────────────────────── */
-let camMode        = 'snapshot';   // snapshot-grid-v1.1: snapshot only
+let camMode        = 'snapshot';   // snapshot-grid-v1.2: snapshot only
 let camPinned      = new Set();    // Set of pinned camera entity ids
 let camToggled     = {};           // { entityId: bool } — false = user disabled
 let camZoneToggled = {};           // { zoneId: bool } — false = zone disabled on cam page
@@ -142,7 +142,7 @@ let camLiveRecycleTimer = null;
 let camStatusOpen  = localStorage.getItem('cam_status_open') !== 'false'; // default open, persisted
 let camModalOpen   = false;
 let camModalEntityId = null;
-let camModalMode   = 'snapshot';   // snapshot-grid-v1.1: snapshot only
+let camModalMode   = 'snapshot';   // snapshot-grid-v1.2: snapshot only
 let camStatusBody  = null;
 
 /* ── Wait for OW to be ready ────────────────────────────────── */
@@ -152,7 +152,7 @@ function waitForOW(cb, attempts = 0) {
   setTimeout(() => waitForOW(cb, attempts + 1), 100);
 }
 
-/* ── Snapshot-grid-v1.1 URL helpers ─────────────────────────── */
+/* ── Snapshot-grid-v1.2 URL helpers ─────────────────────────── */
 function camSnapshotUrl(entityId) {
   const id = encodeURIComponent(entityId || 'camera');
   const cb = `?_=${Date.now()}`;
@@ -171,6 +171,8 @@ function camStreamUrl(entityId) {
 
 /* ── Tile entity resolution ──────────────────────────────────── */
 function tileEntityFor(highResId) {
+  // Per-client choice: ow_cam_always_high_res=true forces high-res on this browser only.
+  // Otherwise this browser uses camLowResMap for low-res tile entities.
   if (localStorage.getItem('ow_cam_always_high_res') === 'true') return highResId;
   const resolved = camLowResMap[highResId] || highResId;
   if (resolved !== highResId) console.log(`[CAM] Low-res: ${highResId} → ${resolved}`);
@@ -384,9 +386,7 @@ function startSnapshotRefresh() {
     document.querySelectorAll('.cam-tile-img').forEach(img => {
       const tile = img.closest('.cam-tile');
       if (!tile) return;
-      const entityId = tile.dataset.entityId;
-      const tileEnt = tileEntityFor(entityId);
-      img.src = camSnapshotUrl(tileEnt);
+      img.src = camSnapshotUrl(tileEntityFor(tile.dataset.entityId));
     });
 
     if (camModalOpen && camModalEntityId) {
@@ -401,7 +401,7 @@ function stopSnapshotRefresh() {
 }
 
 function refreshLiveStreams() {
-  // snapshot-grid-v1.1: HA live streams are disabled. Use snap-cache refresh instead.
+  // snapshot-grid-v1.2: HA live streams are disabled. Use snap-cache refresh instead.
   if (document.hidden) return;
   document.querySelectorAll('.cam-tile-img').forEach(img => {
     const tile = img.closest('.cam-tile');
@@ -411,7 +411,7 @@ function refreshLiveStreams() {
 }
 
 function startLiveRecycle() {
-  // snapshot-grid-v1.1: no HA live stream recycle.
+  // snapshot-grid-v1.2: no HA live stream recycle.
   stopLiveRecycle();
 }
 
@@ -1061,7 +1061,7 @@ function openCameraFullscreen(entityId) {
   // Remove any existing fullscreen overlay
   document.getElementById('camFullscreenOverlay')?.remove();
 
-  const isLive = false; // snapshot-grid-v1.1: live disabled
+  const isLive = false; // snapshot-grid-v1.2: live disabled
   const overlay = document.createElement('div');
   overlay.id = 'camFullscreenOverlay';
   overlay.style.cssText = `
@@ -1156,7 +1156,7 @@ async function initCameraPage() {
     camPinned = new Set(JSON.parse(stored || OW.uiConfig.cam_pinned || '[]'));
   } catch { camPinned = new Set(); }
 
-  // Camera display mode — snapshot-grid-v1.1 is snapshot only.
+  // Camera display mode — snapshot-grid-v1.2 is snapshot only.
   camMode = 'snapshot';
   camModalMode = 'snapshot';
   localStorage.setItem('ow_cam_mode_v5', 'snapshot');
@@ -1173,7 +1173,7 @@ async function initCameraPage() {
   renderCameraGrid();
   bindModal();
 
-  // snapshot-grid-v1.1: start bounded snapshot refresh only
+  // snapshot-grid-v1.2: start bounded snapshot refresh only
   startSnapshotRefresh();
 
   // Poll every 2s for zone state changes

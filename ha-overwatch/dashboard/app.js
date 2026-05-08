@@ -79,7 +79,7 @@ let uiConfig = {
 
   // Camera dashboard
   cam_default_mode:       "snapshot",  // "snapshot" | "live"
-  cam_snapshot_interval: 1,      // snapshot-grid-v1.1: browser refresh default seconds
+  cam_snapshot_interval: 1,      // snapshot-grid-v1.2: browser refresh default seconds
   cam_cooldown:           30,          // seconds camera stays visible after zone clears
   cam_max_visible:        0,           // 0 = unlimited
   cam_sort_order:         "recent_first",
