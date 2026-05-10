@@ -3467,15 +3467,9 @@ function renderZonePopupContent() {
     <div style="margin-bottom:6px;">
       <div style="font-size:10px;text-transform:uppercase;color:#555;letter-spacing:0.1em;margin-bottom:4px;">Cameras</div>
       ${cameras_.map(e => {
-        const resolvedId = getCamLowRes(e);
-        const thumbUrl = showThumbs
-          ? (window.OW?.apiPath
-              ? window.OW.apiPath(`ow/snap-cache/${encodeURIComponent(resolvedId)}`)
-              : `ow/snap-cache/${encodeURIComponent(resolvedId)}`) + `?t=${Date.now()}`
-          : null;
-
+        const thumbUrl = null;
         return `<div style="margin-bottom:6px;">
-          ${showThumbs ? `<img data-cam="${escapeHtml(e)}" src="${thumbUrl}" style="width:100%;height:120px;object-fit:cover;border-radius:6px;background:#111;display:block;margin-bottom:4px;" onerror="this.style.display='none'">` : ''}
+          ${showThumbs ? `<div data-cam="${escapeHtml(e)}" style="width:100%;height:44px;border-radius:6px;background:#111;color:#777;display:flex;align-items:center;justify-content:center;font-size:11px;margin-bottom:4px;">Snapshots disabled</div>` : ''}
           <div style="display:flex;align-items:center;padding:2px 0;">
             <span style="flex:1;color:#ccc;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">📷 ${escapeHtml(e.split('.').pop())}</span>
             <button class="zp-cam-view" data-entity="${escapeHtml(e)}" style="background:rgba(0,150,255,0.15);border:1px solid rgba(0,150,255,0.35);color:#0096ff;border-radius:5px;padding:3px 10px;cursor:pointer;font-size:11px;">▶ View</button>
