@@ -3381,7 +3381,7 @@ function renderZonePopupContent() {
   const zone = zones.find(z => z.id === _zonePopupZoneId);
   if (!zone) { closeZonePopup(); return; }
 
-  const showThumbs = localStorage.getItem('ow
+  const showThumbs = false; // camera snapshots disabled: never request camera proxy thumbnails
   const zState     = getZoneState(zone);
   const isArmed    = zState !== 'disabled';
   const sensors_   = zone.sensors  || [];
