@@ -3375,14 +3375,13 @@ function closeZonePopup() {
   _zonePopupZoneId = null;
 }
 
-// snapshot-grid-v1.3-zone-thumbs: zone popup thumbnails use /ow/snap-cache and respect ow_zone_popup_thumbs.
 function renderZonePopupContent() {
   const popup = _zonePopupEl;
   if (!popup || !_zonePopupZoneId) return;
   const zone = zones.find(z => z.id === _zonePopupZoneId);
   if (!zone) { closeZonePopup(); return; }
 
-  const showThumbs = localStorage.getItem('ow_zone_popup_thumbs') === 'true';
+  const showThumbs = false; // camera snapshots disabled: never request camera proxy thumbnails
   const zState     = getZoneState(zone);
   const isArmed    = zState !== 'disabled';
   const sensors_   = zone.sensors  || [];
@@ -3468,14 +3467,9 @@ function renderZonePopupContent() {
     <div style="margin-bottom:6px;">
       <div style="font-size:10px;text-transform:uppercase;color:#555;letter-spacing:0.1em;margin-bottom:4px;">Cameras</div>
       ${cameras_.map(e => {
-        const resolvedId = getCamLowRes(e);
-        const thumbUrl = showThumbs
-          ? ((window.OW && window.OW.apiPath)
-              ? window.OW.apiPath(`ow/snap-cache/${encodeURIComponent(resolvedId)}`)
-              : `ow/snap-cache/${encodeURIComponent(resolvedId)}`) + `?t=${Date.now()}`
-          : null;
+        const thumbUrl = null;
         return `<div style="margin-bottom:6px;">
-          ${showThumbs ? `<img data-cam="${escapeHtml(e)}" data-resolved-cam="${escapeHtml(resolvedId)}" src="${thumbUrl}" style="width:100%;height:120px;object-fit:cover;border-radius:6px;background:#111;display:block;margin-bottom:4px;" onerror="this.style.display='none'">` : ''}
+          ${showThumbs ? `<div data-cam="${escapeHtml(e)}" style="width:100%;height:44px;border-radius:6px;background:#111;color:#777;display:flex;align-items:center;justify-content:center;font-size:11px;margin-bottom:4px;">Snapshots disabled</div>` : ''}
           <div style="display:flex;align-items:center;padding:2px 0;">
             <span style="flex:1;color:#ccc;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">📷 ${escapeHtml(e.split('.').pop())}</span>
             <button class="zp-cam-view" data-entity="${escapeHtml(e)}" style="background:rgba(0,150,255,0.15);border:1px solid rgba(0,150,255,0.35);color:#0096ff;border-radius:5px;padding:3px 10px;cursor:pointer;font-size:11px;">▶ View</button>
@@ -3584,7 +3578,7 @@ function renderZonePopupContent() {
       popup.querySelectorAll('img[data-cam]').forEach(img => {
         const e    = img.dataset.cam;
         const res  = getCamLowRes(e);
-        const base = window.OW?.apiPath ? window.OW.apiPath(`ow/snap-cache/${encodeURIComponent(res)}`) : `ow/snap-cache/${encodeURIComponent(res)}`;
+        const base = window.OW?.apiPath ? window.OW.apiPath(`ow/snapshot_disabled/${res}`) : `ow/snapshot_disabled/${res}`;
         img.src = `${base}?t=${Date.now()}`;
       });
     }, intervalMs);
@@ -6868,7 +6862,8 @@ function renderSettingsPanel() {
   };
   const zonePopupThumbsChk = document.getElementById('zonePopupThumbsChk');
   if (zonePopupThumbsChk) zonePopupThumbsChk.onchange = () => {
-    localStorage.setItem('ow_zone_popup_thumbs', zonePopupThumbsChk.checked ? 'true' : 'false');
+    localStorage.setItem('ow_zone_popup_thumbs', 'false');
+    zonePopupThumbsChk.checked = false;
     refreshZonePopupIfOpen();
   };
 
