@@ -218,10 +218,15 @@ function haEntitiesForArea(areaId) {
 }
 
 // Device class filters per OW tab
-const HA_DOOR_CLASSES = new Set(['door','window','garage_door','opening','gate','lock']);
+const HA_DOOR_CLASSES = new Set(['door','window','garage_door','opening','gate']);
 const HA_ZONE_SENSOR_CLASSES = new Set([
   'motion','occupancy','presence','vibration','sound','moisture','smoke','carbon_monoxide','heat','cold','gas','tamper','connectivity','power','problem','safety','update'
 ]);
+
+// Fallback matching is intentionally conservative. HA device_class wins; name matching is only
+// used where the entity text clearly looks like a contact/opening sensor and not status/telemetry.
+const HA_DOOR_INCLUDE_RE = /(^|[._\s-])((garage[._\s-]*door)|(screen[._\s-]*door)|(roller[._\s-]*door)|(door[._\s-]*(sensor|contact))|(window[._\s-]*(sensor|contact))|gate|garage_door|door|window|opening|reed|contact)([._\s-]|$)/;
+const HA_DOOR_EXCLUDE_RE = /(^|[._\s-])(battery|batt|charger|chargers|charging|charge|status|controller|physical[._\s-]*switch|switch|light|lights|motion|occupancy|presence|illuminance|lux|temperature|humidity|voltage|current|power|energy|rssi|lqi|linkquality|signal|tamper|problem|update)([._\s-]|$)/;
 
 function haEntityDeviceClass(e) {
   return String(e?.device_class || e?.original_device_class || haStates[e?.entity_id]?.attributes?.device_class || '').toLowerCase();
@@ -237,9 +242,9 @@ function isHADoorEntity(e) {
   const eid = String(e?.entity_id || '').toLowerCase();
   const dc = haEntityDeviceClass(e);
   const text = haEntityText(e);
-  if (eid.startsWith('binary_sensor.') && HA_DOOR_CLASSES.has(dc)) return true;
-  if (eid.startsWith('binary_sensor.') && /(^|[._\s-])(door|garage|garage_door|gate|window|roller|shutter|contact|reed)([._\s-]|$)/.test(text)) return true;
-  return false;
+  if (!eid.startsWith('binary_sensor.')) return false;
+  if (HA_DOOR_CLASSES.has(dc)) return true;
+  return HA_DOOR_INCLUDE_RE.test(text) && !HA_DOOR_EXCLUDE_RE.test(text);
 }
 
 const HA_AREA_FILTERS = {
@@ -1850,7 +1855,7 @@ async function setZoneGroup(zoneId, groupId) {
   for (const g of changed) await saveGroup(g);
   selectedGroupId = null;
   renderZones();
-  renderZonesEditor();
+  renderZonesEditor(true);
 }
 
 function setGroupArmed(groupId, armed) {
@@ -2114,6 +2119,19 @@ function isEntityTriggered(entityId) {
   return s === "on" || s === "open" || s === "opening" || s === "detected" || s === "home" || s === "triggered" || s === "unlocked";
 }
 
+function zoneTriggerEntities(zone) {
+  if (!zone) return [];
+  const sensors = (zone.sensors || []).filter(e => !isEntityGhosted(e));
+  const doorSensors = doorPins
+    .filter(p => p.zone_id === zone.id && p.sensor_entity && !isEntityGhosted(p.sensor_entity))
+    .map(p => p.sensor_entity);
+  return [...sensors, ...doorSensors];
+}
+
+function zoneActiveTriggerEntity(zone) {
+  return zoneTriggerEntities(zone).find(isEntityTriggered) || '';
+}
+
 /* Track previous zone states to detect trigger→normal transitions */
 const zonePrevState = {};
 
@@ -2159,7 +2177,7 @@ function getZoneState(zone) {
 function checkZoneStateChanges() {
   if (!haConnected) return;
   for (const zone of zones) {
-    const sensors = (zone.sensors || []).filter(e => !isEntityGhosted(e));
+    const sensors = zoneTriggerEntities(zone);
     // Compute raw state without the prev-state side effects
     let state = "normal";
     if (getZoneState(zone) === "disabled") {
@@ -2345,15 +2363,15 @@ setInterval(() => {
         if (!zone) return;
         const st = getZoneState(zone);
         const isOff = getZoneState(zone) === "disabled";
-        const sensors = zone.sensors || [];
-        const anyActive = sensors.some(isEntityTriggered);
+        const activeEntity = zoneActiveTriggerEntity(zone);
+        const anyActive = !!activeEntity;
         const isDisarmedActive = isOff && anyActive;
         const isTriggered = st === "triggered";
         dot.classList.toggle("flashing", isTriggered || isDisarmedActive);
         dot.style.background = isTriggered
           ? "#ff3b30"
           : isDisarmedActive
-          ? resolveColour(entityTypeColourOff(detectEntityType(sensors.find(isEntityTriggered) || "")))
+          ? resolveColour(entityTypeColourOff(detectEntityType(activeEntity || "door")))
           : st === "fault" ? "#ff9500"
           : isOff ? (zone.colorHex || "#0096ff")  // disarmed + clear → zone colour dimmed
           :          "#ff3b30";                     // armed + clear → red
@@ -2612,13 +2630,13 @@ function _renderZonesInternal(targetSvg) {
         poly.style.strokeWidth = String(1 / zoom.scale);
       }
     } else {
-      // Live mode — transparent unless a sensor is active
-      const sensors = zone.sensors || [];
-      const anyActive = sensors.some(isEntityTriggered);
+      // Live mode — transparent unless a sensor/door/window is active
+      const activeEntity = zoneActiveTriggerEntity(zone);
+      const anyActive = !!activeEntity;
       const hideDisarmedFlash = localStorage.getItem('ow_hide_disarmed_flash') === 'true';
       if (anyActive && isDisabled && !hideDisarmedFlash) {
-        // Disarmed zone with active sensor — flash in off-colour
-        const type = detectEntityType(sensors.find(isEntityTriggered) || "");
+        // Disarmed zone with active sensor/door/window — flash in off-colour
+        const type = detectEntityType(activeEntity || "door");
         const hex  = resolveColour(entityTypeColourOff(type));
         const fillAlpha = flashPhase ? 0.15 : 0.45;
         poly.style.fill        = hexToRgba(hex, fillAlpha);
@@ -2699,6 +2717,36 @@ function refreshEntityStateDots(container) {
     if (dot) { dot.className = "ha-entity-state " + stateClass; }
     if (lbl) lbl.textContent = stateStr;
   });
+}
+
+/* ─── ZONE EDITOR DOM PRESERVATION ─────────────────────── */
+function captureZoneEditorScrollState(container) {
+  if (!container) return [];
+  return Array.from(container.querySelectorAll('.zed-list, .zed-right-content, .ha-entity-list, #groupMemberList'))
+    .map(el => ({
+      selector: el.id ? `#${CSS.escape(el.id)}` : `.${Array.from(el.classList).map(c => CSS.escape(c)).join('.')}`,
+      scrollTop: el.scrollTop,
+      scrollLeft: el.scrollLeft,
+    }));
+}
+
+function restoreZoneEditorScrollState(container, state) {
+  if (!container || !state?.length) return;
+  requestAnimationFrame(() => {
+    state.forEach(s => {
+      const el = container.querySelector(s.selector);
+      if (el) { el.scrollTop = s.scrollTop; el.scrollLeft = s.scrollLeft; }
+    });
+  });
+}
+
+function zoneEditorHasActiveControl(container) {
+  const panel = container?.querySelector('.zones-editor');
+  const activeEl = document.activeElement;
+  if (!panel || !activeEl || !panel.contains(activeEl)) return false;
+  if (activeEl.matches('input, textarea, select, [contenteditable="true"]')) return true;
+  if (activeEl.closest('.entity-search-results, .zone-handle, .ha-device-tabs')) return true;
+  return false;
 }
 
 /* ─── ZONES EDITOR PANEL (draggable) ──────────────────────── */
@@ -3226,7 +3274,7 @@ function makeDoorPin(pin, isEdit, scale) {
   g.style.pointerEvents = 'all';
 
   const sensorState  = haStates[pin.sensor_entity]?.state;
-  const isOpen       = sensorState === 'on';
+  const isOpen       = ['on','open','opening','detected','unlocked'].includes(String(sensorState || '').toLowerCase());
   const noSensor     = !pin.sensor_entity;
   const controlState = pin.control_entity ? haStates[pin.control_entity]?.state : null;
   const isLocked     = controlState === 'locked' || controlState === 'off';
@@ -3887,7 +3935,7 @@ function startPinAnimLoop() {
     const hasActiveLights = lights.some(p => haStates[p.entity_id]?.state === 'on');
     const suppressDoorDisarmed = localStorage.getItem('ow_hide_door_alert_disarmed') === 'true';
     const hasOpenDoors    = doorPins.some(p => {
-      if (!p.sensor_entity || haStates[p.sensor_entity]?.state !== 'on') return false;
+      if (!p.sensor_entity || !isEntityTriggered(p.sensor_entity)) return false;
       if (suppressDoorDisarmed) {
         // Check if the zone is disarmed — check arm switch directly (not getZoneState
         // which would return 'triggered' because the open door makes the zone triggered)
@@ -3920,20 +3968,21 @@ function startPinAnimLoop() {
   requestAnimationFrame(loop);
 }
 
-function renderZonesEditor() {
+function renderZonesEditor(force = false) {
   const container = document.getElementById("zonesEditorContainer");
   if (!container) return;
 
   if (!editorMode) { container.innerHTML = ""; return; }
 
-  // Don't blow away DOM while user is typing
-  const activeEl = document.activeElement;
-  const editorPanel = container.querySelector(".zones-editor");
-  if (editorPanel && activeEl && editorPanel.contains(activeEl) &&
-      (activeEl.tagName === "INPUT" || activeEl.tagName === "TEXTAREA")) {
+  // Don't blow away DOM while the user is interacting with editor controls.
+  // HA state updates can arrive while a dropdown is open or a panel is scrolled; a full
+  // innerHTML rebuild steals focus and resets scroll. Refresh state dots only unless forced.
+  if (!force && zoneEditorHasActiveControl(container)) {
     refreshEntityStateDots(container);
     return;
   }
+
+  const __zedScrollState = captureZoneEditorScrollState(container);
 
   const selectedZone  = selectedZoneId  ? zones.find(z => z.id === selectedZoneId)   : null;
   const selectedGroup = selectedGroupId ? groups.find(g => g.id === selectedGroupId) : null;
@@ -4325,6 +4374,8 @@ function renderZonesEditor() {
       <div class="zed-resize-handle" id="zedResizeHandle"></div>
     </div>
   `;
+
+  restoreZoneEditorScrollState(container, __zedScrollState);
 
   // ── Wire events ────────────────────────────────────────────
   // Zone list item clicks
@@ -7676,12 +7727,12 @@ function updateStatusDropdownInPlace() {
     const isOff = _zst === "disabled";
     const st    = getZoneState(zone);
     const isTriggeredZone = st === "triggered";
-    const sensors = zone.sensors || [];
-    const anyActive = haConnected && sensors.some(isEntityTriggered);
+    const activeEntity = haConnected ? zoneActiveTriggerEntity(zone) : '';
+    const anyActive = !!activeEntity;
     const isDisarmedActive = isOff && anyActive;
 
     const dotColour = isTriggeredZone ? "#ff3b30"
-      : isDisarmedActive ? resolveColour(entityTypeColourOff(detectEntityType(sensors.find(isEntityTriggered) || "")))
+      : isDisarmedActive ? resolveColour(entityTypeColourOff(detectEntityType(activeEntity || "door")))
       : st === "fault" ? "#ff9500"
       : isOff ? (zone.colorHex || "#0096ff")
       :          "#ff3b30";
@@ -7774,13 +7825,13 @@ function renderStatusDropdown() {
     const state = getZoneState(z);
     const isOff = getZoneState(z) === 'disabled';
     const isTriggeredZone = state === "triggered";
-    const sensors = z.sensors || [];
-    const anyActive = haConnected && sensors.some(isEntityTriggered);
+    const activeEntity = haConnected ? zoneActiveTriggerEntity(z) : '';
+    const anyActive = !!activeEntity;
     const isDisarmedActive = isOff && anyActive;
     // Locked = server mode on a Direct Mode browser (no WS to call HA switches)
     const zoneLocked = !canArmDisarm();
     const dotColour = isTriggeredZone ? "#ff3b30"
-      : isDisarmedActive ? resolveColour(entityTypeColourOff(detectEntityType(sensors.find(isEntityTriggered) || "")))
+      : isDisarmedActive ? resolveColour(entityTypeColourOff(detectEntityType(activeEntity || "door")))
       : state === "fault" ? "#ff9500"
       : isOff ? (z.colorHex || "#0096ff")  // disarmed + clear → zone colour (dimmed by opacity)
       :          "#ff3b30";                  // armed + clear → red
