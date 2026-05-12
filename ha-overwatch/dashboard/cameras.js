@@ -185,6 +185,19 @@ function friendlyName(entityId) {
 }
 
 /* ── Compute active cameras ─────────────────────────────────── */
+function zoneCameraTriggered(zone) {
+  const OW = window.OW;
+  if (!zone || !OW) return false;
+
+  // app.js owns trigger semantics: Sensors + Doors & Windows, excluding ghosted entities.
+  if (typeof OW.zoneActiveTriggerEntity === 'function') {
+    return !!OW.zoneActiveTriggerEntity(zone);
+  }
+
+  // Fallback for older app.js builds.
+  return (zone.sensors || []).some(OW.isEntityTriggered);
+}
+
 function getActiveCameras() {
   const OW    = window.OW;
   const zones = OW.zones;
@@ -230,8 +243,7 @@ function getActiveCameras() {
       if (alarmSt && alarmSt.state === 'off') return;
     }
 
-    const sensors   = zone.sensors || [];
-    const triggered = sensors.some(OW.isEntityTriggered);
+    const triggered = zoneCameraTriggered(zone);
     const cameras   = zone.cameras || [];
     if (!cameras.length) return;
 
