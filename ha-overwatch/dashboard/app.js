@@ -220,17 +220,18 @@ function haEntitiesForArea(areaId) {
 // Device class filters per OW tab
 const HA_AREA_FILTERS = {
   sensors: e => {
-    const dc = (e.device_class||'').toLowerCase();
+    // HA entity registry uses 'device_class' for user overrides and 'original_device_class' for integration-set values
+    const dc = (e.device_class || e.original_device_class || '').toLowerCase();
     const eid = (e.entity_id||'').toLowerCase();
     return eid.startsWith('binary_sensor.') &&
-      ['motion','occupancy','presence','vibration','sound','moisture','smoke','carbon_monoxide','heat','cold','gas'].includes(dc) &&
+      ['motion','occupancy','presence','vibration','sound','moisture','smoke','carbon_monoxide','heat','cold','gas','tamper','connectivity','power','problem','safety','update'].includes(dc) &&
       !eid.startsWith('binary_sensor.overwatch_');
   },
   cameras: e => (e.entity_id||'').startsWith('camera.'),
   lights:  e => (e.entity_id||'').startsWith('light.'),
   sirens:  e => (e.entity_id||'').startsWith('siren.'),
   doors:   e => {
-    const dc = (e.device_class||'').toLowerCase();
+    const dc = (e.device_class || e.original_device_class || '').toLowerCase();
     const eid = (e.entity_id||'').toLowerCase();
     return eid.startsWith('binary_sensor.') &&
       ['door','window','garage_door','opening','gate','lock'].includes(dc);
@@ -4796,12 +4797,16 @@ function deviceRow(entityId, devType, zone) {
 
   // Ghost state — entity is excluded (from HA area sync but user toggled off)
   const excluded = zone && (zone.ha_excluded_entities || []).includes(entityId);
-  const fromArea = zone?.ha_area_id && !!_haRegistry.areas.length; // whether area linking is active
-  const ghostBtn = fromArea
-    ? `<button class="ha-entity-ghost" data-entity-id="${escapeHtml(entityId)}" title="${excluded ? 'Entity ghosted — click to restore' : 'Ghost this entity (hide from automation & search)'}"
-        style="background:none;border:1px solid ${excluded ? 'rgba(255,149,0,0.4)' : 'rgba(255,255,255,0.12)'};border-radius:4px;padding:2px 5px;cursor:pointer;font-size:10px;color:${excluded ? '#ff9500' : '#555'};flex-shrink:0;"
-        >${excluded ? '👻 Ghosted' : '👻'}</button>`
+  // If zone is linked to HA area, use ghost instead of delete for all entities in this zone
+  const isHALinked = !!zone?.ha_area_id;
+  const ghostBtn = isHALinked
+    ? `<button class="ha-entity-ghost" data-entity-id="${escapeHtml(entityId)}" title="${excluded ? 'Restore entity (currently hidden from automations & search)' : 'Hide entity (ghost — removes from automations & search but keeps the link)'}"
+        style="background:none;border:1px solid ${excluded ? 'rgba(255,149,0,0.5)' : 'rgba(255,255,255,0.12)'};border-radius:4px;padding:2px 6px;cursor:pointer;font-size:10px;color:${excluded ? '#ff9500' : '#555'};flex-shrink:0;"
+        >${excluded ? '👻 Hidden' : '👻'}</button>`
     : '';
+  // Show ✕ delete button only on non-HA-linked zones (or always for manually-added?)
+  // Design decision: zones with ha_area_id use ghost-only (no delete); zones without use delete-only
+  const showDelete = !isHALinked;
 
   // For lights and sirens: show pin button — filled if already placed, outline if not
   let pinBtn = '';
@@ -4835,7 +4840,7 @@ function deviceRow(entityId, devType, zone) {
       <span class="ha-entity-type">${escapeHtml(stateStr)}</span>
       ${ghostBtn}
       ${pinBtn}
-      <button class="ha-entity-remove" data-entity-id="${escapeHtml(entityId)}" title="Remove">✕</button>
+      ${showDelete ? `<button class="ha-entity-remove" data-entity-id="${escapeHtml(entityId)}" title="Remove">✕</button>` : ''}
       ${lowResRow}
     </div>`;
 }
@@ -8081,7 +8086,7 @@ function renderFloorFlyout() {
       <span style="width:8px;height:8px;border-radius:50%;background:${dotColour};flex-shrink:0;display:inline-block;${hasTriggered ? "animation:pulse-dot 0.8s infinite;" : ""}"></span>
       <span style="flex:1;">${escapeHtml(f.name)}</span>
       <span style="font-size:10px;color:#555;">${floorZones.length} zone${floorZones.length !== 1 ? "s" : ""}</span>
-      ${editorMode ? `<span class="floor-config-btn" data-floor-id="${escapeHtml(f.id)}" style="font-size:12px;color:#555;padding:0 4px;cursor:pointer;" title="Configure floor">⚙</span>` : ''}
+      ${isAdmin ? `<span class="floor-config-btn" data-floor-id="${escapeHtml(f.id)}" style="font-size:12px;color:#555;padding:0 4px;cursor:pointer;" title="Configure floor">⚙</span>` : ''}
     `;
 
     row.onclick = (e) => {
@@ -8102,6 +8107,35 @@ function renderFloorFlyout() {
 
     flyout.appendChild(row);
   });
+
+  // Add Floor button — always visible in flyout for admins
+  if (isAdmin) {
+    const sep = document.createElement('div');
+    sep.style.cssText = 'height:1px;background:rgba(255,255,255,0.08);margin:4px 0;';
+    flyout.appendChild(sep);
+
+    const addFloorBtn = document.createElement('button');
+    addFloorBtn.textContent = '+ Add floor';
+    addFloorBtn.style.cssText = `
+      display:block;width:100%;background:rgba(255,255,255,0.04);
+      border:1px solid rgba(255,255,255,0.1);border-radius:8px;
+      padding:8px 10px;cursor:pointer;color:#aaa;font-size:12px;text-align:left;
+    `;
+    addFloorBtn.onclick = async () => {
+      flyout.remove();
+      document.getElementById("floorsBtn")?.classList.remove("active");
+      // Same logic as the HA panel addFloorBtn
+      const name = prompt("New floor name:","New Floor");
+      if (!name?.trim()) return;
+      const id = "floor_" + Date.now();
+      const newFloor = { id, name: name.trim(), floorplan: null, ha_floor_id: null, ha_auto_add_areas: true, ha_linked_area_ids: [] };
+      const res = await saveFloor(newFloor);
+      if (res?.floors) { floors.length = 0; res.floors.forEach(f => floors.push(f)); }
+      setActiveFloor(id);
+      renderZonesEditor();
+    };
+    flyout.appendChild(addFloorBtn);
+  }
 
   document.body.appendChild(flyout);
 
