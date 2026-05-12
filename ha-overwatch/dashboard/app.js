@@ -218,24 +218,43 @@ function haEntitiesForArea(areaId) {
 }
 
 // Device class filters per OW tab
+const HA_DOOR_CLASSES = new Set(['door','window','garage_door','opening','gate','lock']);
+const HA_ZONE_SENSOR_CLASSES = new Set([
+  'motion','occupancy','presence','vibration','sound','moisture','smoke','carbon_monoxide','heat','cold','gas','tamper','connectivity','power','problem','safety','update'
+]);
+
+function haEntityDeviceClass(e) {
+  return String(e?.device_class || e?.original_device_class || haStates[e?.entity_id]?.attributes?.device_class || '').toLowerCase();
+}
+
+function haEntityText(e) {
+  const st = haStates[e?.entity_id];
+  return [e?.entity_id, e?.name, e?.original_name, st?.attributes?.friendly_name, haEntityDeviceClass(e)]
+    .filter(Boolean).join(' ').toLowerCase();
+}
+
+function isHADoorEntity(e) {
+  const eid = String(e?.entity_id || '').toLowerCase();
+  const dc = haEntityDeviceClass(e);
+  const text = haEntityText(e);
+  if (eid.startsWith('binary_sensor.') && HA_DOOR_CLASSES.has(dc)) return true;
+  if (eid.startsWith('binary_sensor.') && /(^|[._\s-])(door|garage|garage_door|gate|window|roller|shutter|contact|reed)([._\s-]|$)/.test(text)) return true;
+  return false;
+}
+
 const HA_AREA_FILTERS = {
   sensors: e => {
-    // HA entity registry uses 'device_class' for user overrides and 'original_device_class' for integration-set values
-    const dc = (e.device_class || e.original_device_class || '').toLowerCase();
-    const eid = (e.entity_id||'').toLowerCase();
-    return eid.startsWith('binary_sensor.') &&
-      ['motion','occupancy','presence','vibration','sound','moisture','smoke','carbon_monoxide','heat','cold','gas','tamper','connectivity','power','problem','safety','update'].includes(dc) &&
-      !eid.startsWith('binary_sensor.overwatch_');
+    const eid = String(e?.entity_id || '').toLowerCase();
+    const dc = haEntityDeviceClass(e);
+    return eid.startsWith('binary_sensor.')
+      && HA_ZONE_SENSOR_CLASSES.has(dc)
+      && !isHADoorEntity(e)
+      && !eid.startsWith('binary_sensor.overwatch_');
   },
-  cameras: e => (e.entity_id||'').startsWith('camera.'),
-  lights:  e => (e.entity_id||'').startsWith('light.'),
-  sirens:  e => (e.entity_id||'').startsWith('siren.'),
-  doors:   e => {
-    const dc = (e.device_class || e.original_device_class || '').toLowerCase();
-    const eid = (e.entity_id||'').toLowerCase();
-    return eid.startsWith('binary_sensor.') &&
-      ['door','window','garage_door','opening','gate','lock'].includes(dc);
-  },
+  cameras: e => String(e?.entity_id || '').startsWith('camera.'),
+  lights: e => String(e?.entity_id || '').startsWith('light.'),
+  sirens: e => String(e?.entity_id || '').startsWith('siren.'),
+  doors: e => isHADoorEntity(e),
 };
 let haMsgId = 1;
 let haPendingCmds = {};
@@ -1288,9 +1307,6 @@ function bindPanelInteraction(idx) {
   });
 
   // Zone editor interactions for multi-panel SVGs.
-  // bindZonesSvgEvents() only attaches to #zonesSvg, which does not exist in multi-panel mode.
-  // This keeps map zone selection, empty-click deselect, point creation, vertex drag,
-  // whole-zone drag, context-delete, and double-click finish working on .fp-svg panels.
   const panelSvg = getPanelSvg(idx);
   if (panelSvg && !panelSvg._owZoneEditorBound) {
     panelSvg._owZoneEditorBound = true;
@@ -1357,29 +1373,21 @@ function bindPanelInteraction(idx) {
         const zoneId = target.dataset.zoneId;
         const zone = zones.find(z => z.id === zoneId);
         if (zone?.hidden) { e.stopPropagation(); return; }
-
-        if (isEditingPoints && selectedZoneId && zoneId !== selectedZoneId) {
-          e.stopPropagation();
-          return;
-        }
-
+        if (isEditingPoints && selectedZoneId && zoneId !== selectedZoneId) { e.stopPropagation(); return; }
         if (selectedZoneId === zoneId && !isEditingPoints) {
           clearZoneEditorSelection(true);
           e.stopPropagation();
           return;
         }
-
         selectedZoneId = zoneId;
         selectedGroupId = null;
         activePinId = null;
         activePinType = null;
-
         if (isEditingPoints && zone) {
           draggingZone = { zoneId, startPoints: zone.points.map(p => ({ ...p })) };
           dragStart = { x: sx, y: sy };
           panelSvg.setPointerCapture(e.pointerId);
         }
-
         renderZones();
         renderZonesEditor();
         e.stopPropagation();
@@ -1397,9 +1405,7 @@ function bindPanelInteraction(idx) {
         return;
       }
 
-      // Empty panel/canvas click: clear the right-side editor selection.
       clearZoneEditorSelection(true);
-      // Do not stop propagation — panel panning may still start from empty canvas.
     });
 
     panelSvg.addEventListener('pointermove', e => {
@@ -1820,6 +1826,33 @@ function getGroupState(group) {
   return { anyTriggered, anyArmed, allDisarmed };
 }
 
+
+function currentGroupIdForZone(zoneId) {
+  const group = groups.find(g => (g.zone_ids || []).includes(zoneId));
+  return group ? group.id : '';
+}
+
+async function setZoneGroup(zoneId, groupId) {
+  const changed = [];
+  groups.forEach(g => {
+    const before = (g.zone_ids || []).slice();
+    g.zone_ids = before.filter(id => id !== zoneId);
+    if (before.length !== g.zone_ids.length) changed.push(g);
+  });
+  if (groupId) {
+    const target = groups.find(g => g.id === groupId);
+    if (target && !(target.zone_ids || []).includes(zoneId)) {
+      target.zone_ids = [...(target.zone_ids || []), zoneId];
+      if (!changed.includes(target)) changed.push(target);
+      localStorage.setItem(`zedGroup_${target.id}`, 'expanded');
+    }
+  }
+  for (const g of changed) await saveGroup(g);
+  selectedGroupId = null;
+  renderZones();
+  renderZonesEditor();
+}
+
 function setGroupArmed(groupId, armed) {
   const group = groups.find(g => g.id === groupId);
   if (!group) return;
@@ -2078,7 +2111,7 @@ function isEntityTriggered(entityId) {
   const st = haStates[entityId];
   if (!st) return false;
   const s = (st.state || "").toLowerCase();
-  return s === "on" || s === "open" || s === "detected" || s === "home" || s === "triggered";
+  return s === "on" || s === "open" || s === "opening" || s === "detected" || s === "home" || s === "triggered" || s === "unlocked";
 }
 
 /* Track previous zone states to detect trigger→normal transitions */
@@ -2101,7 +2134,9 @@ function getZoneState(zone) {
   if (!haConnected) return "normal";
   const sensors = (zone.sensors || []).filter(e => !isEntityGhosted(e));
   // Also treat open door pins as triggered sensors (issue 8)
-  const doorSensors = doorPins.filter(p => p.zone_id === zone.id && p.sensor_entity).map(p => p.sensor_entity);
+  const doorSensors = doorPins
+    .filter(p => p.zone_id === zone.id && p.sensor_entity && !isEntityGhosted(p.sensor_entity))
+    .map(p => p.sensor_entity);
   const allSensors = [...sensors, ...doorSensors];
   if (!allSensors.length) return "normal";
   const anyTriggered   = allSensors.some(isEntityTriggered);
@@ -4200,6 +4235,13 @@ function renderZonesEditor() {
             </select>
           </div>` : ''}
           <div class="zones-editor-row" style="align-items:center;">
+            <label style="flex:0 0 auto;">Group</label>
+            <select id="zoneGroupSelect" style="flex:1;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:5px 8px;color:#fff;font-size:12px;">
+              <option value="">— Ungrouped —</option>
+              ${[...groups].sort((a,b)=>(a.name||a.id).localeCompare(b.name||b.id)).map(g => `<option value="${escapeHtml(g.id)}" ${currentGroupIdForZone(selectedZone.id) === g.id ? 'selected' : ''}>${escapeHtml(g.name || g.id)}</option>`).join('')}
+            </select>
+          </div>
+          <div class="zones-editor-row" style="align-items:center;">
             <label style="flex:0 0 auto;">HA Area</label>
             <select id="zoneHAAreaSelect" style="flex:1;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:5px 8px;color:#fff;font-size:12px;">
               <option value="">— None —</option>
@@ -4239,7 +4281,7 @@ function renderZonesEditor() {
               <div style="font-size:11px;color:#555;padding:6px 0 8px;">Place door &amp; window sensors on the map. Each has a sensor (open/closed) and an optional control entity (lock/switch). Use the search below to add a sensor without placing it on the map.</div>
               <div class="entity-search-wrap"><input type="text" id="doorSearchInput" class="entity-search-input" placeholder="Search doors &amp; windows…" autocomplete="off">
               <div class="entity-search-results" id="doorSearchResults" style="display:none;"></div></div>
-              <div class="ha-entity-list" id="zoneDoorList">${doorPins.filter(p=>p.zone_id===selectedZone.id).map(p=>doorPinRow(p)).join("")}</div>
+              <div class="ha-entity-list" id="zoneDoorList">${doorPins.filter(p=>p.zone_id===selectedZone.id).map(p=>doorPinRow(p, selectedZone)).join("")}</div>
               <button id="addDoorPinBtn" style="margin-top:8px;width:100%;background:rgba(0,150,255,0.1);border:1px solid rgba(0,150,255,0.3);color:#0096ff;border-radius:6px;padding:6px;cursor:pointer;font-size:12px;">+ Place Door or Window on Map</button>
             </div>
           </div>
@@ -4735,6 +4777,10 @@ function renderZonesEditor() {
       renderZones(); renderZonesEditor();
     });
 
+    document.getElementById("zoneGroupSelect")?.addEventListener("change", e => {
+      setZoneGroup(selectedZone.id, e.target.value || null);
+    });
+
     // HA Area select — when changed, remove old area's synced entities and sync new area
     document.getElementById("zoneHAAreaSelect")?.addEventListener("change", async e => {
       const oldAreaId = selectedZone.ha_area_id;
@@ -4923,6 +4969,22 @@ function renderZonesEditor() {
       });
     });
 
+    document.querySelectorAll(".door-pin-ghost").forEach(btn => {
+      btn.addEventListener("click", e => {
+        e.stopPropagation();
+        const id = btn.dataset.entityId;
+        selectedZone.ha_excluded_entities = selectedZone.ha_excluded_entities || [];
+        if (selectedZone.ha_excluded_entities.includes(id)) {
+          selectedZone.ha_excluded_entities = selectedZone.ha_excluded_entities.filter(x => x !== id);
+        } else {
+          selectedZone.ha_excluded_entities.push(id);
+        }
+        saveZone(selectedZone);
+        subscribeHAEntities();
+        renderZones(); renderZonesEditor();
+      });
+    });
+
     document.querySelectorAll(".door-pin-delete-btn").forEach(btn => {
       btn.addEventListener("click", () => {
         if (!confirm("Delete this door pin?")) return;
@@ -4992,22 +5054,28 @@ function renderZonesEditor() {
 
 /* ─── DEVICE ROW HELPER ───────────────────────────────────── */
 // Door pin summary row in zone editor Doors tab
-function doorPinRow(pin) {
+function doorPinRow(pin, zone) {
   const sState = haStates[pin.sensor_entity]?.state;
-  const isOpen = sState === 'on';
-  const colour = sState === undefined ? '#555' : isOpen ? '#ff9500' : '#34c759';
+  const isOpen = ['on','open','opening','detected','unlocked'].includes(String(sState || '').toLowerCase());
+  const excluded = !!(zone && pin.sensor_entity && (zone.ha_excluded_entities || []).includes(pin.sensor_entity));
+  const colour = excluded ? '#777' : sState === undefined ? '#555' : isOpen ? '#ff9500' : '#34c759';
   const isPlaced = pin.x != null && pin.y != null;
   const placeBtn = !isPlaced
     ? `<button class="door-pin-place-btn" data-id="${escapeHtml(pin.id)}" style="background:none;border:1px solid rgba(0,150,255,0.4);border-radius:4px;padding:2px 6px;cursor:pointer;font-size:10px;color:#4db8ff;flex-shrink:0;">📍 Place</button>`
     : `<button class="door-pin-edit-btn" data-id="${escapeHtml(pin.id)}" style="background:none;border:1px solid rgba(255,255,255,0.15);border-radius:4px;padding:2px 6px;cursor:pointer;font-size:10px;color:#888;flex-shrink:0;">Edit</button>`;
-  return `<div class="ha-entity-row" data-door-pin-id="${escapeHtml(pin.id)}" style="flex-wrap:wrap;gap:4px;">
+  const ghostBtn = zone?.ha_area_id && pin.sensor_entity
+    ? `<button class="door-pin-ghost" data-entity-id="${escapeHtml(pin.sensor_entity)}" title="${excluded ? 'Restore entity' : 'Ghost entity — keep visible but ignore in Overwatch'}" style="background:none;border:1px solid ${excluded ? 'rgba(255,149,0,0.5)' : 'rgba(255,255,255,0.12)'};border-radius:4px;padding:2px 6px;cursor:pointer;font-size:10px;color:${excluded ? '#ff9500' : '#555'};flex-shrink:0;">${excluded ? '👻 Hidden' : '👻'}</button>`
+    : '';
+  return `<div class="ha-entity-row" data-door-pin-id="${escapeHtml(pin.id)}" style="flex-wrap:wrap;gap:4px;${excluded ? 'opacity:0.45;' : ''}">
     <div class="ha-entity-state" style="background:${colour};flex-shrink:0;"></div>
     <span class="ha-entity-id" title="${escapeHtml(pin.sensor_entity||'')}">${escapeHtml(pin.name || pin.sensor_entity?.split('.').pop() || 'Door')}</span>
-    <span class="ha-entity-type" style="font-size:10px;color:#555;">${sState ? (isOpen?'OPEN':'CLOSED') : '—'}</span>
+    <span class="ha-entity-type" style="font-size:10px;color:#555;">${excluded ? 'GHOSTED' : sState ? (isOpen?'OPEN':'CLOSED') : '—'}</span>
+    ${ghostBtn}
     ${placeBtn}
     <button class="door-pin-delete-btn" data-id="${escapeHtml(pin.id)}" style="background:none;border:none;color:#ff3b30;cursor:pointer;font-size:12px;flex-shrink:0;">✕</button>
   </div>`;
 }
+
 
 function deviceRow(entityId, devType, zone) {
   const st = haStates[entityId];
@@ -5078,7 +5146,7 @@ function bindDeviceSearch(selectedZone, inputId, resultsId, devType, listId) {
 
   function refreshList() {
     if (!listEl) return;
-    listEl.innerHTML = (selectedZone[devType] || []).map(id => deviceRow(id, devType)).join("");
+    listEl.innerHTML = (selectedZone[devType] || []).map(id => deviceRow(id, devType, selectedZone)).join("");
     listEl.querySelectorAll(".ha-entity-remove").forEach(btn => {
       btn.onclick = e => {
         e.stopPropagation();
@@ -5086,6 +5154,22 @@ function bindDeviceSearch(selectedZone, inputId, resultsId, devType, listId) {
         selectedZone[devType] = (selectedZone[devType] || []).filter(s => s !== id);
         saveZone(selectedZone);
         if (devType === "sensors") subscribeHAEntities();
+        refreshList();
+      };
+    });
+    listEl.querySelectorAll(".ha-entity-ghost").forEach(btn => {
+      btn.onclick = e => {
+        e.stopPropagation();
+        const id = btn.dataset.entityId;
+        selectedZone.ha_excluded_entities = selectedZone.ha_excluded_entities || [];
+        if (selectedZone.ha_excluded_entities.includes(id)) {
+          selectedZone.ha_excluded_entities = selectedZone.ha_excluded_entities.filter(x => x !== id);
+        } else {
+          selectedZone.ha_excluded_entities.push(id);
+        }
+        saveZone(selectedZone);
+        subscribeHAEntities();
+        renderZones();
         refreshList();
       };
     });
@@ -8163,11 +8247,12 @@ async function syncZoneFromHAArea(zone) {
     showToast('HA registry not loaded', 'warn'); return;
   }
   const areaEntities = haEntitiesForArea(zone.ha_area_id);
-  const excluded = new Set(zone.ha_excluded_entities || []);
   let added = 0;
 
   const addIfNew = (arr, eid) => {
-    if (!arr.includes(eid) && !excluded.has(eid)) { arr.push(eid); added++; }
+    // Always keep synced entities visible in the editor. Ghosted/excluded entities
+    // remain in the list but are ignored by triggers/search/automations.
+    if (!arr.includes(eid)) { arr.push(eid); added++; }
   };
 
   areaEntities.filter(e => HA_AREA_FILTERS.sensors(e)).forEach(e => addIfNew(zone.sensors, e.entity_id));
@@ -8178,7 +8263,7 @@ async function syncZoneFromHAArea(zone) {
   // Door/window entities go into doorPins
   const doorEntities = areaEntities.filter(e => HA_AREA_FILTERS.doors(e));
   for (const e of doorEntities) {
-    if (!excluded.has(e.entity_id) && !doorPins.some(p => p.sensor_entity === e.entity_id)) {
+    if (!doorPins.some(p => p.sensor_entity === e.entity_id && p.zone_id === zone.id)) {
       const newPin = {
         id: 'door_' + Date.now() + '_' + Math.random().toString(36).slice(2,6),
         name: haStates[e.entity_id]?.attributes?.friendly_name || e.name || e.entity_id.split('.').pop().replace(/_/g,' '),
