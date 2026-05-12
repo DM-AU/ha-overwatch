@@ -4082,15 +4082,18 @@ function renderZonesEditor() {
         <!-- LEFT PANEL -->
           <div class="zed-left" style="${(!selectedZone && !selectedGroup && !activePinId) ? 'border-right:none;width:100%;' : '' }">
           ${floors.length > 1 ? (
-            '<div style="padding:6px 8px 4px;border-bottom:1px solid rgba(255,255,255,0.06);">'
-            + '<select id="editorFloorSelect" style="width:100%;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:5px 8px;color:#fff;font-size:12px;">'
+            '<div style="padding:4px 8px;border-bottom:1px solid rgba(255,255,255,0.06);display:flex;align-items:center;gap:4px;">'
+            + '<select id="editorFloorSelect" style="flex:1;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:5px 8px;color:#fff;font-size:12px;">'
             + floors.map(f => '<option value="' + f.id + '"' + (f.id === activeFloorId ? ' selected' : '') + '>' + escapeHtml(f.name) + '</option>').join('')
-            + '</select></div>'
-          ) : ''}
+            + '</select>'
+            + (isAdmin ? '<button id="floorConfigZedBtn" title="Configure floor" style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:5px 8px;color:#888;font-size:12px;cursor:pointer;flex-shrink:0;">⚙</button>' : '')
+            + '</div>'
+          ) : (isAdmin ? '<div style="padding:4px 8px;border-bottom:1px solid rgba(255,255,255,0.06);display:flex;justify-content:flex-end;"><button id="floorConfigZedBtn" title="Configure floor" style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:5px 8px;color:#888;font-size:12px;cursor:pointer;">⚙ Configure floor</button></div>' : '')}
           <div class="zed-list" id="zonesList">${buildZoneList()}</div>
           <div class="zed-actions">
             <button id="addGroupBtn">+ Group</button>
             <button id="addZoneBtn">+ Zone</button>
+            ${isAdmin ? '<button id="addFloorZedBtn">+ Floor</button>' : ''}
             ${selectedZone ? `<button id="editPointsBtn" style="${isEditingPoints ? 'border-color:rgba(255,204,0,0.5);color:#ffcc00;' : ''}">${editPtsLabel}</button>` : ""}
             ${selectedZone ? `<button id="undoZonesBtn" title="Undo last change">↩ Undo</button>` : ""}
             ${(selectedZone || selectedGroup) ? `<button id="deleteZoneBtn" class="danger">Delete</button>` : ""}
@@ -4147,6 +4150,25 @@ function renderZonesEditor() {
     selectedGroupId = null;
     renderZonesEditor();
     renderZones();
+  });
+
+  // Floor config button (⚙ inline in floor selector)
+  document.getElementById("floorConfigZedBtn")?.addEventListener("click", () => {
+    openFloorConfigPanel(activeFloorId || floors[0]?.id);
+  });
+
+  // Add Floor
+  document.getElementById("addFloorZedBtn")?.addEventListener("click", async () => {
+    const name = prompt("New floor name:", "New Floor");
+    if (!name?.trim()) return;
+    const id = "floor_" + Date.now();
+    const newFloor = { id, name: name.trim(), floorplan: null, ha_floor_id: null, ha_auto_add_areas: true, ha_linked_area_ids: [] };
+    const res = await saveFloor(newFloor);
+    if (res?.floors) { floors.length = 0; res.floors.forEach(f => floors.push(f)); }
+    setActiveFloor(id);
+    // Open config panel immediately so user can set floorplan image
+    renderZonesEditor();
+    openFloorConfigPanel(id);
   });
 
   // Add Zone
@@ -4535,11 +4557,35 @@ function renderZonesEditor() {
       renderZones(); renderZonesEditor();
     });
 
-    // HA Area select
+    // HA Area select — when changed, remove old area's synced entities and sync new area
     document.getElementById("zoneHAAreaSelect")?.addEventListener("change", async e => {
-      selectedZone.ha_area_id = e.target.value || null;
+      const oldAreaId = selectedZone.ha_area_id;
+      const newAreaId = e.target.value || null;
+
+      // Remove entities that came from the OLD area (not manually added)
+      if (oldAreaId && oldAreaId !== newAreaId) {
+        const oldAreaEntities = new Set(haEntitiesForArea(oldAreaId).map(e => e.entity_id));
+        // Also include door pins from old area
+        const oldDoorPins = doorPins.filter(p => p.zone_id === selectedZone.id && oldAreaEntities.has(p.sensor_entity));
+        for (const pin of oldDoorPins) {
+          doorPins.splice(doorPins.indexOf(pin), 1);
+          await fetch(apiPath('ow/delete-door-pin'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: pin.id }) });
+        }
+        // Remove from entity tabs — only those that came from the old area
+        ['sensors','cameras','lights','sirens'].forEach(tab => {
+          selectedZone[tab] = (selectedZone[tab]||[]).filter(eid => !oldAreaEntities.has(eid));
+        });
+        // Clear excluded entities from old area too
+        selectedZone.ha_excluded_entities = (selectedZone.ha_excluded_entities||[]).filter(eid => !oldAreaEntities.has(eid));
+      }
+
+      selectedZone.ha_area_id = newAreaId;
       await saveZone(selectedZone);
-      renderZonesEditor(); // re-render to show/hide sync button
+
+      // Sync entities from new area if one was selected
+      if (newAreaId) await syncZoneFromHAArea(selectedZone);
+
+      renderZonesEditor();
     });
 
     // HA Area sync button — populate entity tabs from HA area
@@ -6456,37 +6502,6 @@ function renderSettingsPanel() {
       <div class="settings-tab-panel" data-panel="zones">
 
         <div class="settings-section">
-          <div class="settings-section-title">Floors <span class="settings-admin-badge">ADMIN ONLY</span></div>
-          ${!isAdmin ? adminBox : ''}
-          <div ${!isAdmin ? 'style="opacity:0.45;pointer-events:none;"' : ''}>
-            <div id="floorsSettingsList" style="display:flex;flex-direction:column;gap:10px;margin-bottom:10px;">
-              ${floors.map((f, fi) => {
-                const floorZones = zones.filter(z => z.floor_id === f.id || (!z.floor_id && fi === 0));
-                const hasTriggered = floorZones.some(z => getZoneState(z) === 'triggered');
-                const hasDisabled  = floorZones.every(z => getZoneState(z) === 'disabled');
-                const dotCol = hasTriggered ? '#ff3b30' : hasDisabled ? '#555' : '#32d74b';
-                const zc = floorZones.length;
-                return '<div class="floor-settings-row" data-floor-id="' + f.id + '" style="background:rgba(255,255,255,0.04);border-radius:8px;padding:10px 12px;">'
-                  + '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">'
-                  + '<span style="width:8px;height:8px;border-radius:50%;background:' + dotCol + ';flex-shrink:0;"></span>'
-                  + '<input type="text" class="floor-name-input" value="' + escapeHtml(f.name) + '" style="flex:1;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:4px 8px;color:#fff;font-size:13px;" placeholder="Floor name">'
-                  + '<button class="floor-delete-btn" data-floor-id="' + f.id + '" style="background:rgba(255,59,48,0.15);border:1px solid rgba(255,59,48,0.3);border-radius:6px;padding:4px 8px;color:#ff3b30;font-size:11px;cursor:pointer;">✕</button>'
-                  + '</div>'
-                  + '<div style="display:flex;align-items:center;gap:6px;">'
-                  + '<input type="text" class="floor-fp-input" value="' + escapeHtml(f.floorplan || '') + '" style="flex:1;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);border-radius:6px;padding:4px 8px;color:#aaa;font-size:11px;" placeholder="img/floorplan.png">'
-                  + '<label class="settings-upload-btn floor-fp-upload" title="Upload image" style="cursor:pointer;">↑<input type="file" class="floor-fp-file" data-floor-id="' + f.id + '" accept="image/*" style="display:none;"></label>'
-                  + '</div>'
-                  + '<div class="floor-fp-status" style="font-size:10px;color:#888;margin-top:3px;">' + zc + ' zone' + (zc !== 1 ? 's' : '') + ' on this floor</div>'
-                  + '<button class="floor-save-btn" data-floor-id="' + f.id + '" style="margin-top:8px;width:100%;background:rgba(0,150,255,0.15);border:1px solid rgba(0,150,255,0.3);border-radius:6px;padding:5px;color:#0096ff;font-size:12px;cursor:pointer;">Save floor</button>'
-                  + '</div>';
-              }).join('')}
-            </div>
-            ${isAdmin ? '<button id="addFloorBtn" style="width:100%;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.15);border-radius:8px;padding:8px;color:#aaa;font-size:13px;cursor:pointer;">+ Add floor</button>' : ''}
-          </div>
-
-        </div>
-
-        <div class="settings-section">
           <div class="settings-section-title">Zone Toggle Source ${perDeviceBadge}</div>
           <div class="settings-toggle-row">
             <button class="settings-toggle ${localStorage.getItem('ow_zone_source') !== 'device' ? 'active' : ''}" data-zonesource="server">HA defaults (server)</button>
@@ -6995,64 +7010,6 @@ function renderSettingsPanel() {
     if (statusEl) { statusEl.textContent = "✓ " + imgPath; statusEl.style.color = "#32d74b"; }
     return imgPath;
   }
-
-  // Floor file upload buttons
-  panel.querySelectorAll(".floor-fp-file").forEach(fileInput => {
-    fileInput.onchange = async () => {
-      const file = fileInput.files[0]; if (!file) return;
-      const fid = fileInput.dataset.floorId;
-      const row = panel.querySelector(`.floor-settings-row[data-floor-id="${fid}"]`);
-      const statusEl = row?.querySelector(".floor-fp-status");
-      try {
-        const imgPath = await uploadFloorplanFile(file, statusEl);
-        const fpInput = row?.querySelector(".floor-fp-input");
-        if (fpInput) fpInput.value = imgPath;
-      } catch (e) {
-        if (statusEl) { statusEl.textContent = "✗ " + e.message; statusEl.style.color = "#ff3b30"; }
-      }
-    };
-  });
-
-  // Floor save buttons
-  panel.querySelectorAll(".floor-save-btn").forEach(btn => {
-    btn.onclick = async () => {
-      const fid = btn.dataset.floorId;
-      const row = panel.querySelector(`.floor-settings-row[data-floor-id="${fid}"]`);
-      const name = row?.querySelector(".floor-name-input")?.value.trim();
-      const floorplan = row?.querySelector(".floor-fp-input")?.value.trim();
-      const statusEl = row?.querySelector(".floor-fp-status");
-      if (!name) return;
-      btn.textContent = "Saving…"; btn.disabled = true;
-      try {
-        await saveFloor({ id: fid, name, floorplan });
-        // If this is the active floor, update the floorplan image
-        if (fid === activeFloorId) applyActiveFloor();
-        scheduleHAReload(); // floor entities need updating
-        btn.textContent = "✓ Saved"; btn.style.color = "#32d74b";
-        setTimeout(() => { btn.textContent = "Save floor"; btn.style.color = ""; btn.disabled = false; }, 2000);
-      } catch (e) {
-        btn.textContent = "✗ Error"; btn.style.color = "#ff3b30"; btn.disabled = false;
-      }
-    };
-  });
-
-  // Floor delete buttons
-  panel.querySelectorAll(".floor-delete-btn").forEach(btn => {
-    btn.onclick = async () => {
-      const fid = btn.dataset.floorId;
-      if (floors.length <= 1) { alert("Cannot delete the last floor."); return; }
-      if (!confirm("Delete this floor? Zones assigned to it will be reassigned to the first floor.")) return;
-      await deleteFloor(fid);
-      if (activeFloorId === fid) setActiveFloor(floors[0]?.id);
-      openSettings("zones"); // re-render settings
-    };
-  });
-
-  // Add floor button
-  document.getElementById("addFloorBtn")?.addEventListener("click", async () => {
-    await saveFloor({ name: "New Floor", floorplan: "" });
-    openSettings("zones"); // re-render to show new floor
-  });
 
   // ── Build ui.yaml ────────────────────────────────────────────
   function buildYamlContent() {
@@ -7834,54 +7791,86 @@ function openFloorConfigPanel(floorId) {
   const floor = floors.find(f => f.id === floorId);
   if (!floor) return;
 
-  // Remove any existing panel
   document.getElementById('owFloorConfigPanel')?.remove();
 
   const panel = document.createElement('div');
   panel.id = 'owFloorConfigPanel';
   panel.style.cssText = `
-    position:fixed; top:50%; left:50%; transform:translate(-50%,-50%);
+    position:fixed; top:120px; left:50%; transform:translateX(-50%);
     background:rgba(18,18,18,0.98); border:1px solid rgba(255,255,255,0.12);
-    border-radius:14px; padding:20px; z-index:600; min-width:360px; max-width:480px;
+    border-radius:14px; z-index:600; width:420px; max-width:94vw;
     box-shadow:0 16px 48px rgba(0,0,0,0.7); backdrop-filter:blur(16px);
-    max-height:80vh; overflow-y:auto;
+    max-height:85vh; display:flex; flex-direction:column;
   `;
+
+  // Make draggable
+  let dragging = false, ox = 0, oy = 0;
+  const titlebar = document.createElement('div');
+  titlebar.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:14px 16px 10px;cursor:grab;border-bottom:1px solid rgba(255,255,255,0.07);flex-shrink:0;user-select:none;';
+  titlebar.onmousedown = e => {
+    if (e.target.tagName === 'BUTTON' || e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+    dragging = true; ox = e.clientX - panel.offsetLeft; oy = e.clientY - panel.offsetTop;
+    titlebar.style.cursor = 'grabbing';
+  };
+  document.addEventListener('mousemove', e => { if (!dragging) return; panel.style.left = (e.clientX - ox) + 'px'; panel.style.top = (e.clientY - oy) + 'px'; panel.style.transform = 'none'; });
+  document.addEventListener('mouseup', () => { dragging = false; titlebar.style.cursor = 'grab'; });
+
+  const body = document.createElement('div');
+  body.style.cssText = 'padding:14px 16px;overflow-y:auto;flex:1;';
 
   function render() {
     const haFloors = _haRegistry.floors || [];
     const haAreas  = _haRegistry.areas  || [];
-    const linkedHAFloor = haFloors.find(f => f.floor_id === floor.ha_floor_id);
-    // Areas on the linked HA floor
-    const floorAreas = floor.ha_floor_id
-      ? haAreas.filter(a => a.floor_id === floor.ha_floor_id)
-      : [];
+    const linkedHAFloor = haFloors.find(hf => hf.floor_id === floor.ha_floor_id);
+    const floorAreas = floor.ha_floor_id ? haAreas.filter(a => a.floor_id === floor.ha_floor_id) : [];
     const linkedAreaIds = floor.ha_linked_area_ids || [];
     const autoAdd = floor.ha_auto_add_areas !== false;
+    const floorZones = zones.filter(z => z.floor_id === floor.id);
 
-    panel.innerHTML = `
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
-        <div>
-          <div style="font-size:13px;font-weight:700;color:#fff;">Floor Configuration</div>
-          <div style="font-size:11px;color:#666;margin-top:2px;">${escapeHtml(floor.name)}</div>
-        </div>
-        <button id="owFloorConfigClose" style="background:none;border:none;color:#666;cursor:pointer;font-size:16px;padding:4px;">✕</button>
+    // Titlebar content
+    titlebar.innerHTML = `
+      <div>
+        <div style="font-size:13px;font-weight:700;color:#fff;">Floor Configuration</div>
+        <div style="font-size:11px;color:#666;margin-top:1px;" id="owFloorConfigFloorName">${escapeHtml(floor.name)}</div>
+      </div>
+      <button id="owFloorConfigClose" style="background:none;border:none;color:#555;cursor:pointer;font-size:18px;padding:0 4px;line-height:1;">✕</button>
+    `;
+    titlebar.querySelector('#owFloorConfigClose').onclick = () => panel.remove();
+
+    // Body content
+    body.innerHTML = `
+      <div style="margin-bottom:12px;">
+        <label style="font-size:11px;color:#888;display:block;margin-bottom:4px;text-transform:uppercase;letter-spacing:0.05em;">Floor Name</label>
+        <input id="owFloorNameInput" type="text" value="${escapeHtml(floor.name)}" style="width:100%;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);color:#fff;border-radius:8px;padding:7px 10px;font-size:13px;outline:none;box-sizing:border-box;">
       </div>
 
-      <div style="margin-bottom:14px;">
-        <label style="font-size:11px;color:#888;display:block;margin-bottom:5px;text-transform:uppercase;letter-spacing:0.05em;">HA Floor Link</label>
+      <div style="margin-bottom:12px;">
+        <label style="font-size:11px;color:#888;display:block;margin-bottom:4px;text-transform:uppercase;letter-spacing:0.05em;">Floorplan Image</label>
+        <div style="display:flex;gap:6px;align-items:center;">
+          <input id="owFloorFpInput" type="text" value="${escapeHtml(floor.floorplan||'')}" placeholder="img/floorplan.png"
+            style="flex:1;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);color:#ccc;border-radius:8px;padding:7px 10px;font-size:12px;outline:none;">
+          <label style="background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.15);border-radius:8px;padding:7px 10px;cursor:pointer;font-size:12px;color:#aaa;flex-shrink:0;">↑ Upload<input type="file" id="owFloorFpFile" accept="image/*" style="display:none;"></label>
+        </div>
+        ${floor.floorplan ? `<div style="font-size:10px;color:#555;margin-top:3px;">${floorZones.length} zone${floorZones.length!==1?'s':''} on this floor</div>` : ''}
+      </div>
+
+      <div style="height:1px;background:rgba(255,255,255,0.07);margin:14px 0;"></div>
+
+      <div style="margin-bottom:10px;">
+        <label style="font-size:11px;color:#888;display:block;margin-bottom:4px;text-transform:uppercase;letter-spacing:0.05em;">HA Floor Link <span style="color:#555;font-weight:400;text-transform:none;">(optional)</span></label>
         <select id="owFloorHASelect" style="width:100%;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);color:#ccc;border-radius:8px;padding:7px 10px;font-size:13px;outline:none;">
-          <option value="">— Not linked to a HA floor —</option>
+          <option value="">— Not linked —</option>
           ${haFloors.map(hf => `<option value="${escapeHtml(hf.floor_id)}" ${floor.ha_floor_id === hf.floor_id ? 'selected' : ''}>${escapeHtml(hf.name)}</option>`).join('')}
         </select>
-        ${!_haRegistry.loaded ? '<div style="font-size:11px;color:#f60;margin-top:4px;">⚠ HA registry not loaded — ensure add-on is connected</div>' : ''}
+        ${!_haRegistry.loaded ? '<div style="font-size:11px;color:#f90;margin-top:4px;">⚠ HA registry not loaded — open in HA add-on mode</div>' : ''}
       </div>
 
       ${floor.ha_floor_id ? `
-        <div style="margin-bottom:14px;">
+        <div style="margin-bottom:12px;">
           <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
             <label style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.05em;">HA Areas → OW Zones</label>
-            <label style="display:flex;align-items:center;gap:5px;font-size:11px;color:#777;cursor:pointer;">
-              <input type="checkbox" id="owFloorAutoAdd" ${autoAdd ? 'checked' : ''} style="accent-color:#0064d2;">
+            <label style="display:flex;align-items:center;gap:5px;font-size:11px;color:#666;cursor:pointer;">
+              <input type="checkbox" id="owFloorAutoAdd" ${autoAdd?'checked':''} style="accent-color:#0064d2;">
               Auto-add new areas
             </label>
           </div>
@@ -7890,26 +7879,41 @@ function openFloorConfigPanel(floorId) {
               const isLinked = linkedAreaIds.includes(area.area_id);
               const existingZone = zones.find(z => z.ha_area_id === area.area_id);
               return `<label style="display:flex;align-items:center;gap:8px;padding:8px 12px;cursor:pointer;border-bottom:1px solid rgba(255,255,255,0.04);">
-                <input type="checkbox" class="ow-area-chk" data-area-id="${escapeHtml(area.area_id)}" data-area-name="${escapeHtml(area.name)}" ${isLinked ? 'checked' : ''} style="accent-color:#0064d2;flex-shrink:0;">
+                <input type="checkbox" class="ow-area-chk" data-area-id="${escapeHtml(area.area_id)}" data-area-name="${escapeHtml(area.name)}" ${isLinked?'checked':''} style="accent-color:#0064d2;flex-shrink:0;">
                 <span style="flex:1;font-size:12px;color:#ccc;">${escapeHtml(area.name)}</span>
-                ${existingZone ? `<span style="font-size:10px;color:#0096ff;background:rgba(0,100,255,0.1);padding:2px 6px;border-radius:4px;">${escapeHtml(existingZone.name)}</span>` : `<span style="font-size:10px;color:#555;">no zone</span>`}
+                ${existingZone ? `<span style="font-size:10px;color:#4db8ff;background:rgba(0,100,255,0.1);padding:2px 6px;border-radius:4px;">${escapeHtml(existingZone.name)}</span>` : '<span style="font-size:10px;color:#444;">no zone yet</span>'}
               </label>`;
             }).join('') : '<div style="padding:12px;color:#555;font-size:12px;text-align:center;">No areas on this HA floor</div>'}
           </div>
         </div>
       ` : ''}
 
-      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;">
-        <button id="owFloorRegistryRefresh" style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);color:#888;border-radius:8px;padding:7px 14px;cursor:pointer;font-size:12px;">↻ Refresh from HA</button>
-        <button id="owFloorConfigSave" style="background:rgba(0,100,210,0.2);border:1px solid rgba(0,100,210,0.4);color:#4db8ff;border-radius:8px;padding:7px 14px;cursor:pointer;font-size:12px;font-weight:600;">Save</button>
+      <div style="display:flex;gap:8px;margin-top:14px;">
+        <button id="owFloorRegistryRefresh" style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);color:#666;border-radius:8px;padding:7px 12px;cursor:pointer;font-size:12px;">↻ Refresh HA</button>
+        <button id="owFloorDeleteBtn" style="background:rgba(255,59,48,0.1);border:1px solid rgba(255,59,48,0.25);color:#ff3b30;border-radius:8px;padding:7px 12px;cursor:pointer;font-size:12px;">Delete Floor</button>
+        <button id="owFloorSaveBtn" style="margin-left:auto;background:rgba(0,100,210,0.2);border:1px solid rgba(0,100,210,0.4);color:#4db8ff;border-radius:8px;padding:7px 16px;cursor:pointer;font-size:12px;font-weight:600;">Save</button>
       </div>
     `;
 
-    // Wire close
-    panel.querySelector('#owFloorConfigClose').onclick = () => panel.remove();
+    // Wire name input
+    body.querySelector('#owFloorNameInput').oninput = e => {
+      floor.name = e.target.value;
+      titlebar.querySelector('#owFloorConfigFloorName').textContent = e.target.value;
+    };
+
+    // Wire floorplan path input
+    body.querySelector('#owFloorFpInput').oninput = e => { floor.floorplan = e.target.value.trim() || null; };
+
+    // Wire floorplan file upload
+    body.querySelector('#owFloorFpFile').onchange = async e => {
+      const file = e.target.files?.[0]; if (!file) return;
+      const fd = new FormData(); fd.append('file', file);
+      const r = await fetch(apiPath('ow/upload-floorplan'), { method: 'POST', body: fd });
+      if (r.ok) { const d = await r.json(); if (d.path) { floor.floorplan = d.path; body.querySelector('#owFloorFpInput').value = d.path; } }
+    };
 
     // Wire HA floor select
-    panel.querySelector('#owFloorHASelect').onchange = async (e) => {
+    body.querySelector('#owFloorHASelect').onchange = async e => {
       floor.ha_floor_id = e.target.value || null;
       floor.ha_linked_area_ids = [];
       await saveFloor(floor);
@@ -7917,43 +7921,53 @@ function openFloorConfigPanel(floorId) {
     };
 
     // Wire auto-add checkbox
-    panel.querySelector('#owFloorAutoAdd')?.addEventListener('change', async (e) => {
-      floor.ha_auto_add_areas = e.target.checked;
-      await saveFloor(floor);
-    });
+    body.querySelector('#owFloorAutoAdd')?.addEventListener('change', e => { floor.ha_auto_add_areas = e.target.checked; });
 
     // Wire area checkboxes
-    panel.querySelectorAll('.ow-area-chk').forEach(chk => {
+    body.querySelectorAll('.ow-area-chk').forEach(chk => {
       chk.addEventListener('change', async () => {
-        const areaId   = chk.dataset.areaId;
+        const areaId = chk.dataset.areaId;
         const areaName = chk.dataset.areaName;
         if (!floor.ha_linked_area_ids) floor.ha_linked_area_ids = [];
         if (chk.checked) {
           if (!floor.ha_linked_area_ids.includes(areaId)) floor.ha_linked_area_ids.push(areaId);
-          // Auto-create OW zone if none exists for this area
           const existing = zones.find(z => z.ha_area_id === areaId);
           if (!existing) await createZoneFromHAArea(areaId, areaName, floor.id);
         } else {
           floor.ha_linked_area_ids = floor.ha_linked_area_ids.filter(id => id !== areaId);
-          // Note: we don't delete the zone — user manages that separately
         }
         await saveFloor(floor);
         render();
+        renderZonesEditor();
       });
     });
 
-    // Wire registry refresh
-    panel.querySelector('#owFloorRegistryRefresh').onclick = async () => {
+    // Wire refresh
+    body.querySelector('#owFloorRegistryRefresh').onclick = async () => {
       await fetch(apiPath('ow/ha-registry/refresh'), { method: 'POST' });
       await loadHARegistry();
       render();
     };
 
-    // Wire save button — just closes (all changes are auto-saved above)
-    panel.querySelector('#owFloorConfigSave').onclick = () => { panel.remove(); showToast('Floor configuration saved ✓', 'ok'); };
+    // Wire delete
+    body.querySelector('#owFloorDeleteBtn').onclick = async () => {
+      if (!confirm(`Delete floor "${floor.name}"? Zones on this floor will become ungrouped.`)) return;
+      await deleteFloor(floor.id);
+      panel.remove();
+      renderZonesEditor(); renderZones();
+    };
+
+    // Wire save
+    body.querySelector('#owFloorSaveBtn').onclick = async () => {
+      await saveFloor(floor);
+      renderZonesEditor(); renderZones();
+      showToast('Floor saved ✓', 'ok');
+    };
   }
 
   render();
+  panel.appendChild(titlebar);
+  panel.appendChild(body);
   document.body.appendChild(panel);
 
   // Dismiss on outside click
@@ -8086,56 +8100,17 @@ function renderFloorFlyout() {
       <span style="width:8px;height:8px;border-radius:50%;background:${dotColour};flex-shrink:0;display:inline-block;${hasTriggered ? "animation:pulse-dot 0.8s infinite;" : ""}"></span>
       <span style="flex:1;">${escapeHtml(f.name)}</span>
       <span style="font-size:10px;color:#555;">${floorZones.length} zone${floorZones.length !== 1 ? "s" : ""}</span>
-      ${isAdmin ? `<span class="floor-config-btn" data-floor-id="${escapeHtml(f.id)}" style="font-size:12px;color:#555;padding:0 4px;cursor:pointer;" title="Configure floor">⚙</span>` : ''}
     `;
 
-    row.onclick = (e) => {
-      if (e.target.closest('.floor-config-btn')) return; // handled below
+    row.onclick = () => {
       setActiveFloor(f.id);
-      // Re-render zone editor floor selector if open
       if (editorMode) renderZonesEditor();
       flyout.remove();
       document.getElementById("floorsBtn")?.classList.remove("active");
     };
 
-    row.querySelector('.floor-config-btn')?.addEventListener('click', (e) => {
-      e.stopPropagation();
-      flyout.remove();
-      document.getElementById("floorsBtn")?.classList.remove("active");
-      openFloorConfigPanel(f.id);
-    });
-
     flyout.appendChild(row);
   });
-
-  // Add Floor button — always visible in flyout for admins
-  if (isAdmin) {
-    const sep = document.createElement('div');
-    sep.style.cssText = 'height:1px;background:rgba(255,255,255,0.08);margin:4px 0;';
-    flyout.appendChild(sep);
-
-    const addFloorBtn = document.createElement('button');
-    addFloorBtn.textContent = '+ Add floor';
-    addFloorBtn.style.cssText = `
-      display:block;width:100%;background:rgba(255,255,255,0.04);
-      border:1px solid rgba(255,255,255,0.1);border-radius:8px;
-      padding:8px 10px;cursor:pointer;color:#aaa;font-size:12px;text-align:left;
-    `;
-    addFloorBtn.onclick = async () => {
-      flyout.remove();
-      document.getElementById("floorsBtn")?.classList.remove("active");
-      // Same logic as the HA panel addFloorBtn
-      const name = prompt("New floor name:","New Floor");
-      if (!name?.trim()) return;
-      const id = "floor_" + Date.now();
-      const newFloor = { id, name: name.trim(), floorplan: null, ha_floor_id: null, ha_auto_add_areas: true, ha_linked_area_ids: [] };
-      const res = await saveFloor(newFloor);
-      if (res?.floors) { floors.length = 0; res.floors.forEach(f => floors.push(f)); }
-      setActiveFloor(id);
-      renderZonesEditor();
-    };
-    flyout.appendChild(addFloorBtn);
-  }
 
   document.body.appendChild(flyout);
 

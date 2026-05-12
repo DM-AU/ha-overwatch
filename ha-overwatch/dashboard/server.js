@@ -982,6 +982,8 @@ const server = http.createServer(async (req, res) => {
   /* ── /ow/ha-registry/refresh — re-fetch registry from HA ── */
   if (pathname === "/ow/ha-registry/refresh" && req.method === "POST") {
     haRegistry.loaded = false;
+    haRegistry._got_floors = false; haRegistry._got_areas = false;
+    haRegistry._got_devices = false; haRegistry._got_entities = false;
     haRegistry.floors = []; haRegistry.areas = []; haRegistry.devices = []; haRegistry.entities = [];
     json(res, { ok: true, message: "Registry refresh requested — reconnect to HA to reload" });
     return;
@@ -2153,7 +2155,9 @@ function startHAListener() {
       if (regType) {
         delete haRegistryCallbacks[msg.id];
         haRegistry[regType] = msg.result;
-        if (haRegistry.floors.length && haRegistry.areas.length && haRegistry.devices.length && haRegistry.entities.length) {
+        // Mark loaded once we have all four responses (even if some are empty arrays)
+        haRegistry[`_got_${regType}`] = true;
+        if (haRegistry._got_floors && haRegistry._got_areas && haRegistry._got_devices && haRegistry._got_entities) {
           haRegistry.loaded = true;
           console.log(`[HA-Overwatch] Registry loaded: ${haRegistry.floors.length} floors, ${haRegistry.areas.length} areas, ${haRegistry.devices.length} devices, ${haRegistry.entities.length} entities`);
         }
