@@ -1051,15 +1051,37 @@ function togglePinEntity(entityId, pinId) {
 
 function _callService(entityId, service) {
   if (!entityId) return;
-  const domain = entityId.startsWith("light.") ? "light"
-               : entityId.startsWith("siren.") ? "siren"
-               : "switch";
+  const domain = entityId.startsWith("light.") ? "light" : entityId.startsWith("siren.") ? "siren" : "switch";
+  _callDomainService(domain, service, entityId);
+}
+
+function _callDomainService(domain, service, entityId) {
+  if (!domain || !service || !entityId) return;
   if (IS_DIRECT_MODE) {
-    fetch("ow/call-service", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ domain, service, entity_id: entityId }) });
+    fetch("ow/call-service", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ domain, service, entity_id: entityId }) }).catch(e => console.warn("[OW] call-service failed:", e.message));
   } else if (haConnected && haSocket) {
     sendHA({ type: "call_service", domain, service, service_data: { entity_id: entityId } });
   }
+}
+function doorPinIsOpen(pin) {
+  const state = String(haStates[pin?.sensor_entity]?.state || '').toLowerCase();
+  return ['on','open','opening','detected','unlocked'].includes(state);
+}
+function doorControlInfo(pin) {
+  const entityId = pin?.control_entity;
+  if (!entityId) return null;
+  const domain = entityId.split('.')[0];
+  const state = String(haStates[entityId]?.state || '').toLowerCase();
+  if (domain === 'lock') { const locked = state === 'locked' || state === 'off'; return { domain, service: locked ? 'unlock' : 'lock', label: locked ? 'Unlock' : 'Lock' }; }
+  if (domain === 'cover') { const closed = state === 'closed' || state === 'closing' || state === 'off'; return { domain, service: closed ? 'open_cover' : 'close_cover', label: closed ? 'Open' : 'Close' }; }
+  if (domain === 'switch' || domain === 'input_boolean') { const on = state === 'on' || state === 'open' || state === 'opening' || state === 'unlocked'; return { domain, service: on ? 'turn_off' : 'turn_on', label: on ? 'Close' : 'Open' }; }
+  if (domain === 'button') return { domain, service: 'press', label: 'Press' };
+  return null;
+}
+function callDoorPinControl(pin) {
+  const info = doorControlInfo(pin);
+  if (!info || !pin?.control_entity) return;
+  _callDomainService(info.domain, info.service, pin.control_entity);
 }
 
 
@@ -2118,7 +2140,6 @@ function isEntityTriggered(entityId) {
   const s = (st.state || "").toLowerCase();
   return s === "on" || s === "open" || s === "opening" || s === "detected" || s === "home" || s === "triggered" || s === "unlocked";
 }
-
 function zoneTriggerEntities(zone) {
   if (!zone) return [];
   const sensors = (zone.sensors || []).filter(e => !isEntityGhosted(e));
@@ -2131,6 +2152,7 @@ function zoneTriggerEntities(zone) {
 function zoneActiveTriggerEntity(zone) {
   return zoneTriggerEntities(zone).find(isEntityTriggered) || '';
 }
+
 
 /* Track previous zone states to detect trigger→normal transitions */
 const zonePrevState = {};
@@ -2723,30 +2745,17 @@ function refreshEntityStateDots(container) {
 function captureZoneEditorScrollState(container) {
   if (!container) return [];
   return Array.from(container.querySelectorAll('.zed-list, .zed-right-content, .ha-entity-list, #groupMemberList'))
-    .map(el => ({
-      selector: el.id ? `#${CSS.escape(el.id)}` : `.${Array.from(el.classList).map(c => CSS.escape(c)).join('.')}`,
-      scrollTop: el.scrollTop,
-      scrollLeft: el.scrollLeft,
-    }));
+    .map(el => ({ selector: el.id ? `#${CSS.escape(el.id)}` : `.${Array.from(el.classList).map(c => CSS.escape(c)).join('.')}`, scrollTop: el.scrollTop, scrollLeft: el.scrollLeft }));
 }
-
 function restoreZoneEditorScrollState(container, state) {
   if (!container || !state?.length) return;
-  requestAnimationFrame(() => {
-    state.forEach(s => {
-      const el = container.querySelector(s.selector);
-      if (el) { el.scrollTop = s.scrollTop; el.scrollLeft = s.scrollLeft; }
-    });
-  });
+  requestAnimationFrame(() => state.forEach(s => { const el = container.querySelector(s.selector); if (el) { el.scrollTop = s.scrollTop; el.scrollLeft = s.scrollLeft; } }));
 }
-
 function zoneEditorHasActiveControl(container) {
   const panel = container?.querySelector('.zones-editor');
   const activeEl = document.activeElement;
   if (!panel || !activeEl || !panel.contains(activeEl)) return false;
-  if (activeEl.matches('input, textarea, select, [contenteditable="true"]')) return true;
-  if (activeEl.closest('.entity-search-results, .zone-handle, .ha-device-tabs')) return true;
-  return false;
+  return activeEl.matches('input, textarea, select, [contenteditable="true"]') || !!activeEl.closest('.entity-search-results, .zone-handle, .ha-device-tabs');
 }
 
 /* ─── ZONES EDITOR PANEL (draggable) ──────────────────────── */
@@ -3647,6 +3656,7 @@ function renderZonePopupContent() {
   const zState     = getZoneState(zone);
   const isArmed    = zState !== 'disabled';
   const sensors_   = zone.sensors  || [];
+  const doors_     = doorPins.filter(p => p.zone_id === zone.id && (p.sensor_entity || p.control_entity) && !isEntityGhosted(p.sensor_entity));
   const lights_    = zone.lights   || [];
   const sirens_    = zone.sirens   || [];
   const cameras_   = zone.cameras  || [];
@@ -3676,6 +3686,25 @@ function renderZonePopupContent() {
           <span class="sensor-dot" style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${triggered ? '#ff3b30' : '#34c759'};margin-right:7px;flex-shrink:0;"></span>
           <span style="flex:1;color:#ccc;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(e.split('.').pop())}</span>
           <span class="sensor-state" style="color:${triggered ? '#ff6b6b' : '#34c759'};font-size:11px;font-weight:600;margin-left:6px;">${escapeHtml(state.toUpperCase())}</span>
+        </div>`;
+      }).join('')}
+    </div>` : '';
+
+  // ── Doors & Windows ───────────────────────────────────────
+  const doorHtml = doors_.length ? `
+    <div style="margin-bottom:10px;">
+      <div style="font-size:10px;text-transform:uppercase;color:#555;letter-spacing:0.1em;margin-bottom:4px;">Doors & Windows</div>
+      ${doors_.map(pin => {
+        const sensorId = pin.sensor_entity || '';
+        const state = sensorId ? (haStates[sensorId]?.state || '—') : '—';
+        const open = pin.sensor_entity ? doorPinIsOpen(pin) : false;
+        const info = doorControlInfo(pin);
+        const label = pin.name || sensorId.split('.').pop() || pin.control_entity || 'door/window';
+        return `<div class="zp-door-row" data-door-pin-id="${escapeHtml(pin.id)}" data-door-sensor-id="${escapeHtml(sensorId)}" style="display:flex;align-items:center;padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.04);gap:6px;">
+          <span class="door-dot" style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${open ? '#ff9500' : '#34c759'};flex-shrink:0;"></span>
+          <span title="${escapeHtml(sensorId)}" style="flex:1;color:#ccc;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">🚪 ${escapeHtml(label)}</span>
+          <span class="door-state" style="color:${open ? '#ff9500' : '#34c759'};font-size:11px;font-weight:600;margin-left:4px;">${escapeHtml(String(state).toUpperCase())}</span>
+          ${info ? `<button class="zp-door-control" data-pin-id="${escapeHtml(pin.id)}" style="background:rgba(0,150,255,0.15);border:1px solid rgba(0,150,255,0.35);color:#4db8ff;border-radius:5px;padding:3px 8px;cursor:pointer;font-size:11px;flex-shrink:0;">${escapeHtml(info.label)}</button>` : ''}
         </div>`;
       }).join('')}
     </div>` : '';
@@ -3745,10 +3774,20 @@ function renderZonePopupContent() {
       }).join('')}
     </div>` : '';
 
-  popup.innerHTML = `<div style="padding:14px;">${armHtml}${sensorHtml}${lightHtml}${sirenHtml}${cameraHtml}</div>`;
+  popup.innerHTML = `<div style="padding:14px;">${armHtml}${sensorHtml}${doorHtml}${lightHtml}${sirenHtml}${cameraHtml}</div>`;
 
   // ── Wire events ───────────────────────────────────────────
   popup.querySelector('#zpClose')?.addEventListener('click', closeZonePopup);
+
+  popup.querySelectorAll('.zp-door-control').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      const pin = doorPins.find(p => p.id === btn.dataset.pinId);
+      if (!pin) return;
+      callDoorPinControl(pin);
+      setTimeout(refreshZonePopupIfOpen, 250);
+    });
+  });
 
   // Arm/Disarm — optimistic: flip the zone switch in haStates immediately
   // Arm/Disarm — only for IPs in the allowed list
@@ -3895,6 +3934,21 @@ function refreshZonePopupIfOpen() {
     if (text) { text.textContent = state.toUpperCase(); text.style.color = triggered ? '#ff6b6b' : '#34c759'; }
   });
 
+  // Door/window rows + control button labels
+  popup.querySelectorAll('[data-door-pin-id]').forEach(row => {
+    const pin = doorPins.find(p => p.id === row.dataset.doorPinId);
+    if (!pin) return;
+    const state = pin.sensor_entity ? (haStates[pin.sensor_entity]?.state || '—') : '—';
+    const open = pin.sensor_entity ? doorPinIsOpen(pin) : false;
+    const dot = row.querySelector('.door-dot');
+    const text = row.querySelector('.door-state');
+    const btn = row.querySelector('.zp-door-control');
+    const info = doorControlInfo(pin);
+    if (dot)  { dot.style.background = open ? '#ff9500' : '#34c759'; }
+    if (text) { text.textContent = String(state).toUpperCase(); text.style.color = open ? '#ff9500' : '#34c759'; }
+    if (btn && info) btn.textContent = info.label;
+  });
+
   // Light buttons
   popup.querySelectorAll('.zp-light-toggle').forEach(btn => {
     const on = haStates[btn.dataset.entity]?.state === 'on';
@@ -3975,13 +4029,10 @@ function renderZonesEditor(force = false) {
   if (!editorMode) { container.innerHTML = ""; return; }
 
   // Don't blow away DOM while the user is interacting with editor controls.
-  // HA state updates can arrive while a dropdown is open or a panel is scrolled; a full
-  // innerHTML rebuild steals focus and resets scroll. Refresh state dots only unless forced.
   if (!force && zoneEditorHasActiveControl(container)) {
     refreshEntityStateDots(container);
     return;
   }
-
   const __zedScrollState = captureZoneEditorScrollState(container);
 
   const selectedZone  = selectedZoneId  ? zones.find(z => z.id === selectedZoneId)   : null;

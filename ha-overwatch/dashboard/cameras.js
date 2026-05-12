@@ -188,13 +188,7 @@ function friendlyName(entityId) {
 function zoneCameraTriggered(zone) {
   const OW = window.OW;
   if (!zone || !OW) return false;
-
-  // app.js owns trigger semantics: Sensors + Doors & Windows, excluding ghosted entities.
-  if (typeof OW.zoneActiveTriggerEntity === 'function') {
-    return !!OW.zoneActiveTriggerEntity(zone);
-  }
-
-  // Fallback for older app.js builds.
+  if (typeof OW.zoneActiveTriggerEntity === 'function') return !!OW.zoneActiveTriggerEntity(zone);
   return (zone.sensors || []).some(OW.isEntityTriggered);
 }
 
