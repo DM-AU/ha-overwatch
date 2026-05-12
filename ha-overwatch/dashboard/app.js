@@ -223,8 +223,8 @@ const HA_ZONE_SENSOR_CLASSES = new Set([
   'motion','occupancy','presence','vibration','sound','moisture','smoke','carbon_monoxide','heat','cold','gas','tamper','connectivity','power','problem','safety','update'
 ]);
 
-// Fallback matching is intentionally conservative. HA device_class wins; name matching is only
-// used where the entity text clearly looks like a contact/opening sensor and not status/telemetry.
+// HA Area sync filter only. Runtime triggering must respect whatever the user has
+// intentionally left in Sensors or Doors & Windows unless that entity is ghosted.
 const HA_DOOR_INCLUDE_RE = /(^|[._\s-])((garage[._\s-]*door)|(screen[._\s-]*door)|(roller[._\s-]*door)|(door[._\s-]*(sensor|contact))|(window[._\s-]*(sensor|contact))|gate|garage_door|door|window|opening|reed|contact)([._\s-]|$)/;
 const HA_DOOR_EXCLUDE_RE = /(^|[._\s-])(battery|batt|charger|chargers|charging|charge|status|controller|physical[._\s-]*switch|switch|light|lights|motion|occupancy|presence|illuminance|lux|temperature|humidity|voltage|current|power|energy|rssi|lqi|linkquality|signal|tamper|problem|update)([._\s-]|$)/;
 
@@ -245,18 +245,6 @@ function isHADoorEntity(e) {
   if (!eid.startsWith('binary_sensor.')) return false;
   if (HA_DOOR_CLASSES.has(dc)) return true;
   return HA_DOOR_INCLUDE_RE.test(text) && !HA_DOOR_EXCLUDE_RE.test(text);
-}
-
-function doorPinEntityIsTriggerEligible(pin) {
-  if (!pin?.sensor_entity) return false;
-  if (isEntityGhosted(pin.sensor_entity)) return false;
-  const reg = (_haRegistry.entities || []).find(e => e.entity_id === pin.sensor_entity);
-  if (reg) return isHADoorEntity(reg);
-  return isHADoorEntity({
-    entity_id: pin.sensor_entity,
-    name: pin.name,
-    original_name: pin.name,
-  });
 }
 
 const HA_AREA_FILTERS = {
@@ -2135,7 +2123,7 @@ function zoneTriggerEntities(zone) {
   if (!zone) return [];
   const sensors = (zone.sensors || []).filter(e => !isEntityGhosted(e));
   const doorSensors = doorPins
-    .filter(p => p.zone_id === zone.id && doorPinEntityIsTriggerEligible(p))
+    .filter(p => p.zone_id === zone.id && p.sensor_entity && !isEntityGhosted(p.sensor_entity))
     .map(p => p.sensor_entity);
   return [...sensors, ...doorSensors];
 }
@@ -2165,7 +2153,7 @@ function getZoneState(zone) {
   const sensors = (zone.sensors || []).filter(e => !isEntityGhosted(e));
   // Also treat open door pins as triggered sensors (issue 8)
   const doorSensors = doorPins
-    .filter(p => p.zone_id === zone.id && doorPinEntityIsTriggerEligible(p))
+    .filter(p => p.zone_id === zone.id && p.sensor_entity && !isEntityGhosted(p.sensor_entity))
     .map(p => p.sensor_entity);
   const allSensors = [...sensors, ...doorSensors];
   if (!allSensors.length) return "normal";
@@ -3947,7 +3935,7 @@ function startPinAnimLoop() {
     const hasActiveLights = lights.some(p => haStates[p.entity_id]?.state === 'on');
     const suppressDoorDisarmed = localStorage.getItem('ow_hide_door_alert_disarmed') === 'true';
     const hasOpenDoors    = doorPins.some(p => {
-      if (!doorPinEntityIsTriggerEligible(p) || !isEntityTriggered(p.sensor_entity)) return false;
+      if (!p.sensor_entity || isEntityGhosted(p.sensor_entity) || !isEntityTriggered(p.sensor_entity)) return false;
       if (suppressDoorDisarmed) {
         // Check if the zone is disarmed — check arm switch directly (not getZoneState
         // which would return 'triggered' because the open door makes the zone triggered)
