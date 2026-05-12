@@ -247,6 +247,18 @@ function isHADoorEntity(e) {
   return HA_DOOR_INCLUDE_RE.test(text) && !HA_DOOR_EXCLUDE_RE.test(text);
 }
 
+function doorPinEntityIsTriggerEligible(pin) {
+  if (!pin?.sensor_entity) return false;
+  if (isEntityGhosted(pin.sensor_entity)) return false;
+  const reg = (_haRegistry.entities || []).find(e => e.entity_id === pin.sensor_entity);
+  if (reg) return isHADoorEntity(reg);
+  return isHADoorEntity({
+    entity_id: pin.sensor_entity,
+    name: pin.name,
+    original_name: pin.name,
+  });
+}
+
 const HA_AREA_FILTERS = {
   sensors: e => {
     const eid = String(e?.entity_id || '').toLowerCase();
@@ -2123,7 +2135,7 @@ function zoneTriggerEntities(zone) {
   if (!zone) return [];
   const sensors = (zone.sensors || []).filter(e => !isEntityGhosted(e));
   const doorSensors = doorPins
-    .filter(p => p.zone_id === zone.id && p.sensor_entity && !isEntityGhosted(p.sensor_entity))
+    .filter(p => p.zone_id === zone.id && doorPinEntityIsTriggerEligible(p))
     .map(p => p.sensor_entity);
   return [...sensors, ...doorSensors];
 }
@@ -2153,7 +2165,7 @@ function getZoneState(zone) {
   const sensors = (zone.sensors || []).filter(e => !isEntityGhosted(e));
   // Also treat open door pins as triggered sensors (issue 8)
   const doorSensors = doorPins
-    .filter(p => p.zone_id === zone.id && p.sensor_entity && !isEntityGhosted(p.sensor_entity))
+    .filter(p => p.zone_id === zone.id && doorPinEntityIsTriggerEligible(p))
     .map(p => p.sensor_entity);
   const allSensors = [...sensors, ...doorSensors];
   if (!allSensors.length) return "normal";
@@ -3935,7 +3947,7 @@ function startPinAnimLoop() {
     const hasActiveLights = lights.some(p => haStates[p.entity_id]?.state === 'on');
     const suppressDoorDisarmed = localStorage.getItem('ow_hide_door_alert_disarmed') === 'true';
     const hasOpenDoors    = doorPins.some(p => {
-      if (!p.sensor_entity || !isEntityTriggered(p.sensor_entity)) return false;
+      if (!doorPinEntityIsTriggerEligible(p) || !isEntityTriggered(p.sensor_entity)) return false;
       if (suppressDoorDisarmed) {
         // Check if the zone is disarmed — check arm switch directly (not getZoneState
         // which would return 'triggered' because the open door makes the zone triggered)
