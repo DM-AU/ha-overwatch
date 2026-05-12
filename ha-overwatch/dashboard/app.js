@@ -1287,12 +1287,190 @@ function bindPanelInteraction(idx) {
     placePinAtFloorplanCoord(fpX, fpY, floor?.id || null);
   });
 
+  // Zone editor interactions for multi-panel SVGs.
+  // bindZonesSvgEvents() only attaches to #zonesSvg, which does not exist in multi-panel mode.
+  // This keeps map zone selection, empty-click deselect, point creation, vertex drag,
+  // whole-zone drag, context-delete, and double-click finish working on .fp-svg panels.
+  const panelSvg = getPanelSvg(idx);
+  if (panelSvg && !panelSvg._owZoneEditorBound) {
+    panelSvg._owZoneEditorBound = true;
+
+    const panelPoint = (e) => {
+      const rect = panelEl.getBoundingClientRect();
+      const z = PANEL_ZOOMS[idx] || { scale: 1, x: 0, y: 0 };
+      return {
+        x: (e.clientX - rect.left - z.x) / z.scale,
+        y: (e.clientY - rect.top  - z.y) / z.scale,
+      };
+    };
+
+    panelSvg.addEventListener('pointerdown', e => {
+      const target = e.target;
+      const sx = e.clientX, sy = e.clientY;
+      const fp = panelPoint(e);
+      const floor = getPanelFloor(idx);
+
+      if (!editorMode) {
+        if (target.classList?.contains('zone-polygon')) {
+          const zoneId = target.dataset.zoneId;
+          const zone = zones.find(z => z.id === zoneId);
+          if (zone?.hidden) { e.stopPropagation(); return; }
+          openZonePopup(zoneId, e.clientX, e.clientY);
+          e.stopPropagation();
+        }
+        return;
+      }
+
+      if (placingPinType) {
+        placePinAtFloorplanCoord(fp.x, fp.y, floor?.id || activeFloorId);
+        e.stopPropagation();
+        return;
+      }
+
+      if (target.classList?.contains('zone-handle')) {
+        draggingHandle = { zoneId: target.dataset.zoneId, idx: Number(target.dataset.index) };
+        panelSvg.setPointerCapture(e.pointerId);
+        e.stopPropagation();
+        return;
+      }
+
+      if (isEditingPoints && selectedZoneId && !isCreatingZone) {
+        const zone = zones.find(z => z.id === selectedZoneId);
+        if (zone && (zone.points || []).length >= 2) {
+          const insideZone = isPointInPolygon(fp.x, fp.y, zone.points);
+          if (!insideZone) {
+            const info = closestEdgeInfo(zone, fp.x, fp.y);
+            if (info) {
+              pushUndo();
+              zone.points.splice(info.insertAfter + 1, 0, { x: Math.round(fp.x), y: Math.round(fp.y) });
+              saveZone(zone);
+              renderZones();
+              renderZonesEditor();
+              e.stopPropagation();
+              return;
+            }
+          }
+        }
+      }
+
+      if (target.classList?.contains('zone-polygon')) {
+        const zoneId = target.dataset.zoneId;
+        const zone = zones.find(z => z.id === zoneId);
+        if (zone?.hidden) { e.stopPropagation(); return; }
+
+        if (isEditingPoints && selectedZoneId && zoneId !== selectedZoneId) {
+          e.stopPropagation();
+          return;
+        }
+
+        if (selectedZoneId === zoneId && !isEditingPoints) {
+          clearZoneEditorSelection(true);
+          e.stopPropagation();
+          return;
+        }
+
+        selectedZoneId = zoneId;
+        selectedGroupId = null;
+        activePinId = null;
+        activePinType = null;
+
+        if (isEditingPoints && zone) {
+          draggingZone = { zoneId, startPoints: zone.points.map(p => ({ ...p })) };
+          dragStart = { x: sx, y: sy };
+          panelSvg.setPointerCapture(e.pointerId);
+        }
+
+        renderZones();
+        renderZonesEditor();
+        e.stopPropagation();
+        return;
+      }
+
+      if (isCreatingZone && currentNewZone) {
+        pushUndo();
+        currentNewZone.points.push({ x: fp.x, y: fp.y });
+        saveZone(currentNewZone);
+        renderZones();
+        const countSpan = document.querySelector(`.zones-list-item[data-zone-id="${currentNewZone.id}"] span:last-child`);
+        if (countSpan) countSpan.textContent = `${currentNewZone.points.length}pts`;
+        e.stopPropagation();
+        return;
+      }
+
+      // Empty panel/canvas click: clear the right-side editor selection.
+      clearZoneEditorSelection(true);
+      // Do not stop propagation — panel panning may still start from empty canvas.
+    });
+
+    panelSvg.addEventListener('pointermove', e => {
+      if (!editorMode) return;
+      const fp = panelPoint(e);
+      if (draggingHandle) {
+        const zone = zones.find(z => z.id === draggingHandle.zoneId);
+        if (!zone) return;
+        zone.points[draggingHandle.idx] = fp;
+        saveZone(zone);
+        renderZones();
+      } else if (draggingZone && dragStart) {
+        const zone = zones.find(z => z.id === draggingZone.zoneId);
+        if (!zone) return;
+        const z = PANEL_ZOOMS[idx] || { scale: 1 };
+        const dxF = (e.clientX - dragStart.x) / z.scale;
+        const dyF = (e.clientY - dragStart.y) / z.scale;
+        zone.points = draggingZone.startPoints.map(p => ({ x: p.x + dxF, y: p.y + dyF }));
+        saveZone(zone);
+        renderZones();
+      }
+    });
+
+    panelSvg.addEventListener('pointerup', e => {
+      if (draggingHandle || draggingZone) {
+        try { panelSvg.releasePointerCapture(e.pointerId); } catch {}
+      }
+      draggingHandle = null;
+      draggingZone = null;
+      dragStart = null;
+    });
+
+    panelSvg.addEventListener('pointercancel', () => {
+      draggingHandle = null;
+      draggingZone = null;
+      dragStart = null;
+    });
+
+    panelSvg.addEventListener('dblclick', e => {
+      if (!editorMode || !isCreatingZone || !currentNewZone) return;
+      if (currentNewZone.points.length < 3) { alert('A zone needs at least 3 points.'); return; }
+      isCreatingZone = false;
+      currentNewZone = null;
+      saveZones();
+      renderZonesEditor();
+      scheduleHAReload();
+      e.stopPropagation();
+    });
+
+    panelSvg.addEventListener('contextmenu', e => {
+      if (!editorMode) return;
+      e.preventDefault();
+      const target = e.target;
+      if (target.classList?.contains('zone-handle') && isEditingPoints) {
+        const zone = zones.find(z => z.id === target.dataset.zoneId);
+        if (!zone || zone.points.length <= 3) return;
+        pushUndo();
+        zone.points.splice(Number(target.dataset.index), 1);
+        saveZone(zone);
+        renderZones();
+        renderZonesEditor();
+      }
+    });
+  }
+
   // Pan
   let panning = false, panStart = null;
 
   panelEl.addEventListener('pointerdown', e => {
     if (e.button !== 0 && e.pointerType === 'mouse') return;
-    if (e.target.closest('.zone-handle, .floor-panel-handle')) return;
+    if (e.target.closest('.zone-handle, .zone-polygon, .floor-panel-handle')) return;
     if (mapLocked && !editorMode) return; // locked
     panning  = true;
     panStart = { x: e.clientX - PANEL_ZOOMS[idx].x, y: e.clientY - PANEL_ZOOMS[idx].y };
@@ -1382,6 +1560,7 @@ function applyFloorPanels() {
         if (fp.complete) { initFloorplan(); renderZones(); }
       }
       bindPan(); // re-bind single-panel pan
+      setZoneSvgInteractionState();
     }
     // Hide sidebar zoom when returning to single panel
     _updateZoomBtnsVisibility();
@@ -1428,7 +1607,7 @@ function applyFloorPanels() {
     const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     svg.setAttribute('class', 'fp-svg zones-svg');
     svg.id = 'fp-svg-' + i;
-    svg.style.cssText = 'position:absolute;top:0;left:0;overflow:visible;pointer-events:none;';
+    svg.style.cssText = `position:absolute;top:0;left:0;overflow:visible;pointer-events:${editorMode ? 'all' : 'none'};`;
 
     wrapper.appendChild(img);
     wrapper.appendChild(svg);
@@ -1531,6 +1710,7 @@ function applyFloorPanels() {
 
   // Bind interactions for each panel
   for (let i = 0; i < n; i++) bindPanelInteraction(i);
+  setZoneSvgInteractionState();
 
   // Update zoom buttons
   _updateZoomBtnsVisibility();
@@ -2560,9 +2740,7 @@ function makeDraggableEditor(containerEl) {
       activePinId = null; activePinType = null;
       placingPinType = null; placingEntityId = null;
       editorPosRestored = false;
-      const svg = document.getElementById("zonesSvg");
-      if (svg) { svg.style.pointerEvents = "none"; svg.style.cursor = ""; }
-      document.querySelectorAll('.fp-svg').forEach(s => s.style.cursor = '');
+      setZoneSvgInteractionState();
       const zonesBtn = document.getElementById("zonesBtn");
       if (zonesBtn) zonesBtn.classList.remove("active");
       renderZonesEditor();
@@ -8166,6 +8344,37 @@ function bindSearchUI() {
   });
 }
 
+
+/* ─── ZONE EDITOR MAP INTERACTION HELPERS ─────────────────── */
+function setZoneSvgInteractionState() {
+  const enabled = editorMode ? 'all' : 'none';
+  document.querySelectorAll('#zonesSvg, .fp-svg').forEach(svg => {
+    svg.style.pointerEvents = enabled;
+    if (!editorMode) svg.style.cursor = '';
+  });
+}
+
+function clearZoneEditorSelection(render = true) {
+  selectedZoneId = null;
+  selectedGroupId = null;
+  highlightedZoneId = null;
+  highlightedUntil = 0;
+  highlightedGroupId = null;
+  highlightedGroupUntil = 0;
+  isEditingPoints = false;
+  activePinId = null;
+  activePinType = null;
+  placingPinType = null;
+  placingEntityId = null;
+  placingZoneId = null;
+  _placingExistingPinId = null;
+  document.querySelectorAll('#zonesSvg, .fp-svg').forEach(svg => { svg.style.cursor = ''; });
+  if (render) {
+    renderZones();
+    renderZonesEditor();
+  }
+}
+
 /* ─── ZONES BUTTON ACTIVE STATE ───────────────────────────── */
 function bindZonesButton() {
   const zonesBtn = document.getElementById("zonesBtn");
@@ -8181,8 +8390,7 @@ function bindZonesButton() {
       if (!_haRegistry.loaded) loadHARegistry().then(() => renderZonesEditor());
     }
     zonesBtn.classList.toggle("active", editorMode);
-    const svg = document.getElementById("zonesSvg");
-    if (svg) svg.style.pointerEvents = editorMode ? "all" : "none";
+    setZoneSvgInteractionState();
     renderZonesEditor();
     renderZones();
   };
