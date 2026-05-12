@@ -6570,8 +6570,7 @@ function renderSettingsPanel() {
 
         <div class="settings-section">
           <div class="settings-section-title" id="zoneColourToggle"
-            style="cursor:pointer;user-select:none;display:flex;align-items:center;justify-content:space-between;"
-            onclick="(function(){var b=document.getElementById('zoneColourBody');var c=document.getElementById('zoneColourChevron');if(!b)return;var o=b.style.display==='none'||b.style.display==='';b.style.display=o?'block':'none';if(c)c.style.transform=o?'rotate(180deg)':'';localStorage.setItem('ow_zone_colour_open',String(o));})()">
+            style="cursor:pointer;user-select:none;display:flex;align-items:center;justify-content:space-between;">
             <span>Zone Colours ${perDeviceBadge}</span>
             <span id="zoneColourChevron" style="font-size:10px;color:#666;transition:transform 0.2s;">▼</span>
           </div>
