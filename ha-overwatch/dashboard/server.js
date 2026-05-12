@@ -266,7 +266,22 @@ function nameSlug(name) {
 const haRegistry = { floors: [], areas: [], devices: [], entities: [], loaded: false };
 const haRegistryCallbacks = {}; // msgId -> type being fetched
 let haMsgId = 1; // module-scoped so IDs are unique across restarts
+let haListenerSend = null; // set by startHAListener once connected — used to trigger re-fetches
 
+// Trigger a fresh fetch of all registry data from HA
+function refetchHARegistry() {
+  if (!haListenerSend) return false;
+  haRegistry.loaded = false;
+  haRegistry._got_floors = false; haRegistry._got_areas = false;
+  haRegistry._got_devices = false; haRegistry._got_entities = false;
+  haRegistry.floors = []; haRegistry.areas = []; haRegistry.devices = []; haRegistry.entities = [];
+  Object.keys(haRegistryCallbacks).forEach(k => delete haRegistryCallbacks[k]);
+  const floorId = haMsgId; haListenerSend({ type: 'config/floor_registry/list' }); haRegistryCallbacks[floorId] = 'floors';
+  const areaId  = haMsgId; haListenerSend({ type: 'config/area_registry/list' });  haRegistryCallbacks[areaId]  = 'areas';
+  const devId   = haMsgId; haListenerSend({ type: 'config/device_registry/list' }); haRegistryCallbacks[devId]   = 'devices';
+  const entId   = haMsgId; haListenerSend({ type: 'config/entity_registry/list' }); haRegistryCallbacks[entId]   = 'entities';
+  return true;
+}
 
 
 // Full HA entity state cache — written by startHAListener, read by /ow/states endpoint
@@ -981,11 +996,8 @@ const server = http.createServer(async (req, res) => {
 
   /* ── /ow/ha-registry/refresh — re-fetch registry from HA ── */
   if (pathname === "/ow/ha-registry/refresh" && req.method === "POST") {
-    haRegistry.loaded = false;
-    haRegistry._got_floors = false; haRegistry._got_areas = false;
-    haRegistry._got_devices = false; haRegistry._got_entities = false;
-    haRegistry.floors = []; haRegistry.areas = []; haRegistry.devices = []; haRegistry.entities = [];
-    json(res, { ok: true, message: "Registry refresh requested — reconnect to HA to reload" });
+    const ok = refetchHARegistry();
+    json(res, { ok, message: ok ? "Registry refresh triggered" : "Not connected to HA — registry will reload on next connection" });
     return;
   }
 
@@ -2052,6 +2064,7 @@ function startHAListener() {
       function send(obj) {
         sendWsFrame(sock, JSON.stringify({ ...obj, id: haMsgId++ }));
       }
+      haListenerSend = send; // expose for registry refresh endpoint
 
       // Send a ping every 30s to keep connection alive
       const pingTimer = setInterval(() => {
@@ -2081,6 +2094,7 @@ function startHAListener() {
       sock.on("close", () => {
         if (!connected) return;
         connected = false;
+        haListenerSend = null;
         clearInterval(pingTimer);
         buf = null; // release buffer memory
         console.log("[HA-Overwatch] HA listener disconnected");
@@ -2089,6 +2103,7 @@ function startHAListener() {
       sock.on("error", e => {
         if (!connected) return;
         connected = false;
+        haListenerSend = null;
         clearInterval(pingTimer);
         buf = null; // release buffer memory
         console.error("[HA-Overwatch] HA listener error:", e.message);
