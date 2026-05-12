@@ -4086,14 +4086,14 @@ function renderZonesEditor() {
             + '<select id="editorFloorSelect" style="flex:1;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:5px 8px;color:#fff;font-size:12px;">'
             + floors.map(f => '<option value="' + f.id + '"' + (f.id === activeFloorId ? ' selected' : '') + '>' + escapeHtml(f.name) + '</option>').join('')
             + '</select>'
-            + (isAdmin ? '<button id="floorConfigZedBtn" title="Configure floor" style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:5px 8px;color:#888;font-size:12px;cursor:pointer;flex-shrink:0;">⚙</button>' : '')
+            + (!IS_DIRECT_MODE ? '<button id="floorConfigZedBtn" title="Configure floor" style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:5px 8px;color:#888;font-size:12px;cursor:pointer;flex-shrink:0;">⚙</button>' : '')
             + '</div>'
-          ) : (isAdmin ? '<div style="padding:4px 8px;border-bottom:1px solid rgba(255,255,255,0.06);display:flex;justify-content:flex-end;"><button id="floorConfigZedBtn" title="Configure floor" style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:5px 8px;color:#888;font-size:12px;cursor:pointer;">⚙ Configure floor</button></div>' : '')}
+          ) : (!IS_DIRECT_MODE ? '<div style="padding:4px 8px;border-bottom:1px solid rgba(255,255,255,0.06);display:flex;justify-content:flex-end;"><button id="floorConfigZedBtn" title="Configure floor" style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:5px 8px;color:#888;font-size:12px;cursor:pointer;">⚙ Configure floor</button></div>' : '')}
           <div class="zed-list" id="zonesList">${buildZoneList()}</div>
           <div class="zed-actions">
             <button id="addGroupBtn">+ Group</button>
             <button id="addZoneBtn">+ Zone</button>
-            ${isAdmin ? '<button id="addFloorZedBtn">+ Floor</button>' : ''}
+            ${!IS_DIRECT_MODE ? '<button id="addFloorZedBtn">+ Floor</button>' : ''}
             ${selectedZone ? `<button id="editPointsBtn" style="${isEditingPoints ? 'border-color:rgba(255,204,0,0.5);color:#ffcc00;' : ''}">${editPtsLabel}</button>` : ""}
             ${selectedZone ? `<button id="undoZonesBtn" title="Undo last change">↩ Undo</button>` : ""}
             ${(selectedZone || selectedGroup) ? `<button id="deleteZoneBtn" class="danger">Delete</button>` : ""}
