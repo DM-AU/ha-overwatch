@@ -1067,6 +1067,13 @@ function doorPinIsOpen(pin) {
   const state = String(haStates[pin?.sensor_entity]?.state || '').toLowerCase();
   return ['on','open','opening','detected','unlocked'].includes(state);
 }
+function doorPinDisplayState(pin) {
+  if (!pin?.sensor_entity) return '—';
+  const raw = String(haStates[pin.sensor_entity]?.state || '—').toLowerCase();
+  if (['on','open','opening','detected','unlocked'].includes(raw)) return 'OPEN';
+  if (['off','closed','closing','locked'].includes(raw)) return 'CLOSED';
+  return raw === '—' ? '—' : raw.toUpperCase();
+}
 function doorControlInfo(pin) {
   const entityId = pin?.control_entity;
   if (!entityId) return null;
@@ -2608,11 +2615,19 @@ function _renderZonesInternal(targetSvg) {
       poly.style.pointerEvents    = "none";
 
     } else if (isDisabled && editorMode) {
-      // Disabled zone in editor: grey dashed outline
-      poly.style.fill             = "rgba(120,120,120,0.10)";
-      poly.style.stroke           = "rgba(120,120,120,0.30)";
-      poly.style.strokeWidth      = String(1 / zoom.scale);
-      poly.style.strokeDasharray  = String(6 / zoom.scale) + " " + String(4 / zoom.scale);
+      // Disarmed zone in editor: preserve the configured zone colour, but dim/dash it
+      // so the user can still see/edit zone geometry without implying the zone is armed.
+      const hex = zone.colorHex || "#0096ff";
+      if (isSelected) {
+        poly.style.fill        = hexToRgba(hex, 0.55);
+        poly.style.stroke      = hex;
+        poly.style.strokeWidth = String(2.5 / zoom.scale);
+      } else {
+        poly.style.fill        = hexToRgba(hex, 0.16);
+        poly.style.stroke      = hexToRgba(hex, 0.48);
+        poly.style.strokeWidth = String(1 / zoom.scale);
+      }
+      poly.style.strokeDasharray = String(6 / zoom.scale) + " " + String(4 / zoom.scale);
 
     } else if (!editorMode && (isTriggered || (flashMode === 'group' && groupFlashZoneIds.has(zone.id) && haConnected))) {
       const triggeredEntity = zoneActiveTriggerEntity(zone)
@@ -3696,7 +3711,7 @@ function renderZonePopupContent() {
       <div style="font-size:10px;text-transform:uppercase;color:#555;letter-spacing:0.1em;margin-bottom:4px;">Doors & Windows</div>
       ${doors_.map(pin => {
         const sensorId = pin.sensor_entity || '';
-        const state = sensorId ? (haStates[sensorId]?.state || '—') : '—';
+        const state = doorPinDisplayState(pin);
         const open = pin.sensor_entity ? doorPinIsOpen(pin) : false;
         const info = doorControlInfo(pin);
         const label = pin.name || sensorId.split('.').pop() || pin.control_entity || 'door/window';
@@ -3938,7 +3953,7 @@ function refreshZonePopupIfOpen() {
   popup.querySelectorAll('[data-door-pin-id]').forEach(row => {
     const pin = doorPins.find(p => p.id === row.dataset.doorPinId);
     if (!pin) return;
-    const state = pin.sensor_entity ? (haStates[pin.sensor_entity]?.state || '—') : '—';
+    const state = doorPinDisplayState(pin);
     const open = pin.sensor_entity ? doorPinIsOpen(pin) : false;
     const dot = row.querySelector('.door-dot');
     const text = row.querySelector('.door-state');
