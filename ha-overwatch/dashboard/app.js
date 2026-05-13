@@ -2614,10 +2614,10 @@ function _renderZonesInternal(targetSvg) {
       poly.style.strokeWidth      = String(1 / zoom.scale);
       poly.style.strokeDasharray  = String(6 / zoom.scale) + " " + String(4 / zoom.scale);
 
-    } else if (isTriggered || (flashMode === 'group' && groupFlashZoneIds.has(zone.id) && haConnected)) {
-      const triggeredEntity = (zone.sensors || []).find(isEntityTriggered)
-        || (zones.find(z => groupFlashZoneIds.has(z.id) && getZoneState(z) === 'triggered')?.sensors || []).find(isEntityTriggered);
-      const type = detectEntityType(triggeredEntity || "");
+    } else if (!editorMode && (isTriggered || (flashMode === 'group' && groupFlashZoneIds.has(zone.id) && haConnected))) {
+      const triggeredEntity = zoneActiveTriggerEntity(zone)
+        || zoneActiveTriggerEntity(zones.find(z => groupFlashZoneIds.has(z.id) && getZoneState(z) === 'triggered'));
+      const type = detectEntityType(triggeredEntity || "door");
       const hex  = resolveColour(entityTypeColour(type));
       const fillAlpha   = flashPhase ? 0.18 : 0.65;
       poly.style.transition  = 'none'; // bypass CSS transition so flash is instant
@@ -4102,8 +4102,9 @@ function renderZonesEditor(force = false) {
   function buildZoneItem(z, indented) {
     const state = getZoneState(z);
     const isOff = getZoneState(z) === "disabled";
+    const activeEntity = zoneActiveTriggerEntity(z);
     const dotColour = isOff ? "#444" :
-      state === "triggered" ? resolveColour(entityTypeColour(detectEntityType((z.sensors||[])[0]||""))) :
+      state === "triggered" ? resolveColour(entityTypeColour(detectEntityType(activeEntity || (z.sensors||[])[0] || "door"))) :
       state === "fault" ? "#ff9500" : (z.colorHex || "#0096ff");
     const sel = z.id === selectedZoneId;
     return `<div class="zones-list-item ${sel ? 'selected' : ''}" data-zone-id="${z.id}" style="${indented ? 'padding-left:20px;' : ''}">
@@ -4470,7 +4471,9 @@ function renderZonesEditor(force = false) {
     setActiveFloor(e.target.value);
     selectedZoneId  = null;
     selectedGroupId = null;
-    renderZonesEditor();
+    activePinId = null; activePinType = null;
+    isCreatingZone = false; currentNewZone = null;
+    renderZonesEditor(true);
     renderZones();
   });
 
@@ -5162,9 +5165,10 @@ function doorPinRow(pin, zone) {
   const excluded = !!(zone && pin.sensor_entity && (zone.ha_excluded_entities || []).includes(pin.sensor_entity));
   const colour = excluded ? '#777' : sState === undefined ? '#555' : isOpen ? '#ff9500' : '#34c759';
   const isPlaced = pin.x != null && pin.y != null;
+  const editBtn = `<button class="door-pin-edit-btn" data-id="${escapeHtml(pin.id)}" style="background:none;border:1px solid rgba(255,255,255,0.15);border-radius:4px;padding:2px 6px;cursor:pointer;font-size:10px;color:#888;flex-shrink:0;">Edit</button>`;
   const placeBtn = !isPlaced
-    ? `<button class="door-pin-place-btn" data-id="${escapeHtml(pin.id)}" style="background:none;border:1px solid rgba(0,150,255,0.4);border-radius:4px;padding:2px 6px;cursor:pointer;font-size:10px;color:#4db8ff;flex-shrink:0;">📍 Place</button>`
-    : `<button class="door-pin-edit-btn" data-id="${escapeHtml(pin.id)}" style="background:none;border:1px solid rgba(255,255,255,0.15);border-radius:4px;padding:2px 6px;cursor:pointer;font-size:10px;color:#888;flex-shrink:0;">Edit</button>`;
+    ? `<button class="door-pin-place-btn" data-id="${escapeHtml(pin.id)}" style="background:none;border:1px solid rgba(0,150,255,0.4);border-radius:4px;padding:2px 6px;cursor:pointer;font-size:10px;color:#4db8ff;flex-shrink:0;">📍 Place</button>${editBtn}`
+    : editBtn;
   const ghostBtn = zone?.ha_area_id && pin.sensor_entity
     ? `<button class="door-pin-ghost" data-entity-id="${escapeHtml(pin.sensor_entity)}" title="${excluded ? 'Restore entity' : 'Ghost entity — keep visible but ignore in Overwatch'}" style="background:none;border:1px solid ${excluded ? 'rgba(255,149,0,0.5)' : 'rgba(255,255,255,0.12)'};border-radius:4px;padding:2px 6px;cursor:pointer;font-size:10px;color:${excluded ? '#ff9500' : '#555'};flex-shrink:0;">${excluded ? '👻 Hidden' : '👻'}</button>`
     : '';
