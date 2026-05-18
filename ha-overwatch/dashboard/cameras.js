@@ -50,7 +50,7 @@ function camIsEnabled(type, key) {
     const zones = window.OW?.zones || [];
     const zone  = zones.find(z => z.id === key || nameSlug(z.name) === key);
     if (!zone) return true;
-    const cameras = zone.cameras || [];
+    const cameras = visibleZoneCameras(zone);
     if (!cameras.length) return true;
     return cameras.every(camId => camIsEnabled('camera', camId));
   }
@@ -63,7 +63,7 @@ function camIsEnabled(type, key) {
     if (!group) return true;
     const memberZones = (group.zone_ids || [])
       .map(zid => zones.find(z => z.id === zid))
-      .filter(z => z && (z.cameras || []).length > 0);
+      .filter(z => z && visibleZoneCameras(z).length > 0);
     if (!memberZones.length) return true;
     return memberZones.every(z => camIsEnabled('zone', z.id));
   }
@@ -184,6 +184,9 @@ function friendlyName(entityId) {
   return st?.attributes?.friendly_name || entityId.split('.').pop().replace(/_/g, ' ');
 }
 
+function camIsHidden(entityId) { return !!window.OW?.isEntityGhosted?.(entityId); }
+function visibleZoneCameras(zone) { return (zone?.cameras || []).filter(id => !camIsHidden(id)); }
+
 /* ── Compute active cameras ─────────────────────────────────── */
 function zoneCameraTriggered(zone) {
   const OW = window.OW;
@@ -238,7 +241,7 @@ function getActiveCameras() {
     }
 
     const triggered = zoneCameraTriggered(zone);
-    const cameras   = zone.cameras || [];
+    const cameras   = visibleZoneCameras(zone);
     if (!cameras.length) return;
 
     cameras.forEach(entityId => {
@@ -263,6 +266,7 @@ function getActiveCameras() {
   camPinned.forEach(entityId => {
     const camOn = camIsEnabled('camera', entityId);
     if (!camOn) return;
+    if (camIsHidden(entityId)) return;
     if (camHidden.has(entityId)) return;
     // If hide-disarmed-cams is on, skip pinned cameras from disarmed zones
     if (hideDisarmedCams) {
@@ -499,7 +503,7 @@ function camsDotState(camIds, activeIds) {
 
 // Aggregate dot for a zone (respects zone-level toggle)
 function zoneDotState(zone, activeIds) {
-  const cameras = zone.cameras || [];
+  const cameras = visibleZoneCameras(zone);
   const zoneOn  = camIsEnabled('zone', zone.id);
   if (!cameras.length || !zoneOn) return { colour: zone.colorHex || '#0096ff', flash: false, dim: true };
   return camsDotState(cameras, activeIds);
@@ -508,13 +512,13 @@ function zoneDotState(zone, activeIds) {
 // Aggregate dot for a group (respects zone-level toggles for member zones)
 function groupDotState(group, zones, activeIds) {
   const memberZones = (group.zone_ids || []).map(id => zones.find(z => z.id === id)).filter(Boolean)
-    .filter(z => (z.cameras || []).length > 0);
+    .filter(z => visibleZoneCameras(z).length > 0);
   if (!memberZones.length) return { colour: group.colorHex || '#0096ff', flash: false, dim: true };
 
   // Collect all camera IDs that are in ON zones
   const allCams = memberZones.flatMap(z => {
     const zOn = camIsEnabled('zone', z.id);
-    return zOn ? (z.cameras || []) : [];
+    return zOn ? visibleZoneCameras(z) : [];
   });
   if (!allCams.length) return { colour: group.colorHex || '#0096ff', flash: false, dim: true };
   return camsDotState(allCams, activeIds);
@@ -522,7 +526,7 @@ function groupDotState(group, zones, activeIds) {
 
 // All camera IDs across all zones with cameras
 function allCameraIds(zones) {
-  return zones.flatMap(z => z.cameras || []);
+  return zones.flatMap(z => visibleZoneCameras(z));
 }
 
 function renderCameraStatusBar() {
@@ -544,7 +548,7 @@ function renderCameraStatusBar() {
   const masterOn = camIsEnabled('global', 'all');
   const masterDot = camsDotState(allCams, activeIds);
 
-  const zonesWithCameras = zones.filter(z => (z.cameras || []).length > 0);
+  const zonesWithCameras = zones.filter(z => visibleZoneCameras(z).length > 0);
 
   // ── Build 3-level tree: groups → zones → cameras ─────────────
   let zonesHtml = '';
@@ -559,7 +563,7 @@ function renderCameraStatusBar() {
 
     // Render a single zone row + its cameras
     const renderZoneRow = (zone, indent) => {
-      const cameras  = [...(zone.cameras || [])].sort((a, b) =>
+      const cameras  = [...visibleZoneCameras(zone)].sort((a, b) =>
         friendlyName(a).localeCompare(friendlyName(b)));
       const zoneOn   = camIsEnabled('zone', zone.id);
       const colKey   = `cam_zone_collapsed_${zone.id}`;
@@ -611,7 +615,7 @@ function renderCameraStatusBar() {
     sortedGroups.forEach(group => {
       const memberZones = (group.zone_ids || [])
         .map(id => zones.find(z => z.id === id))
-        .filter(z => z && (z.cameras || []).length > 0)
+        .filter(z => z && visibleZoneCameras(z).length > 0)
         .sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id));
       if (!memberZones.length) return;
 
@@ -653,8 +657,8 @@ function renderCameraStatusBar() {
     }
 
     // Pinned cameras not in any zone
-    const allZoneCams = new Set(zones.flatMap(z => z.cameras || []));
-    const orphanPins  = [...camPinned].filter(id => !allZoneCams.has(id))
+    const allZoneCams = new Set(zones.flatMap(z => visibleZoneCameras(z)));
+    const orphanPins  = [...camPinned].filter(id => !camIsHidden(id) && !allZoneCams.has(id))
       .sort((a, b) => friendlyName(a).localeCompare(friendlyName(b)));
     if (orphanPins.length) {
       zonesHtml += `<div class="cam-dd-zone-header" style="border-top:1px solid rgba(255,255,255,0.06);cursor:default;">
@@ -783,7 +787,7 @@ function renderCameraStatusBar() {
     if (!camUseServerState()) {
       zonesWithCameras.forEach(zone => {
         localStorage.setItem(CAM_ZONE_PREFIX + zone.id, on ? 'true' : 'false');
-        (zone.cameras || []).forEach(id => localStorage.setItem(CAM_TOGGLE_PREFIX + id, on ? 'true' : 'false'));
+        visibleZoneCameras(zone).forEach(id => localStorage.setItem(CAM_TOGGLE_PREFIX + id, on ? 'true' : 'false'));
       });
       renderCameraStatusBar(); renderCameraGrid();
     }
@@ -811,7 +815,7 @@ function renderCameraStatusBar() {
       const on  = e.target.checked;
       const group = (groups || []).find(g => g.id === gid);
       const memberZones = (group?.zone_ids || []).map(id => zones.find(z => z.id === id))
-        .filter(z => z && (z.cameras || []).length > 0);
+        .filter(z => z && visibleZoneCameras(z).length > 0);
       // Always call the group-level switch first
       await camSetEnabled('camera_group', gid, on);
       if (camUseServerState()) {
@@ -819,13 +823,13 @@ function renderCameraStatusBar() {
         // HA has no built-in cascade for camera group switches, so we must call each entity.
         memberZones.forEach(zone => {
           camSetEnabled('zone', zone.id, on);
-          (zone.cameras || []).forEach(camId => camSetEnabled('camera', camId, on));
+          visibleZoneCameras(zone).forEach(camId => camSetEnabled('camera', camId, on));
         });
         // Re-render will happen when HA WS state_changed events come back for each entity
       } else {
         memberZones.forEach(zone => {
           localStorage.setItem(CAM_ZONE_PREFIX + zone.id, on ? 'true' : 'false');
-          (zone.cameras || []).forEach(id => localStorage.setItem(CAM_TOGGLE_PREFIX + id, on ? 'true' : 'false'));
+          visibleZoneCameras(zone).forEach(id => localStorage.setItem(CAM_TOGGLE_PREFIX + id, on ? 'true' : 'false'));
         });
         renderCameraStatusBar(); renderCameraGrid();
       }
@@ -857,11 +861,11 @@ function renderCameraStatusBar() {
       if (camUseServerState()) {
         // Server mode: cascade zone → member cameras directly.
         // HA has no built-in cascade for camera zone switches, so we call each entity.
-        (zone?.cameras || []).forEach(camId => camSetEnabled('camera', camId, on));
+        visibleZoneCameras(zone).forEach(camId => camSetEnabled('camera', camId, on));
         // Re-render will happen when HA WS state_changed events come back
       } else {
         localStorage.setItem(CAM_ZONE_PREFIX + zid, on ? 'true' : 'false');
-        (zone?.cameras || []).forEach(id => localStorage.setItem(CAM_TOGGLE_PREFIX + id, on ? 'true' : 'false'));
+        visibleZoneCameras(zone).forEach(id => localStorage.setItem(CAM_TOGGLE_PREFIX + id, on ? 'true' : 'false'));
         renderCameraStatusBar(); renderCameraGrid();
       }
     });

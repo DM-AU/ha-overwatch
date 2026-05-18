@@ -175,14 +175,16 @@ function isEntityGhosted(entityId) {
   return zones.some(z => (z.ha_excluded_entities||[]).includes(entityId));
 }
 
-async function loadHARegistry() {
+async function loadHARegistry(force = false) {
   try {
-    const r = await fetch(apiPath('ow/ha-registry') + '?v=' + Date.now());
-    if (r.ok) {
-      _haRegistry = await r.json();
-      // Auto-add new HA areas to floors that have ha_auto_add_areas enabled
-      if (_haRegistry.loaded) await autoAddNewHAAreas();
+    if (force) await fetch(apiPath('ow/ha-registry/refresh'), { method: 'POST', cache: 'no-store' }).catch(() => null);
+    const attempts = force ? 14 : 1;
+    for (let i = 0; i < attempts; i++) {
+      const r = await fetch(apiPath('ow/ha-registry') + '?v=' + Date.now(), { cache: 'no-store' });
+      if (r.ok) { _haRegistry = await r.json(); if (_haRegistry.loaded || !force) break; }
+      if (force) await new Promise(resolve => setTimeout(resolve, 250));
     }
+    if (_haRegistry.loaded) await autoAddNewHAAreas();
   } catch { _haRegistry = { floors: [], areas: [], devices: [], entities: [], loaded: false }; }
 }
 
@@ -3670,11 +3672,11 @@ function renderZonePopupContent() {
   const showThumbs = localStorage.getItem('ow_zone_popup_thumbs') === 'true';
   const zState     = getZoneState(zone);
   const isArmed    = zState !== 'disabled';
-  const sensors_   = zone.sensors  || [];
-  const doors_     = doorPins.filter(p => p.zone_id === zone.id && (p.sensor_entity || p.control_entity) && !isEntityGhosted(p.sensor_entity));
-  const lights_    = zone.lights   || [];
-  const sirens_    = zone.sirens   || [];
-  const cameras_   = zone.cameras  || [];
+  const sensors_   = (zone.sensors || []).filter(e => !isEntityGhosted(e));
+  const doors_     = doorPins.filter(p => p.zone_id === zone.id && (p.sensor_entity || p.control_entity) && !isEntityGhosted(p.sensor_entity) && !isEntityGhosted(p.control_entity));
+  const lights_    = (zone.lights  || []).filter(e => !isEntityGhosted(e));
+  const sirens_    = (zone.sirens  || []).filter(e => !isEntityGhosted(e));
+  const cameras_   = (zone.cameras || []).filter(e => !isEntityGhosted(e));
 
   // ── Arm/Disarm row ────────────────────────────────────────
   const showArmDisarm = canArmDisarm();
@@ -4926,16 +4928,17 @@ function renderZonesEditor(force = false) {
       selectedZone.ha_area_id = newAreaId;
       await saveZone(selectedZone);
 
-      // Sync entities from new area if one was selected
-      if (newAreaId) await syncZoneFromHAArea(selectedZone);
+      // Sync entities from new area if one was selected. Force a registry refresh so
+      // newly-added/removed HA area devices are reconciled immediately.
+      if (newAreaId) await syncZoneFromHAArea(selectedZone, { forceRefresh: true });
 
-      renderZonesEditor();
+      renderZonesEditor(true);
     });
 
-    // HA Area sync button — populate entity tabs from HA area
+    // HA Area sync button — authoritative refresh + reconcile from HA area
     document.getElementById("zoneHAAreaSync")?.addEventListener("click", async () => {
-      await syncZoneFromHAArea(selectedZone);
-      renderZonesEditor();
+      await syncZoneFromHAArea(selectedZone, { forceRefresh: true });
+      renderZonesEditor(true);
     });
 
     // Device tabs
@@ -5258,6 +5261,32 @@ function deviceRow(entityId, devType, zone) {
     </div>`;
 }
 
+function bindCamLowResLookup(input) {
+  if (!input || input._owLowResLookupBound) return;
+  input._owLowResLookupBound = true;
+  let resultsEl = input.parentElement?.querySelector('.cam-low-res-results');
+  if (!resultsEl) {
+    resultsEl = document.createElement('div');
+    resultsEl.className = 'cam-low-res-results entity-search-results';
+    resultsEl.style.cssText = 'position:absolute;left:18px;right:0;top:100%;z-index:20;background:rgba(12,12,12,0.98);border:1px solid rgba(255,255,255,0.12);border-radius:6px;max-height:180px;overflow-y:auto;display:none;box-shadow:0 8px 24px rgba(0,0,0,0.5);';
+    if (input.parentElement) { input.parentElement.style.position = input.parentElement.style.position || 'relative'; input.parentElement.appendChild(resultsEl); }
+  }
+  function saveValue(value) { const highId = input.dataset.high; const lowVal = String(value || '').trim(); if (lowVal) camLowResMap[highId] = lowVal; else delete camLowResMap[highId]; input.value = lowVal; saveCamLowResMap(); }
+  function renderResults(q) {
+    const query = String(q || '').trim().toLowerCase();
+    if (!query) { resultsEl.style.display = 'none'; resultsEl.innerHTML = ''; return; }
+    const hits = Object.keys(haStates || {}).filter(id => id.startsWith('camera.')).filter(id => { const f = haStates[id]?.attributes?.friendly_name || ''; return id.toLowerCase().includes(query) || f.toLowerCase().includes(query); }).slice(0, 25);
+    resultsEl.innerHTML = hits.length ? hits.map(id => `<div class="entity-search-result" data-entity-id="${escapeHtml(id)}"><span class="entity-search-id">${escapeHtml(id)}</span><span class="entity-search-state">${escapeHtml(haStates[id]?.state || '—')}</span></div>`).join('') : `<div class="entity-search-result" data-entity-id="${escapeHtml(query)}"><span class="entity-search-id">${escapeHtml(query)}</span><span class="entity-search-state">manual</span></div>`;
+    resultsEl.style.display = 'block';
+    resultsEl.querySelectorAll('.entity-search-result').forEach(el => { el.onclick = e => { e.stopPropagation(); saveValue(el.dataset.entityId); resultsEl.style.display = 'none'; }; });
+  }
+  let debounce = null;
+  input.addEventListener('input', () => { clearTimeout(debounce); debounce = setTimeout(() => renderResults(input.value), 80); });
+  input.addEventListener('focus', () => { if (input.value.trim()) renderResults(input.value); });
+  input.addEventListener('blur', () => { setTimeout(() => { resultsEl.style.display = 'none'; }, 150); saveValue(input.value); });
+  input.addEventListener('keydown', e => { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); const first = resultsEl.querySelector('.entity-search-result'); saveValue(first ? first.dataset.entityId : input.value); resultsEl.style.display = 'none'; input.blur(); } if (e.key === 'Escape') resultsEl.style.display = 'none'; });
+}
+
 /* ─── DEVICE SEARCH (replaces bindEntitySearch, handles all device types) ─── */
 function bindDeviceSearch(selectedZone, inputId, resultsId, devType, listId) {
   const input     = document.getElementById(inputId);
@@ -5294,18 +5323,8 @@ function bindDeviceSearch(selectedZone, inputId, resultsId, devType, listId) {
         refreshList();
       };
     });
-    // Low-res camera input — save on blur/enter
-    listEl.querySelectorAll(".cam-low-res-input").forEach(inp => {
-      inp.addEventListener('keydown', e => e.stopPropagation());
-      inp.addEventListener('blur', () => {
-        const highId = inp.dataset.high;
-        const lowVal = inp.value.trim();
-        if (lowVal) camLowResMap[highId] = lowVal;
-        else delete camLowResMap[highId];
-        saveCamLowResMap();
-      });
-      inp.addEventListener('keydown', e => { if (e.key === 'Enter') inp.blur(); });
-    });
+    // Low-res camera input — dynamic camera.* lookup + save on select/blur/enter
+    listEl.querySelectorAll(".cam-low-res-input").forEach(bindCamLowResLookup);
     // Pin button — enter placement mode for this entity
     listEl.querySelectorAll(".ha-entity-pin").forEach(btn => {
       btn.onclick = e => {
@@ -5315,7 +5334,9 @@ function bindDeviceSearch(selectedZone, inputId, resultsId, devType, listId) {
         // If already placed, select it for repositioning
         const existing = pinType === 'light'
           ? lights.find(p => p.entity_id === entityId)
-          : sirens.find(p => p.entity_id === entityId);
+          : pinType === 'siren'
+            ? sirens.find(p => p.entity_id === entityId)
+            : cameraPins.find(p => p.entity_id === entityId);
         if (existing) {
           selectPin(pinType, existing.id);
           renderZones(); renderZonesEditor();
@@ -8361,46 +8382,31 @@ function openFloorConfigPanel(floorId) {
 }
 
 // Sync a zone's entity tabs from its linked HA area.
-// Adds new entities from the area; does not remove manually-added ones.
-// Entities in ha_excluded_entities are ghosted (not added).
-async function syncZoneFromHAArea(zone) {
-  if (!zone.ha_area_id || !_haRegistry.loaded) {
-    showToast('HA registry not loaded', 'warn'); return;
-  }
+// This is authoritative for HA-linked zones: adds current HA area entities and removes stale ones.
+async function syncZoneFromHAArea(zone, opts = {}) {
+  if (!zone?.ha_area_id) { showToast('No HA area mapped to this zone', 'warn'); return; }
+  if (opts.forceRefresh || !_haRegistry.loaded) await loadHARegistry(!!opts.forceRefresh);
+  if (!_haRegistry.loaded) { showToast('HA registry not loaded', 'warn'); return; }
   const areaEntities = haEntitiesForArea(zone.ha_area_id);
-  let added = 0;
-
-  const addIfNew = (arr, eid) => {
-    // Always keep synced entities visible in the editor. Ghosted/excluded entities
-    // remain in the list but are ignored by triggers/search/automations.
-    if (!arr.includes(eid)) { arr.push(eid); added++; }
+  const byType = {
+    sensors: new Set(areaEntities.filter(e => HA_AREA_FILTERS.sensors(e)).map(e => e.entity_id)),
+    cameras: new Set(areaEntities.filter(e => HA_AREA_FILTERS.cameras(e)).map(e => e.entity_id)),
+    lights:  new Set(areaEntities.filter(e => HA_AREA_FILTERS.lights(e)).map(e => e.entity_id)),
+    sirens:  new Set(areaEntities.filter(e => HA_AREA_FILTERS.sirens(e)).map(e => e.entity_id)),
+    doors:   new Set(areaEntities.filter(e => HA_AREA_FILTERS.doors(e)).map(e => e.entity_id)),
   };
-
-  areaEntities.filter(e => HA_AREA_FILTERS.sensors(e)).forEach(e => addIfNew(zone.sensors, e.entity_id));
-  areaEntities.filter(e => HA_AREA_FILTERS.cameras(e)).forEach(e => addIfNew(zone.cameras, e.entity_id));
-  areaEntities.filter(e => HA_AREA_FILTERS.lights(e)).forEach (e => addIfNew(zone.lights,  e.entity_id));
-  areaEntities.filter(e => HA_AREA_FILTERS.sirens(e)).forEach (e => addIfNew(zone.sirens,  e.entity_id));
-
-  // Door/window entities go into doorPins
-  const doorEntities = areaEntities.filter(e => HA_AREA_FILTERS.doors(e));
-  for (const e of doorEntities) {
-    if (!doorPins.some(p => p.sensor_entity === e.entity_id && p.zone_id === zone.id)) {
-      const newPin = {
-        id: 'door_' + Date.now() + '_' + Math.random().toString(36).slice(2,6),
-        name: haStates[e.entity_id]?.attributes?.friendly_name || e.name || e.entity_id.split('.').pop().replace(/_/g,' '),
-        sensor_entity: e.entity_id, control_entity: null,
-        zone_id: zone.id, floor_id: zone.floor_id || null,
-        x: null, y: null, rotation: 0,
-      };
-      doorPins.push(newPin);
-      await saveDoorPin(newPin);
-      added++;
-    }
-  }
-
-  await saveZone(zone);
-  subscribeHAEntities();
-  showToast(`Synced ${added} entit${added === 1 ? 'y' : 'ies'} from HA area ✓`, added > 0 ? 'ok' : 'info');
+  const allAreaEntityIds = new Set(areaEntities.map(e => e.entity_id));
+  let added = 0, removed = 0;
+  function reconcileArray(type) { const before = zone[type] || []; const wanted = byType[type] || new Set(); const next = before.filter(eid => wanted.has(eid)); removed += before.length - next.length; wanted.forEach(eid => { if (!next.includes(eid)) { next.push(eid); added++; } }); zone[type] = next; }
+  ['sensors', 'cameras', 'lights', 'sirens'].forEach(reconcileArray);
+  const beforeGhosts = zone.ha_excluded_entities || [];
+  zone.ha_excluded_entities = beforeGhosts.filter(eid => allAreaEntityIds.has(eid));
+  removed += beforeGhosts.length - zone.ha_excluded_entities.length;
+  const staleDoorPins = doorPins.filter(p => p.zone_id === zone.id && p.sensor_entity && !byType.doors.has(p.sensor_entity));
+  for (const p of staleDoorPins) { doorPins = doorPins.filter(dp => dp.id !== p.id); await fetch(apiPath('ow/delete-door-pin'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: p.id }) }).catch(() => null); removed++; }
+  for (const e of areaEntities.filter(e => byType.doors.has(e.entity_id))) if (!doorPins.some(p => p.sensor_entity === e.entity_id && p.zone_id === zone.id)) { const newPin = { id: 'door_' + Date.now() + '_' + Math.random().toString(36).slice(2,6), name: haStates[e.entity_id]?.attributes?.friendly_name || e.name || e.entity_id.split('.').pop().replace(/_/g,' '), sensor_entity: e.entity_id, control_entity: null, zone_id: zone.id, floor_id: zone.floor_id || null, x: null, y: null, rotation: 0 }; doorPins.push(newPin); await saveDoorPin(newPin); added++; }
+  await saveZone(zone); subscribeHAEntities(); renderZones(); if (window.renderCameraStatusBar) window.renderCameraStatusBar(); if (window.camUpdate) window.camUpdate();
+  showToast(`Synced HA area: ${added} added, ${removed} removed ✓`, (added || removed) ? 'ok' : 'info');
 }
 
 // Create an OW zone linked to a HA area with no map points
@@ -8753,6 +8759,7 @@ async function init() {
     isEntityTriggered,
     zoneTriggerEntities,
     zoneActiveTriggerEntity,
+    isEntityGhosted,
     getZoneState,
     apiPath,
     logEvent,
