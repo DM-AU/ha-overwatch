@@ -373,6 +373,20 @@ async function loadConfig() {
   } catch { /* ignore */ }
 }
 
+
+function getSidebarCollapsedPreference() {
+  const saved = localStorage.getItem("ow_sidebar_collapsed");
+  if (saved === "true") return true;
+  if (saved === "false") return false;
+  // Dashboard-safe default: first load starts with the sidebar closed.
+  return true;
+}
+
+function setSidebarCollapsedPreference(collapsed) {
+  localStorage.setItem("ow_sidebar_collapsed", collapsed ? "true" : "false");
+  uiConfig.sidebar_collapsed = !!collapsed;
+}
+
 /* ─── APPLY CONFIG ────────────────────────────────────────── */
 function applyConfig() {
   const root = document.documentElement;
@@ -426,7 +440,12 @@ function applyConfig() {
   if (sidebar) {
     sidebar.classList.remove("left", "right");
     sidebar.classList.add(uiConfig.sidebar_position || "right");
-    if (uiConfig.sidebar_collapsed) {
+
+    // Per-browser dashboard preference. If no preference exists yet, default closed.
+    // Do not let ui.yaml polling reopen the sidebar on wall dashboards.
+    const collapsed = getSidebarCollapsedPreference();
+    uiConfig.sidebar_collapsed = collapsed;
+    if (collapsed) {
       sidebar.classList.add("collapsed");
       updateExpandBtn(true);
     } else {
@@ -520,7 +539,7 @@ function bindSidebarToggle() {
   function collapse() {
     if (!sidebar) return;
     sidebar.classList.add("collapsed");
-    uiConfig.sidebar_collapsed = true;
+    setSidebarCollapsedPreference(true);
     updateExpandBtn(true);
     // Close any open overlays
     setSearchOpen(false);
@@ -540,7 +559,7 @@ function bindSidebarToggle() {
   function expand() {
     if (!sidebar) return;
     sidebar.classList.remove("collapsed");
-    uiConfig.sidebar_collapsed = false;
+    setSidebarCollapsedPreference(false);
     updateExpandBtn(false);
   }
 
@@ -6308,12 +6327,15 @@ function connectHA() {
           }
         }
 
+        // Keep an open zone popup live for all HA state changes. This covers lights/sensors/doors
+        // even if the entity was not in haSubscribedEntities when the popup was opened.
+        refreshZonePopupIfOpen();
+
         // Render zones + check for zone state transitions when a subscribed entity changes
         if (haSubscribedEntities.has(data.entity_id)) {
           checkZoneStateChanges();
           renderZones();
           if (editorMode) renderZonesEditor();
-          refreshZonePopupIfOpen(); // keep popup toggles in sync
           if (window.camUpdate) window.camUpdate();
         }
 
@@ -6400,6 +6422,8 @@ function startDirectModePoller() {
           if (masterSwitch) masterEnabled = masterSwitch.state !== "off";
           // Re-render zone status dropdown so toggles reflect latest haStates
           updateStatusDropdownInPlace();
+          // Keep the open zone popup live in Direct Mode (/ow/states polling).
+          refreshZonePopupIfOpen();
           // Re-render camera status bar and grid so toggle states reflect latest haStates
           if (window.renderCameraStatusBar) { window.renderCameraStatusBar(); applyStatusVisibility(); }
           if (window.camUpdate) window.camUpdate();
