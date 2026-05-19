@@ -89,7 +89,7 @@ let doorPins   = [];      // Map door pins [{id, name, sensor_entity, control_en
 let camLowResMap = {};    // { "camera.high": "camera.low" } — persisted to ui.yaml
 
 
-/* ─── DOOR PIN HELPERS moved to ow-door-pins.js ───────────────────────── */
+/* ─── DOOR PIN HELPERS moved to modules/ow-door-pins.js ───────────────────────── */
 function getCamLowRes(highResId) {
   const forceHigh = localStorage.getItem('ow_cam_always_high_res') === 'true';
   if (forceHigh) return highResId;
@@ -996,7 +996,7 @@ async function deleteCameraPin(id) {
   await fetch(apiPath("ow/delete-camera-pin"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id }) });
 }
 
-/* ─── DOOR PIN STORAGE moved to ow-door-pins.js ───────────────────────── */
+/* ─── DOOR PIN STORAGE moved to modules/ow-door-pins.js ───────────────────────── */
 function togglePinEntity(entityId, pinId) {
   if (!entityId) return;
 
@@ -1054,7 +1054,7 @@ function _callDomainService(domain, service, entityId) {
     sendHA({ type: "call_service", domain, service, service_data: { entity_id: entityId } });
   }
 }
-/* ─── DOOR PIN DISPLAY/CONTROL moved to ow-door-pins.js ───────────────────────── */
+/* ─── DOOR PIN DISPLAY/CONTROL moved to modules/ow-door-pins.js ───────────────────────── */
 async function loadFloors() {
   try {
     const res = await fetch(apiPath("ow/floors") + "?v=" + Date.now());
@@ -7756,10 +7756,7 @@ function setSearchOpen(open) {
   }
 }
 
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-}
-
+/* ─── escapeHtml moved to modules/ow-utils.js ───────────────────────── */
 function runSearch(q) {
   const resultsEl = document.getElementById("searchResults");
   if (!resultsEl) return;
