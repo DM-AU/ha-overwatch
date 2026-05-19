@@ -1,17 +1,7 @@
 /* ─── HA-Overwatch Door Pins Module ─────────────────────────────
+ * Stable baseline: v1.551.36.05.
  * Extracted from app.js as a classic browser script.
- *
- * Load order:
- *   1. modules/ow-utils.js
- *   2. modules/ow-door-pins.js
- *   3. app.js
- *
- * Compatibility design:
- * - Functions intentionally remain global (classic script function declarations).
- * - Function bodies may reference globals declared in app.js (zones, doorPins,
- *   haStates, apiPath, renderZones, renderZonesEditor, etc.). Those references
- *   are resolved at call time after app.js has loaded.
- * - No behaviour change intended in this modularisation pass.
+ * Load before app.js.
  */
 
 // ─────────────────────────────────────────────────────────────
