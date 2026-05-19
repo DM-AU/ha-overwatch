@@ -1,5 +1,5 @@
 /* ─── HA-Overwatch Log Module ─────────────────────────────────
- * Stable baseline: v1.551.36.09.
+ * Stable baseline: v1.551.36.10.
  *
  * Scope:
  * - Connection/event log state and rendering.
