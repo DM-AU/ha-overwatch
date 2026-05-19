@@ -1,16 +1,7 @@
 /* ─── HA-Overwatch Floors Module ───────────────────────────────
  * Stable baseline: v1.551.36.09.
- *
- * Scope:
- * - Floor CRUD helpers.
- * - Active floor switching.
- * - Multi-panel floor rendering/interaction.
- * - Sidebar zoom override for multi-panel mode.
- *
- * Compatibility design:
- * - Classic browser script; load before app.js.
- * - Functions intentionally remain global.
- * - App globals are resolved at call time after app.js has loaded.
+ * Scope: Floor CRUD, active floor switching, multi-panel runtime.
+ * Classic browser script; load before app.js.
  */
 
 function getNumPanels()  { return Math.min(parseInt(localStorage.getItem('ow_map_panels') || '1'), floors.length || 1); }
