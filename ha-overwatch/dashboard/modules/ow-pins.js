@@ -1,17 +1,7 @@
 /* ─── HA-Overwatch Pins Module ────────────────────────────────
- * Stable baseline: v1.551.36.10.
- *
- * Scope:
- * - Map light/siren/camera/door pin rendering.
- * - Pin drag/drop/save interactions.
- * - Pin tap control actions.
- * - Pin animation refresh loop for active lights/sirens/open doors.
- *
- * Compatibility design:
- * - Classic browser script; load before app.js.
- * - Functions intentionally remain global.
- * - App globals are resolved at call time after app.js has loaded.
- * - HA transport helpers call connect/runtime globals only at interaction time.
+ * Stable baseline: v1.551.36.11.
+ * Scope: map pins, pin drag/save, pin tap services, pin animation loop.
+ * Classic browser script; load before app.js.
  */
 
 function togglePinEntity(entityId, pinId) {

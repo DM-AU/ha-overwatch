@@ -1,20 +1,7 @@
 /* ─── HA-Overwatch Log Module ─────────────────────────────────
  * Stable baseline: v1.551.36.10.
- *
- * Scope:
- * - Connection/event log state and rendering.
- * - Log panel search/filter/clear controls.
- * - Server health polling helpers.
- * - HA status badge and settings connection status helpers.
- *
- * Compatibility design:
- * - Classic browser script; load before app.js.
- * - Functions intentionally remain global.
- * - apiPath() remains in app.js.
- * - App globals are resolved at call time after app.js has loaded.
- *
- * Deliberately NOT included:
- * - Zone/camera status dropdown rendering. Those are due for redesign.
+ * Scope: connection/event log, server health, HA badge/settings status.
+ * Classic browser script; load before app.js. apiPath() remains in app.js.
  */
 
 /* ─── CONNECTION LOG & TOAST SYSTEM ─────────────────────── */
