@@ -90,27 +90,7 @@ let camLowResMap = {};    // { "camera.high": "camera.low" } — persisted to ui
 
 
 /* ─── DOOR PIN HELPERS moved to modules/ow-door-pins.js ───────────────────────── */
-function getCamLowRes(highResId) {
-  const forceHigh = localStorage.getItem('ow_cam_always_high_res') === 'true';
-  if (forceHigh) return highResId;
-  return camLowResMap[highResId] || highResId;
-}
-
-async function saveCamLowResMap() {
-  uiConfig.cam_low_res_map = JSON.stringify(camLowResMap);
-  // Save to a dedicated file so we don't need to rebuild all of ui.yaml
-  try {
-    await fetch(apiPath("ow/save-config"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ filename: "config/cam_low_res.json", content: JSON.stringify(camLowResMap, null, 2) })
-    });
-    // Sync to cameras.js internal map
-    if (window.setCamLowResMap) window.setCamLowResMap(camLowResMap);
-    if (window.OW) window.OW.uiConfig = uiConfig;
-  } catch(e) { console.warn('Failed to save cam low res map', e); }
-}
-
+/* ─── CAMERA CONFIG HELPERS moved to modules/ow-camera-config.js ───────────────────────── */
 // Multi-panel state
 let activePanelIdx = 0;   // Which floor panel is "selected" (zoom/reset target)
 let panelZooms = [        // Per-panel zoom state

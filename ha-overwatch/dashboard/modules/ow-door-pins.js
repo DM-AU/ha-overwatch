@@ -4,7 +4,8 @@
  * Load order:
  *   1. modules/ow-utils.js
  *   2. modules/ow-door-pins.js
- *   3. app.js
+ *   3. modules/ow-camera-config.js
+ *   4. app.js
  *
  * Compatibility design:
  * - Functions intentionally remain global (classic script function declarations).
