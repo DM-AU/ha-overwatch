@@ -11,7 +11,7 @@
  * - Function bodies may reference globals declared in app.js (zones, doorPins,
  *   haStates, apiPath, renderZones, renderZonesEditor, etc.). Those references
  *   are resolved at call time after app.js has loaded.
- * - No behaviour change intended in this hotfix beyond restoring camera helpers to app.js.
+ * - No behaviour change intended in this modularisation pass.
  */
 
 // ─────────────────────────────────────────────────────────────

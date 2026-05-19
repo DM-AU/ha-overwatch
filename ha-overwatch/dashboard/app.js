@@ -1,203 +1,8996 @@
-/* ─── HA-Overwatch Door Pins Module ─────────────────────────────
- * Extracted from app.js as a classic browser script.
- *
- * Load order:
- *   1. modules/ow-utils.js
- *   2. modules/ow-door-pins.js
- *   3. app.js
- *
- * Compatibility design:
- * - Functions intentionally remain global (classic script function declarations).
- * - Function bodies may reference globals declared in app.js (zones, doorPins,
- *   haStates, apiPath, renderZones, renderZonesEditor, etc.). Those references
- *   are resolved at call time after app.js has loaded.
- * - No behaviour change intended in this hotfix beyond restoring camera helpers to app.js.
- */
+/* ─── CONFIG DEFAULTS ─────────────────────────────────────── */
+let uiConfig = {
+  floorplan: "img/floorplan.png",
+  sidebar_position: "right",
+  hide_zone_status:   false,   // per-device: hide zone status dropdown button
+  hide_camera_status: false,   // per-device: hide camera status dropdown button
+  sidebar_collapsed: false,
+  theme: "system",
+  sidebar_icon_size: 28,
+  sidebar_icon_padding: 12,
+  map_icon_size: 24,
+  polling_interval: 5,
+  status: "HA-Overwatch",
 
-// ─────────────────────────────────────────────────────────────
-// Door pin schema helpers (multi-zone + control-trigger support)
+  // HA connection
+  ha_url: "",
+  ha_token: "",
+  ha_websocket: true,
+  alarm_entity: "",
+  alarm_entity_inverted: false,  // if true: entity OFF = armed, ON = disarmed
+  alarm_label_armed:    "Armed",
+  alarm_label_disarmed: "Disarmed",
+
+  // Triggered zone colours — ALARM ON (alarm system is armed/triggered)
+  color_on_person:  "#ff3b30",
+  color_on_motion:  "#ff9500",
+  color_on_door:    "#ff6b35",
+  color_on_window:  "#ff9f0a",
+  color_on_smoke:   "#ff2d55",
+  color_on_co:      "#bf5af2",
+  color_on_animal:  "#ff6b00",
+  color_on_vehicle: "#ff3b80",
+  color_on_default: "#ff3b30",
+
+  // Triggered zone colours — ALARM OFF (alarm disarmed; sensor still active)
+  color_off_person:  "#4cd964",
+  color_off_motion:  "#5ac8fa",
+  color_off_door:    "#ffcc00",
+  color_off_window:  "#ffcc00",
+  color_off_smoke:   "#ff6b6b",
+  color_off_co:      "#cc73f8",
+  color_off_animal:  "#aad400",
+  color_off_vehicle: "#00c7be",
+  color_off_default: "#4cd964",
+
+  // Legacy keys kept for backward compat
+  color_triggered_person:  "#ff3b30",
+  color_triggered_motion:  "#ff9500",
+  color_triggered_door:    "#ff6b35",
+  color_triggered_window:  "#ff9f0a",
+  color_triggered_smoke:   "#ff2d55",
+  color_triggered_co:      "#bf5af2",
+  color_triggered_default: "#ff3b30",
+
+  // Zone state colours
+  color_zone_normal:    "rgba(0,150,255,0.18)",
+  color_zone_triggered: "rgba(255,59,48,0.45)",
+  color_zone_fault:     "rgba(255,149,0,0.45)",
+  color_zone_bypassed:  "rgba(100,100,100,0.35)",
+  color_zone_armed:     "rgba(0,200,100,0.25)",
+
+  // Zone fade-out after trigger clears (issue 9)
+  zone_fade_duration: 3,  // seconds to fade from full to transparent after trigger clears
+
+  // Camera dashboard
+  cam_default_mode:       "snapshot",  // "snapshot" | "live"
+  cam_snapshot_interval: 1,      // snapshot-grid-v1.2: browser refresh default seconds
+  cam_cooldown:           30,          // seconds camera stays visible after zone clears
+  cam_max_visible:        0,           // 0 = unlimited
+  cam_sort_order:         "recent_first",
+  cam_fail_hide_seconds:  30,
+  cam_low_res_map:        "{}",        // JSON: { "camera.high_res": "camera.low_res" }
+  cam_pinned:             "[]",        // JSON: ["camera.entity_id", ...]
+};
+
+let zoom = { scale: 1, x: 0, y: 0 };
+let lastConfig = "";
+let pollingTimer = null;
+
+/* ─── ZONES STATE ─────────────────────────────────────────── */
+let zones = [];
+let groups = [];          // Zone groups
+let floors = [];          // Floor definitions [{id, name, floorplan}]
+let activeFloorId = null; // Currently displayed floor id
+let lights     = [];      // Map light pins [{id, name, entity_id, floor_id, x, y, direction}]
+let sirens     = [];      // Map siren pins [{id, name, entity_id, floor_id, x, y}]
+let cameraPins = [];      // Map camera pins [{id, name, entity_id, floor_id, x, y}]
+let doorPins   = [];      // Map door pins [{id, name, sensor_entity, control_entity, floor_id, x, y, rotation}]
+let camLowResMap = {};    // { "camera.high": "camera.low" } — persisted to ui.yaml
+
+
+/* ─── DOOR PIN HELPERS moved to modules/ow-door-pins.js ───────────────────────── */
+function getCamLowRes(highResId) {
+  const forceHigh = localStorage.getItem('ow_cam_always_high_res') === 'true';
+  if (forceHigh) return highResId;
+  return camLowResMap[highResId] || highResId;
+}
+
+async function saveCamLowResMap() {
+  uiConfig.cam_low_res_map = JSON.stringify(camLowResMap);
+  // Save to a dedicated file so we don't need to rebuild all of ui.yaml
+  try {
+    await fetch(apiPath("ow/save-config"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename: "config/cam_low_res.json", content: JSON.stringify(camLowResMap, null, 2) })
+    });
+    // Sync to cameras.js internal map
+    if (window.setCamLowResMap) window.setCamLowResMap(camLowResMap);
+    if (window.OW) window.OW.uiConfig = uiConfig;
+  } catch(e) { console.warn('Failed to save cam low res map', e); }
+}
+
+// Multi-panel state
+let activePanelIdx = 0;   // Which floor panel is "selected" (zoom/reset target)
+let panelZooms = [        // Per-panel zoom state
+  { scale: 1, x: 0, y: 0 },
+  { scale: 1, x: 0, y: 0 },
+];
+
+function getNumPanels()  { return Math.min(parseInt(localStorage.getItem('ow_map_panels') || '1'), floors.length || 1); }
+function getPanelsDir()  { return localStorage.getItem('ow_panels_dir') || 'h'; }
+function getPanelFloor(idx) {
+  const key = idx === 0 ? 'ow_panel_0_floor' : 'ow_panel_1_floor';
+  const saved = localStorage.getItem(key);
+  const match = floors.find(f => f.id === saved);
+  if (match) return match;
+  return floors[idx] || floors[0] || null;
+}
+let selectedZoneId  = null;
+let selectedGroupId = null; // "group" or "zone" selection in editor
+let editorMode = false;
+let undoStack = [];
+let isCreatingZone = false;
+let currentNewZone = null;
+let draggingHandle = null;
+let draggingZone = null;
+let dragStart = null;
+let isEditingPoints = false;
+
+/* ─── SEARCH STATE ────────────────────────────────────────── */
+let searchOpen = false;
+let settingsOpen = false;
+let highlightedZoneId  = null;
+let highlightedUntil   = 0;
+let highlightedGroupId = null;
+let highlightedGroupUntil = 0;
+let searchDebounce = null;
+
+/* ─── HA STATE ────────────────────────────────────────────── */
+let haSocket = null;
+let haConnected = false;
+let haEverConnected = false;  // true after first successful auth_ok
+let haStates = {};        // entity_id -> state object
+let haStatesLoaded = false; // true after first successful get_states response
+
+// HA registry — floors, areas, devices, entities from HA config registries
+let _haRegistry = { floors: [], areas: [], devices: [], entities: [], loaded: false };
+
+// Returns true if entity is ghosted (excluded) in any zone — hides from search/automations
+function isEntityGhosted(entityId) {
+  return zones.some(z => (z.ha_excluded_entities||[]).includes(entityId));
+}
+
+async function loadHARegistry(force = false) {
+  try {
+    if (force) await fetch(apiPath('ow/ha-registry/refresh'), { method: 'POST', cache: 'no-store' }).catch(() => null);
+    const attempts = force ? 14 : 1;
+    for (let i = 0; i < attempts; i++) {
+      const r = await fetch(apiPath('ow/ha-registry') + '?v=' + Date.now(), { cache: 'no-store' });
+      if (r.ok) { _haRegistry = await r.json(); if (_haRegistry.loaded || !force) break; }
+      if (force) await new Promise(resolve => setTimeout(resolve, 250));
+    }
+    if (_haRegistry.loaded) await autoAddNewHAAreas();
+  } catch { _haRegistry = { floors: [], areas: [], devices: [], entities: [], loaded: false }; }
+}
+
+// Check each linked floor for new HA areas and auto-create zones if ha_auto_add_areas is on
+async function autoAddNewHAAreas() {
+  for (const floor of floors) {
+    if (!floor.ha_floor_id || floor.ha_auto_add_areas === false) continue;
+    const haAreas = (_haRegistry.areas || []).filter(a => a.floor_id === floor.ha_floor_id);
+    if (!floor.ha_linked_area_ids) floor.ha_linked_area_ids = [];
+    for (const area of haAreas) {
+      if (floor.ha_linked_area_ids.includes(area.area_id)) continue; // already linked
+      // New area — auto-create zone and add to linked list
+      floor.ha_linked_area_ids.push(area.area_id);
+      const existing = zones.find(z => z.ha_area_id === area.area_id);
+      if (!existing) {
+        await createZoneFromHAArea(area.area_id, area.name, floor.id);
+      }
+      await saveFloor(floor);
+      logEvent('info', `Auto-created zone for new HA area "${area.name}"`, 'system');
+    }
+  }
+}
+
+// Get all entity registry entries for a given area_id
+function haEntitiesForArea(areaId) {
+  if (!areaId || !_haRegistry.loaded) return [];
+  // Find devices in this area
+  const deviceIds = new Set(_haRegistry.devices.filter(d => d.area_id === areaId).map(d => d.id));
+  // Get entities assigned directly to area OR via their device
+  return _haRegistry.entities.filter(e =>
+    e.area_id === areaId || (e.device_id && deviceIds.has(e.device_id))
+  ).filter(e => !e.disabled_by && !e.hidden_by); // skip disabled/hidden entities
+}
+
+// Device class filters per OW tab
+const HA_DOOR_CLASSES = new Set(['door','window','garage_door','opening','gate']);
+const HA_ZONE_SENSOR_CLASSES = new Set([
+  'motion','occupancy','presence','vibration','sound','moisture','smoke','carbon_monoxide','heat','cold','gas','tamper','connectivity','power','problem','safety','update'
+]);
+
+// HA Area sync filter only. Runtime triggering must respect whatever the user has
+// intentionally left in Sensors or Doors & Windows unless that entity is ghosted.
+const HA_DOOR_INCLUDE_RE = /(^|[._\s-])((garage[._\s-]*door)|(screen[._\s-]*door)|(roller[._\s-]*door)|(door[._\s-]*(sensor|contact))|(window[._\s-]*(sensor|contact))|gate|garage_door|door|window|opening|reed|contact)([._\s-]|$)/;
+const HA_DOOR_EXCLUDE_RE = /(^|[._\s-])(battery|batt|charger|chargers|charging|charge|status|controller|physical[._\s-]*switch|switch|light|lights|motion|occupancy|presence|illuminance|lux|temperature|humidity|voltage|current|power|energy|rssi|lqi|linkquality|signal|tamper|problem|update)([._\s-]|$)/;
+
+function haEntityDeviceClass(e) {
+  return String(e?.device_class || e?.original_device_class || haStates[e?.entity_id]?.attributes?.device_class || '').toLowerCase();
+}
+
+function haEntityText(e) {
+  const st = haStates[e?.entity_id];
+  return [e?.entity_id, e?.name, e?.original_name, st?.attributes?.friendly_name, haEntityDeviceClass(e)]
+    .filter(Boolean).join(' ').toLowerCase();
+}
+
+function isHADoorEntity(e) {
+  const eid = String(e?.entity_id || '').toLowerCase();
+  const dc = haEntityDeviceClass(e);
+  const text = haEntityText(e);
+  if (!eid.startsWith('binary_sensor.')) return false;
+  if (HA_DOOR_CLASSES.has(dc)) return true;
+  return HA_DOOR_INCLUDE_RE.test(text) && !HA_DOOR_EXCLUDE_RE.test(text);
+}
+
+const HA_AREA_FILTERS = {
+  sensors: e => {
+    const eid = String(e?.entity_id || '').toLowerCase();
+    const dc = haEntityDeviceClass(e);
+    return eid.startsWith('binary_sensor.')
+      && HA_ZONE_SENSOR_CLASSES.has(dc)
+      && !isHADoorEntity(e)
+      && !eid.startsWith('binary_sensor.overwatch_');
+  },
+  cameras: e => String(e?.entity_id || '').startsWith('camera.'),
+  lights: e => String(e?.entity_id || '').startsWith('light.'),
+  sirens: e => String(e?.entity_id || '').startsWith('siren.'),
+  doors: e => isHADoorEntity(e),
+};
+let haMsgId = 1;
+let haPendingCmds = {};
+let mapLocked = localStorage.getItem('ow_map_locked') === 'true'; // prevent pan/zoom when true
+
+// Client IP — injected by server.js into the HTML as a meta tag
+const CLIENT_IP = document.querySelector('meta[name="ow-client-ip"]')?.content || '';
+
+// Allowed IPs loaded from server (config/arm_allowed_ips.json)
+let _armAllowedIps = [];
+
+async function loadArmAllowedIps() {
+  try {
+    const r = await fetch(apiPath('ow/arm-allowed-ips') + '?v=' + Date.now());
+    if (r.ok) { const d = await r.json(); _armAllowedIps = d.ips || []; }
+  } catch { _armAllowedIps = []; }
+}
+
+async function saveArmAllowedIps(ipsArray) {
+  _armAllowedIps = ipsArray;
+  await fetch(apiPath('ow/arm-allowed-ips'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ips: ipsArray })
+  });
+}
+
+// Returns true if this device is allowed to arm/disarm zones
+function canArmDisarm() {
+  if (!_armAllowedIps.length) return false; // no IPs configured → no devices allowed
+  return _armAllowedIps.some(ip => CLIENT_IP === ip || CLIENT_IP.startsWith(ip));
+}
+let haReconnectTimer = null;
+let haReconnectDelay = 1000;   // exponential backoff: 1s→2s→4s→8s→30s max
+let haSubscribedEntities = new Set();
+
+/* ─── MODULE LOADER ───────────────────────────────────────── */
+async function loadModule(targetId, file) {
+  const target = document.getElementById(targetId);
+  if (!target) return;
+
+  const urls = [
+    `modules/${file}?v=${Date.now()}`,
+    `${file}?v=${Date.now()}`,
+  ];
+
+  for (const url of urls) {
+    try {
+      const res = await fetch(url, { cache: "no-store" });
+      if (!res.ok) continue;
+      const text = await res.text();
+      // Detect HA ingress session expiry — HA frontend HTML served instead of our module
+      if (text.includes("home-assistant") || text.includes("<!DOCTYPE html>")) {
+        console.error("[HA-Overwatch] Ingress session expired — reloading...");
+        setTimeout(() => window.location.reload(), 1500);
+        return;
+      }
+      target.innerHTML = text;
+      return;
+    } catch {
+      // try next
+    }
+  }
+
+  console.error(`[HA-Overwatch] Failed to load module: ${file} (tried /modules and root)`);
+}
+
+
+/* ─── YAML PARSER (flat key: value, handles colon-containing values) ── */
+function parseYaml(text) {
+  const lines = text.split("\n");
+  const out = {};
+  for (let raw of lines) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    if (line === "ui:") continue;
+    const colonIdx = line.indexOf(":");
+    if (colonIdx < 0) continue;
+    const key = line.slice(0, colonIdx).trim();
+    if (!key || key.includes(" ")) continue;
+    const vRaw = line.slice(colonIdx + 1).trim();
+    let v = vRaw.replace(/\s+#.*$/, "");           // strip inline comments
+    v = v.replace(/^"(.*)"$/, "$1").replace(/^'(.*)'$/, "$1"); // strip quotes
+    if (v === "")      { out[key] = "";    continue; }
+    if (v === "true")  { out[key] = true;  continue; }
+    if (v === "false") { out[key] = false; continue; }
+    const num = Number(v);
+    out[key] = (!isNaN(num) && v !== "") ? num : v;
+  }
+  return out;
+}
+
+/* ─── LOAD CONFIG ─────────────────────────────────────────── */
+let lastConfigHash = "";
+
+async function loadConfig() {
+  try {
+    const res = await fetch(apiPath("config/ui.yaml") + "?v=" + Date.now());
+    if (!res.ok) return;
+    const text = await res.text();
+    // Simple hash to detect changes
+    const hash = text.length + "|" + text.slice(0, 120) + text.slice(-60);
+    if (hash === lastConfigHash) return;
+    lastConfigHash = hash;
+    lastConfig = text;
+    const parsed = parseYaml(text);
+    uiConfig = { ...uiConfig, ...parsed };
+    applyConfig();
+  } catch { /* ignore */ }
+}
+
+
+function getSidebarCollapsedPreference() {
+  const saved = localStorage.getItem("ow_sidebar_collapsed");
+  if (saved === "true") return true;
+  if (saved === "false") return false;
+  // Dashboard-safe default: first load starts with the sidebar closed.
+  return true;
+}
+
+function setSidebarCollapsedPreference(collapsed) {
+  localStorage.setItem("ow_sidebar_collapsed", collapsed ? "true" : "false");
+  uiConfig.sidebar_collapsed = !!collapsed;
+}
+
+/* ─── APPLY CONFIG ────────────────────────────────────────── */
+function applyConfig() {
+  const root = document.documentElement;
+  root.style.setProperty("--sidebar-icon-size", uiConfig.sidebar_icon_size + "px");
+  root.style.setProperty("--sidebar-icon-padding", uiConfig.sidebar_icon_padding + "px");
+  root.style.setProperty("--map-icon-size", uiConfig.map_icon_size + "px");
+
+  // Apply colour overrides from config
+  const colorMap = {
+    "--color-triggered-person":  "color_triggered_person",
+    "--color-triggered-motion":  "color_triggered_motion",
+    "--color-triggered-door":    "color_triggered_door",
+    "--color-triggered-window":  "color_triggered_window",
+    "--color-triggered-smoke":   "color_triggered_smoke",
+    "--color-triggered-co":      "color_triggered_co",
+    "--color-triggered-default": "color_triggered_default",
+    "--color-zone-normal":       "color_zone_normal",
+    "--color-zone-triggered":    "color_zone_triggered",
+    "--color-zone-fault":        "color_zone_fault",
+    "--color-zone-bypassed":     "color_zone_bypassed",
+    "--color-zone-armed":        "color_zone_armed",
+    "--color-door-open":         "color_on_door",
+    "--color-door-closed":       "color_off_door",
+  };
+  for (const [cssVar, cfgKey] of Object.entries(colorMap)) {
+    // Check localStorage override first (set by settings colour pickers)
+    const lsKey = 'ow_' + cfgKey;
+    const val = localStorage.getItem(lsKey) || uiConfig[cfgKey];
+    if (val) root.style.setProperty(cssVar, val);
+  }
+
+  const statusEl = document.getElementById("statusText");
+  if (statusEl) statusEl.textContent = uiConfig.status;
+
+  const fp = document.getElementById("floorplanImage");
+  if (fp && uiConfig.floorplan) {
+    const fpPath   = apiPath(uiConfig.floorplan);
+    const newBase  = fpPath.split("?")[0];
+    const curBase  = fp.src.split("?")[0].replace(window.location.origin, "").replace(/^\/api\/hassio_ingress\/[^/]+/, "");
+    if (!fp.dataset.loaded || !fp.src.includes(encodeURIComponent(uiConfig.floorplan).replace(/%20/g, " ").split("/").pop().split("?")[0])) {
+      fp.src = fpPath + "?v=" + Date.now();
+      fp.dataset.loaded = "1";
+      fp.onload = initFloorplan;
+    } else if (!fp.dataset.initialized) {
+      fp.dataset.initialized = "1";
+      initFloorplan();
+    }
+  }
+
+  const sidebar = document.getElementById("sidebarEl");
+  if (sidebar) {
+    sidebar.classList.remove("left", "right");
+    sidebar.classList.add(uiConfig.sidebar_position || "right");
+
+    // Per-browser dashboard preference. If no preference exists yet, default closed.
+    // Do not let ui.yaml polling reopen the sidebar on wall dashboards.
+    const collapsed = getSidebarCollapsedPreference();
+    uiConfig.sidebar_collapsed = collapsed;
+    if (collapsed) {
+      sidebar.classList.add("collapsed");
+      updateExpandBtn(true);
+    } else {
+      sidebar.classList.remove("collapsed");
+      updateExpandBtn(false);
+    }
+  }
+
+  restartPolling();
+
+  // Re-connect HA if credentials changed — skip in Direct Mode (backend handles HA), add-on mode, or already connected
+  if (!IS_DIRECT_MODE && !haConnected && isAddonMode === false && uiConfig.ha_url && uiConfig.ha_token) {
+    connectHA();
+  }
+
+  // Re-apply alarm status in case alarm_entity or alarm_entity_inverted changed in config
+  if (haConnected) {
+    const alarmEntity = uiConfig.alarm_entity;
+    if (alarmEntity && haStates[alarmEntity]) {
+      updateStatusFromAlarm(alarmEntity, haStates[alarmEntity]);
+    } else {
+      const autoAlarm = Object.keys(haStates).find(id => id.startsWith("alarm_control_panel."));
+      if (autoAlarm) updateStatusFromAlarm(autoAlarm, haStates[autoAlarm]);
+    }
+    subscribeHAEntities(); // re-register alarm entity in subscription set
+  }
+
+  applyStatusVisibility();
+}
+
+function applyStatusVisibility() {
+  // Zone status bar + dropdown
+  const hideZone = localStorage.getItem("ow_hide_zone_status") === "true";
+  const statusBar = document.getElementById("statusBar");
+  const statusDd  = document.getElementById("statusDropdown");
+  if (statusBar) statusBar.style.display = hideZone ? "none" : "";
+  if (statusDd && hideZone) statusDd.style.display = "none";
+
+  // Camera status — button rendered by cameras.js; hide by known IDs or sibling of dropdown
+  const hideCam  = localStorage.getItem("ow_hide_camera_status") === "true";
+  const camStatusDd  = document.getElementById("camStatusDd");
+  // Try known wrapper ID first, then fall back to the dropdown's parent
+  const camStatusBar = document.getElementById("camStatusBar")
+    || (camStatusDd ? camStatusDd.previousElementSibling : null);
+  if (camStatusBar) camStatusBar.style.display = hideCam ? "none" : "";
+  if (camStatusDd) camStatusDd.style.display = hideCam ? "none" : (camStatusDd.style.display === "none" ? "none" : "");
+}
+
+/* ─── EXPAND / COLLAPSE SIDEBAR ───────────────────────────── */
+function updateExpandBtn(collapsed) {
+  const btn  = document.getElementById("expandBtn");
+  const svg  = btn?.querySelector("svg path");
+  if (!btn) return;
+
+  const isLeft = uiConfig.sidebar_position === "left";
+
+  if (isLeft) {
+    btn.style.left  = "10px";
+    btn.style.right = "unset";
+    // Expand btn: chevron right → opens left sidebar
+    if (svg) svg.setAttribute("d", "M9 6l6 6-6 6");
+  } else {
+    btn.style.right = "10px";
+    btn.style.left  = "unset";
+    // Expand btn: chevron left ← opens right sidebar
+    if (svg) svg.setAttribute("d", "M15 6l-6 6 6 6");
+  }
+
+  if (collapsed) {
+    btn.classList.add("visible");
+  } else {
+    btn.classList.remove("visible");
+  }
+
+  // Issue 4: also update the collapse button chevron direction
+  const collapseBtn = document.getElementById("collapseBtn");
+  const collapseSvg = collapseBtn?.querySelector("svg path");
+  if (collapseSvg) {
+    // Collapse btn points AWAY from screen edge:
+    // right sidebar → chevron right (→) to push it off right edge
+    // left  sidebar → chevron left  (←) to push it off left edge
+    collapseSvg.setAttribute("d", isLeft ? "M15 6l-6 6 6 6" : "M9 6l6 6-6 6");
+  }
+}
+
+function bindSidebarToggle() {
+  const sidebar = document.getElementById("sidebarEl");
+  const collapseBtn = document.getElementById("collapseBtn");
+  const expandBtn = document.getElementById("expandBtn");
+
+  function collapse() {
+    if (!sidebar) return;
+    sidebar.classList.add("collapsed");
+    setSidebarCollapsedPreference(true);
+    updateExpandBtn(true);
+    // Close any open overlays
+    setSearchOpen(false);
+    const logPanel = document.getElementById("logPanel");
+    if (logPanel) logPanel.classList.remove("open");
+    const settingsPanel = document.getElementById("settingsPanel");
+    if (settingsPanel) settingsPanel.remove();
+    if (editorMode) { editorMode = false; renderZonesEditor(); renderZones(); }
+    // Close camera dropdown if open
+    const camDd = document.getElementById("camStatusDd");
+    if (camDd && camDd.style.display !== "none") {
+      camDd.style.display = "none";
+      localStorage.setItem("cam_status_open", "false");
+    }
+  }
+
+  function expand() {
+    if (!sidebar) return;
+    sidebar.classList.remove("collapsed");
+    setSidebarCollapsedPreference(false);
+    updateExpandBtn(false);
+  }
+
+  if (collapseBtn) collapseBtn.onclick = collapse;
+  if (expandBtn) expandBtn.onclick = expand;
+
+  // Status bar: NO sidebar interaction (item 2)
+}
+
+/* ─── ZOOM / PAN ──────────────────────────────────────────── */
+// Strategy: transform the entire #floorplanWrapper (image + SVG overlay together).
+// This means zones ALWAYS align perfectly at any zoom/pan — no coordinate math needed for rendering.
+// Points are stored in "natural image px" space (image at scale=1, origin top-left of wrapper).
+
+function applyTransform() {
+  const wrapper = document.getElementById("floorplanWrapper");
+  if (wrapper) wrapper.style.transform = `translate(${zoom.x}px, ${zoom.y}px) scale(${zoom.scale})`;
+  if (editorMode) renderZones();
+}
+
+function saveZoom() {
+  localStorage.setItem("zoomScale", zoom.scale);
+  localStorage.setItem("zoomX", zoom.x);
+  localStorage.setItem("zoomY", zoom.y);
+}
+
+function loadZoom() {
+  zoom.scale = Number(localStorage.getItem("zoomScale")) || 1;
+  zoom.x     = Number(localStorage.getItem("zoomX"))     || 0;
+  zoom.y     = Number(localStorage.getItem("zoomY"))     || 0;
+  applyTransform();
+}
+
+function bindZoomControls() {
+  const zoomIn    = document.getElementById("zoomIn");
+  const zoomOut   = document.getElementById("zoomOut");
+  const zoomReset = document.getElementById("zoomReset");
+  if (!zoomIn) return;
+
+  function zoomAroundCenter(factor) {
+    if (mapLocked && !editorMode) return;
+    const panel = document.getElementById("mapPanel");
+    const vw = (panel && panel.offsetWidth > 0) ? panel.offsetWidth : window.innerWidth;
+    const vh = (panel && panel.offsetHeight > 0) ? panel.offsetHeight : window.innerHeight;
+    const cx = vw / 2, cy = vh / 2;
+    zoom.x = cx - (cx - zoom.x) * factor;
+    zoom.y = cy - (cy - zoom.y) * factor;
+    zoom.scale = Math.min(10, Math.max(0.1, zoom.scale * factor));
+    applyTransform(); saveZoom();
+  }
+
+  zoomIn.onclick    = () => zoomAroundCenter(1.15);
+  zoomOut.onclick   = () => zoomAroundCenter(1 / 1.15);
+  zoomReset.onclick = () => {
+    if (mapLocked && !editorMode) return;
+    const wrapper = document.getElementById("floorplanWrapper");
+    const img     = document.getElementById("floorplanImage");
+    if (wrapper && img) {
+      const panel = document.getElementById("mapPanel");
+      const vw = (panel && panel.offsetWidth > 0) ? panel.offsetWidth : window.innerWidth;
+      const vh = (panel && panel.offsetHeight > 0) ? panel.offsetHeight : window.innerHeight;
+      const iw = img.naturalWidth  || img.offsetWidth;
+      const ih = img.naturalHeight || img.offsetHeight;
+      zoom.scale = Math.min(vw / iw, vh / ih, 1);
+      zoom.x = (vw - iw * zoom.scale) / 2;
+      zoom.y = (vh - ih * zoom.scale) / 2;
+    } else {
+      zoom.scale = 1; zoom.x = 0; zoom.y = 0;
+    }
+    applyTransform(); saveZoom();
+  };
+
+  // Map lock button
+  const lockBtn = document.getElementById('mapLockBtn');
+  function applyLockState() {
+    const icon = document.getElementById('mapLockIcon');
+    if (!icon) return;
+    if (mapLocked) {
+      // Locked padlock
+      icon.innerHTML = `
+        <rect x="5" y="11" width="14" height="10" rx="2" stroke="rgba(255,200,0,0.9)" stroke-width="2"/>
+        <path d="M8 11V7a4 4 0 0 1 8 0v4" stroke="rgba(255,200,0,0.9)" stroke-width="2" stroke-linecap="round"/>
+        <circle cx="12" cy="16" r="1.5" fill="rgba(255,200,0,0.9)"/>`;
+      lockBtn?.classList.add('active');
+    } else {
+      // Unlocked padlock
+      icon.innerHTML = `
+        <rect x="5" y="11" width="14" height="10" rx="2" stroke="rgba(255,255,255,0.9)" stroke-width="2"/>
+        <path d="M8 11V7a4 4 0 0 1 7.9-.9" stroke="rgba(255,255,255,0.9)" stroke-width="2" stroke-linecap="round"/>
+        <circle cx="12" cy="16" r="1.5" fill="rgba(255,255,255,0.9)"/>`;
+      lockBtn?.classList.remove('active');
+    }
+  }
+  if (lockBtn) {
+    applyLockState();
+    lockBtn.onclick = () => {
+      mapLocked = !mapLocked;
+      localStorage.setItem('ow_map_locked', mapLocked ? 'true' : 'false');
+      applyLockState();
+      // Update handle cursors
+      const splitH = document.getElementById('splitHandle');
+      if (splitH) splitH.style.cursor = mapLocked ? 'default' : '';
+      document.querySelectorAll('.floor-panel-handle').forEach(h => {
+        h.style.cursor = mapLocked ? 'default' : '';
+      });
+    };
+  }
+}
+
+function bindPan() {
+  const outer = document.querySelector(".main") || document.body;
+  let dragging = false, startX = 0, startY = 0;
+
+  outer.addEventListener("pointerdown", e => {
+    // In multi-panel mode, floor panels handle their own pan
+    if (getNumPanels() > 1 && e.target.closest('.floor-panel')) return;
+    // Don't pan when interacting with map pins
+    if (e.target.closest('[data-pin]')) return;
+    // Don't pan when map is locked
+    if (mapLocked && !editorMode) return;
+    if (editorMode) {
+      const t = e.target;
+      // Don't start pan if clicking zone handles, polygons, or the zones-editor panel
+      if (t.classList.contains("zone-handle") || t.classList.contains("zone-polygon")) return;
+      if (isCreatingZone) return;
+      if (e.target.closest(".zones-editor")) return;
+    }
+    if (e.target.closest(".search-panel, .settings-panel, .log-panel, .sidebar, .zoom-controls, .status-bar, .expand-btn")) return;
+    dragging = true;
+    startX = e.clientX - zoom.x;
+    startY = e.clientY - zoom.y;
+    outer.setPointerCapture(e.pointerId);
+  });
+
+  outer.addEventListener("pointermove", e => {
+    if (!dragging) return;
+    if (getNumPanels() > 1) { dragging = false; return; }
+    zoom.x = e.clientX - startX;
+    zoom.y = e.clientY - startY;
+    applyTransform();
+  });
+
+  outer.addEventListener("pointerup", () => {
+    if (!dragging) return;
+    dragging = false;
+    saveZoom();
+  });
+
+  // Issue 6: mouse wheel zoom around cursor
+  outer.addEventListener("wheel", e => {
+    if (e.target.closest(".zones-editor, .search-panel, .settings-panel, .log-panel, .sidebar, .zoom-controls")) return;
+    if (mapLocked && !editorMode) return; // locked
+    e.preventDefault();
+    const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+    const rect   = outer.getBoundingClientRect();
+    const cx     = e.clientX - rect.left;
+    const cy     = e.clientY - rect.top;
+    const newScale = Math.min(10, Math.max(0.1, zoom.scale * factor));
+    // Zoom around cursor
+    zoom.x = cx - (cx - zoom.x) * (newScale / zoom.scale);
+    zoom.y = cy - (cy - zoom.y) * (newScale / zoom.scale);
+    zoom.scale = newScale;
+    // Clamp so map can't fly off-screen
+    const img = document.getElementById('floorplanImage') || document.querySelector('.fp-img');
+    if (img && img.naturalWidth) {
+      const iw = img.naturalWidth * zoom.scale;
+      const ih = img.naturalHeight * zoom.scale;
+      const margin = 100;
+      zoom.x = Math.min(rect.width  - margin, Math.max(-(iw - margin), zoom.x));
+      zoom.y = Math.min(rect.height - margin, Math.max(-(ih - margin), zoom.y));
+    }
+    applyTransform();
+    saveZoom();
+  }, { passive: false });
+}
+
+/* ─── POLLING ─────────────────────────────────────────────── */
+function restartPolling() {
+  if (pollingTimer) clearInterval(pollingTimer);
+  pollingTimer = setInterval(loadConfig, uiConfig.polling_interval * 1000);
+}
+
+/* ─── COORDINATE HELPERS ──────────────────────────────────── */
+// Convert viewport screen coords → wrapper-local image coords
+function screenToFloorplan(sx, sy) {
+  return {
+    x: (sx - zoom.x) / zoom.scale,
+    y: (sy - zoom.y) / zoom.scale,
+  };
+}
+
+// Not needed for rendering (SVG is inside the transformed wrapper)
+// but kept for focusZone / animateZoomTo compatibility
+function floorplanToScreen(fx, fy) {
+  return {
+    x: fx * zoom.scale + zoom.x,
+    y: fy * zoom.scale + zoom.y,
+  };
+}
+
+/* ─── ZONES STORAGE ───────────────────────────────────────── */
+const ZONES_DIR = "config/zones/";
+
+function zoneFilename(id) {
+  return id.replace(/[^a-zA-Z0-9_-]/g, "_") + ".yaml";
+}
+
+function hexToRgba(hex, alpha) {
+  let h = hex.replace("#", "");
+  if (h.length === 3) h = h.split("").map(c => c + c).join("");
+  const r = parseInt(h.substring(0, 2), 16);
+  const g = parseInt(h.substring(2, 4), 16);
+  const b = parseInt(h.substring(4, 6), 16);
+  return `rgba(${r},${g},${b},${alpha})`;
+}
+
+function zoneToYaml(z) {
+  let out = `id: ${z.id}\n`;
+  out += `name: "${(z.name || "").replace(/"/g, '\\"')}"\n`;
+  out += `color: "${z.colorHex || "#0096ff"}"\n`;
+  out += `enabled: ${z.enabled !== false}\n`;
+  out += `hidden: ${z.hidden === true}\n`;
+  if (z.floor_id)    out += `floor_id: ${z.floor_id}\n`;
+  if (z.ha_area_id)  out += `ha_area_id: ${z.ha_area_id}\n`;
+  out += `points:\n`;
+  (z.points || []).forEach(p => { out += ` - [${Math.round(p.x)}, ${Math.round(p.y)}]\n`; });
+  out += `sensors:\n`;
+  (z.sensors || []).forEach(s => { out += ` - ${s}\n`; });
+  out += `cameras:\n`;
+  (z.cameras || []).forEach(s => { out += ` - ${s}\n`; });
+  out += `lights:\n`;
+  (z.lights || []).forEach(s => { out += ` - ${s}\n`; });
+  out += `sirens:\n`;
+  (z.sirens || []).forEach(s => { out += ` - ${s}\n`; });
+  if ((z.ha_excluded_entities || []).length) {
+    out += `ha_excluded_entities:\n`;
+    (z.ha_excluded_entities || []).forEach(s => { out += ` - ${s}\n`; });
+  }
+  return out;
+}
+
+function parseZoneYaml(text) {
+  const z = { points: [], sensors: [], cameras: [], lights: [], sirens: [], ha_excluded_entities: [], enabled: true, hidden: false };
+  let section = "";
+
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    if (line === "points:")               { section = "points";               continue; }
+    if (line === "sensors:")              { section = "sensors";              continue; }
+    if (line === "cameras:")              { section = "cameras";              continue; }
+    if (line === "lights:")               { section = "lights";               continue; }
+    if (line === "sirens:")               { section = "sirens";               continue; }
+    if (line === "ha_excluded_entities:") { section = "ha_excluded_entities"; continue; }
+
+    if (line.startsWith("-")) {
+      const val = line.slice(1).trim();
+      if (section === "points") {
+        const m = val.match(/\[\s*([\d.+-]+)\s*,\s*([\d.+-]+)\s*\]/);
+        if (m) z.points.push({ x: parseFloat(m[1]), y: parseFloat(m[2]) });
+      } else if (section === "sensors")              { z.sensors.push(val); }
+      else if (section === "cameras")                { z.cameras.push(val); }
+      else if (section === "lights")                 { z.lights.push(val); }
+      else if (section === "sirens")                 { z.sirens.push(val); }
+      else if (section === "ha_excluded_entities")   { z.ha_excluded_entities.push(val); }
+      continue;
+    }
+
+    if (line.includes(":")) {
+      section = "";
+      const colonIdx = line.indexOf(":");
+      const key = line.slice(0, colonIdx).trim();
+      let val = line.slice(colonIdx + 1).trim();
+      val = val.replace(/^"(.*)"$/, "$1").replace(/^'(.*)'$/, "$1");
+      if (key === "id")                     z.id              = val;
+      else if (key === "name")              z.name            = val;
+      else if (key === "enabled")           z.enabled         = val !== "false";
+      else if (key === "hidden")            z.hidden          = val === "true";
+      else if (key === "floor_id")          z.floor_id        = val;
+      else if (key === "ha_area_id")        z.ha_area_id      = val;
+      else if (key === "color")             { z.colorHex = val; z.color = hexToRgba(val, 0.25); }
+    }
+  }
+
+  if (!z.colorHex) z.colorHex = "#0096ff";
+  if (!z.color)    z.color    = hexToRgba(z.colorHex, 0.25);
+  return z;
+}
+
+async function loadZones() {
+  try {
+    const idxRes = await fetch(ZONES_DIR + "index.json?v=" + Date.now());
+    if (!idxRes.ok) throw new Error("no index");
+    const index = await idxRes.json();
+    // Skip group files and index files that may have been added by saveGroup
+    const zoneFiles = index.filter(f =>
+      !f.startsWith("group_") && f !== "groups_index.json" && f.endsWith(".yaml")
+    );
+    const results = await Promise.all(zoneFiles.map(async filename => {
+      const r = await fetch(ZONES_DIR + filename + "?v=" + Date.now());
+      if (!r.ok) return null;
+      return parseZoneYaml(await r.text());
+    }));
+    zones = results.filter(Boolean);
+  } catch {
+    try { zones = JSON.parse(localStorage.getItem("zones") || "[]"); }
+    catch { zones = []; }
+  }
+}
+
+async function saveZone(zone) {
+  const filename = zoneFilename(zone.id);
+  try {
+    const res = await fetch(apiPath("ow/save-zone"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename, content: zoneToYaml(zone) })
+    });
+    if (!res.ok) throw new Error(res.statusText);
+    // Update dataVersion baseline so we don't self-sync
+    try { const h = await fetch(apiPath("ow/health"),{cache:"no-store"}); const d = await h.json(); if(d.dataVersion) _lastDataVersion = d.dataVersion; } catch{}
+    showSaveToast('Zone');
+  } catch {
+    localStorage.setItem("zones", JSON.stringify(zones));
+    showSaveToast('Zone');
+  }
+}
+
+async function deleteZoneFile(zoneId) {
+  const filename = zoneFilename(zoneId);
+  try {
+    const res = await fetch(apiPath("ow/delete-zone"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename })
+    });
+    if (!res.ok) throw new Error(res.statusText);
+  } catch {
+    localStorage.setItem("zones", JSON.stringify(zones));
+  }
+}
+
+function saveZones() {
+  zones.forEach(z => saveZone(z));
+  localStorage.setItem("zones", JSON.stringify(zones));
+}
+
+/* ─── ZONE GROUPS ─────────────────────────────────────────── */
+function groupFilename(id) { return `group_${id}.yaml`; }
+
+function groupToYaml(g) {
+  let out = `id: ${g.id}\n`;
+  out += `name: "${(g.name || "").replace(/"/g, '\\"')}"\n`;
+  out += `color: "${g.colorHex || "#ff3b30"}"\n`;
+  out += `zone_ids:\n`;
+  (g.zone_ids || []).forEach(id => { out += ` - ${id}\n`; });
+  return out;
+}
+
+function parseGroupYaml(text) {
+  const g = { zone_ids: [] };
+  let section = "";
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    if (line === "zone_ids:") { section = "zone_ids"; continue; }
+    if (line.startsWith("-") && section === "zone_ids") {
+      g.zone_ids.push(line.slice(1).trim());
+      continue;
+    }
+    if (line.includes(":")) {
+      section = "";
+      const ci = line.indexOf(":");
+      const key = line.slice(0, ci).trim();
+      let val = line.slice(ci + 1).trim().replace(/^"(.*)"$/, "$1");
+      if (key === "id")    g.id    = val;
+      if (key === "name")  g.name  = val;
+      if (key === "color") g.colorHex = val;
+    }
+  }
+  return g;
+}
+
+async function loadGroups() {
+  try {
+    const res = await fetch(apiPath("config/zones/groups_index.json") + "?v=" + Date.now());
+    if (!res.ok) { groups = []; return; }
+    const index = await res.json();
+    const loaded = await Promise.all(index.map(async fname => {
+      try {
+        const r = await fetch(apiPath("config/zones/" + fname) + "?v=" + Date.now());
+        if (!r.ok) return null;
+        return parseGroupYaml(await r.text());
+      } catch { return null; }
+    }));
+    groups = loaded.filter(Boolean);
+  } catch { groups = []; }
+}
+
+/* ─── LIGHTS & SIRENS ─────────────────────────────────────── */
+async function loadLights() {
+  try {
+    const res = await fetch(apiPath("ow/lights") + "?v=" + Date.now());
+    lights = res.ok ? await res.json() : [];
+  } catch { lights = []; }
+}
+async function loadSirens() {
+  try {
+    const res = await fetch(apiPath("ow/sirens") + "?v=" + Date.now());
+    sirens = res.ok ? await res.json() : [];
+  } catch { sirens = []; }
+}
+async function saveLight(pin) {
+  await fetch(apiPath("ow/save-light"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(pin) });
+  showSaveToast('Light');
+  // Update our dataVersion baseline so we don't re-sync our own change
+  try { const h = await fetch(apiPath("ow/health"),{cache:"no-store"}); const d = await h.json(); if(d.dataVersion) _lastDataVersion = d.dataVersion; } catch{}
+}
+async function saveSiren(pin) {
+  await fetch(apiPath("ow/save-siren"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(pin) });
+  showSaveToast('Siren');
+  try { const h = await fetch(apiPath("ow/health"),{cache:"no-store"}); const d = await h.json(); if(d.dataVersion) _lastDataVersion = d.dataVersion; } catch{}
+}
+async function deleteLight(id) {
+  lights = lights.filter(p => p.id !== id);
+  await fetch(apiPath("ow/delete-light"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id }) });
+}
+async function deleteSiren(id) {
+  sirens = sirens.filter(p => p.id !== id);
+  await fetch(apiPath("ow/delete-siren"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id }) });
+}
+
+/* ─── CAMERA PINS ─────────────────────────────────────────── */
+async function loadCameraPins() {
+  try {
+    const res = await fetch(apiPath("ow/camera-pins") + "?v=" + Date.now());
+    cameraPins = res.ok ? await res.json() : [];
+  } catch { cameraPins = []; }
+}
+async function saveCameraPin(pin) {
+  await fetch(apiPath("ow/save-camera-pin"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(pin) });
+  showSaveToast('Camera');
+  try { const h = await fetch(apiPath("ow/health"),{cache:"no-store"}); const d = await h.json(); if(d.dataVersion) _lastDataVersion = d.dataVersion; } catch{}
+}
+async function deleteCameraPin(id) {
+  cameraPins = cameraPins.filter(p => p.id !== id);
+  await fetch(apiPath("ow/delete-camera-pin"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id }) });
+}
+
+/* ─── DOOR PIN STORAGE moved to modules/ow-door-pins.js ───────────────────────── */
+function togglePinEntity(entityId, pinId) {
+  if (!entityId) return;
+
+  // Light tap modes
+  const lightPin = lights.find(p => p.id === pinId);
+  if (lightPin?.tapAll) {
+    const zone = zones.find(z => (z.lights || []).includes(entityId));
+    if (zone?.lights?.length) {
+      const allOn = zone.lights.every(e => haStates[e]?.state === 'on');
+      zone.lights.forEach(e => _callService(e, allOn ? 'turn_off' : 'turn_on'));
+      return;
+    }
+  }
+
+  // Siren tap modes
+  const sirenPin = sirens.find(p => p.id === pinId);
+  if (sirenPin) {
+    const state   = haStates[entityId]?.state;
+    const isOn    = state === 'on' || (state === 'unknown' && sirenPin._localOn);
+    const service = isOn ? 'turn_off' : 'turn_on';
+
+    if (sirenPin.tapAll) {
+      // All sirens across all zones
+      const allEntities = [...new Set(zones.flatMap(z => z.sirens || []).concat(sirens.map(p => p.entity_id).filter(Boolean)))];
+      allEntities.forEach(e => _callService(e, service));
+      sirens.forEach(p => { p._localOn = !isOn; });
+    } else if (sirenPin.tapZone) {
+      // All sirens in this zone
+      const zone = zones.find(z => (z.sirens || []).includes(entityId));
+      if (zone?.sirens?.length) zone.sirens.forEach(e => _callService(e, service));
+      // Also update _localOn for all siren pins with matching zone
+    } else {
+      _callService(entityId, service);
+      sirenPin._localOn = !isOn;
+    }
+    renderZones();
+    return;
+  }
+
+  // Default toggle
+  _callService(entityId, haStates[entityId]?.state === 'on' ? 'turn_off' : 'turn_on');
+}
+
+function _callService(entityId, service) {
+  if (!entityId) return;
+  const domain = entityId.startsWith("light.") ? "light" : entityId.startsWith("siren.") ? "siren" : "switch";
+  _callDomainService(domain, service, entityId);
+}
+
+function _callDomainService(domain, service, entityId) {
+  if (!domain || !service || !entityId) return;
+  if (IS_DIRECT_MODE) {
+    fetch("ow/call-service", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ domain, service, entity_id: entityId }) }).catch(e => console.warn("[OW] call-service failed:", e.message));
+  } else if (haConnected && haSocket) {
+    sendHA({ type: "call_service", domain, service, service_data: { entity_id: entityId } });
+  }
+}
+/* ─── DOOR PIN DISPLAY/CONTROL moved to modules/ow-door-pins.js ───────────────────────── */
+async function loadFloors() {
+  try {
+    const res = await fetch(apiPath("ow/floors") + "?v=" + Date.now());
+    if (!res.ok) { floors = []; return; }
+    floors = await res.json();
+    // Set active floor to saved preference or first floor
+    // Always start on the first floor on page load so the map and editor are in sync
+    activeFloorId = floors[0]?.id || null;
+    // Clear saved zoom so each page load fits the floor image to the panel fresh
+    localStorage.removeItem("zoomScale");
+    localStorage.removeItem("zoomX");
+    localStorage.removeItem("zoomY");
+    // Load the active floor's floorplan image and await it so initFloorplan
+    // gets correct dimensions before renderZones runs
+    const floor = activeFloor();
+    if (floor?.floorplan) {
+      const fp = document.getElementById("floorplanImage");
+      if (fp) {
+        await new Promise(resolve => {
+          fp.onload  = resolve;
+          fp.onerror = resolve;
+          fp.src = apiPath(floor.floorplan) + "?v=" + Date.now();
+        });
+        initFloorplan();
+      }
+    }
+  } catch { floors = []; }
+}
+
+async function saveFloor(floor) {
+  const res = await fetch(apiPath("ow/save-floor"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(floor),
+  });
+  const data = await res.json();
+  if (data.floors) floors = data.floors;
+  showSaveToast('Floor');
+  return data;
+}
+
+async function deleteFloor(id) {
+  const res = await fetch(apiPath("ow/delete-floor"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id }),
+  });
+  const data = await res.json();
+  if (data.floors) floors = data.floors;
+  return data;
+}
+
+function setActiveFloor(id) {
+  const floor = floors.find(f => f.id === id);
+  if (!floor) return;
+
+  // In multi-panel mode, update the active panel's floor assignment
+  if (getNumPanels() > 1) {
+    // Only update if a panel is actually selected
+    if (activePanelIdx >= 0) {
+      const key = activePanelIdx === 0 ? 'ow_panel_0_floor' : 'ow_panel_1_floor';
+      const current = localStorage.getItem(key);
+      if (current !== id) {
+        localStorage.setItem(key, id);
+        applyFloorPanels(); // rebuild panels with new floor assignment
+      }
+    }
+    return;
+  }
+
+  activeFloorId = id;
+  localStorage.setItem("ow_active_floor", id);
+  // Clear saved zoom so the new floor's image fits to the panel automatically
+  localStorage.removeItem("zoomScale");
+  localStorage.removeItem("zoomX");
+  localStorage.removeItem("zoomY");
+  applyActiveFloor();
+}
+
+function activeFloor() {
+  return floors.find(f => f.id === activeFloorId) || floors[0] || null;
+}
+
+function applyActiveFloor() {
+  const floor = activeFloor();
+  if (!floor) return;
+  // Update floorplan image
+  const fp = document.getElementById("floorplanImage");
+  if (fp && floor.floorplan) {
+    const newSrc = apiPath(floor.floorplan) + "?v=" + Date.now();
+    if (!fp.src.includes(floor.floorplan.split("?")[0])) {
+      fp.src = newSrc;
+      fp.onload = initFloorplan;
+    }
+  }
+  renderZones();
+  renderStatusDropdown();
+  if (window.renderCameraStatusBar) { window.renderCameraStatusBar(); applyStatusVisibility(); }
+}
+
+// ─── MULTI-PANEL FLOOR RENDERER ────────────────────────────────────────────
 //
-// Backward compat:
-// - legacy pins may have pin.zone_id (string)
-// - new pins use pin.zone_ids (string[])
-// - we continue writing pin.zone_id as the first zone for older backends
+// When getNumPanels() === 1: normal single-panel mode (existing engine unchanged)
+// When getNumPanels() === 2: replaces #main contents with two .floor-panel divs,
+//   each with its own img, svg, zoom state, and pan binding.
 //
-function doorPinZoneIds(pin) {
-  if (!pin) return [];
-  if (Array.isArray(pin.zone_ids) && pin.zone_ids.length) return pin.zone_ids.filter(Boolean);
-  if (pin.zone_id) return [pin.zone_id];
-  return [];
+// activePanelIdx tracks which panel sidebar zoom/reset applies to.
+// Mouse scroll always applies to whichever panel the pointer is over.
+
+const PANEL_ZOOMS = [
+  { scale: 1, x: 0, y: 0 },
+  { scale: 1, x: 0, y: 0 },
+];
+
+function getPanelEl(idx)      { return document.querySelector(`.floor-panel[data-panel-idx="${idx}"]`); }
+function getPanelWrapper(idx) { return document.querySelector(`.floor-panel[data-panel-idx="${idx}"] .fp-wrapper`); }
+function getPanelImg(idx)     { return document.querySelector(`.floor-panel[data-panel-idx="${idx}"] .fp-img`); }
+function getPanelSvg(idx)     { return document.querySelector(`.floor-panel[data-panel-idx="${idx}"] .fp-svg`); }
+
+function applyPanelTransform(idx) {
+  const wrapper = getPanelWrapper(idx);
+  if (!wrapper) return;
+  const z = PANEL_ZOOMS[idx];
+  wrapper.style.transform = `translate(${z.x}px, ${z.y}px) scale(${z.scale})`;
+  if (editorMode) renderAllPanelZones();
 }
 
-function doorPinPrimaryZoneId(pin) {
-  return doorPinZoneIds(pin)[0] || pin?.zone_id || '';
-}
-
-function normalizeDoorPin(pin) {
-  if (!pin || typeof pin !== 'object') return pin;
-  // Migrate legacy single-zone to multi-zone
-  if ((!Array.isArray(pin.zone_ids) || !pin.zone_ids.length) && pin.zone_id) {
-    pin.zone_ids = [pin.zone_id];
+function fitPanelToContainer(idx) {
+  const panelEl = getPanelEl(idx);
+  const img     = getPanelImg(idx);
+  if (!panelEl || !img || !img.naturalWidth) return;
+  const vw = panelEl.offsetWidth;
+  const vh = panelEl.offsetHeight;
+  // If panel has no size yet (not laid out), retry after layout
+  if (!vw || !vh) {
+    requestAnimationFrame(() => fitPanelToContainer(idx));
+    return;
   }
-  if (Array.isArray(pin.zone_ids) && pin.zone_ids.length && !pin.zone_id) {
-    pin.zone_id = pin.zone_ids[0];
+  const iw = img.naturalWidth, ih = img.naturalHeight;
+  const z  = PANEL_ZOOMS[idx];
+  z.scale  = Math.min(vw / iw, vh / ih, 1);
+  z.x      = (vw - iw * z.scale) / 2;
+  z.y      = (vh - ih * z.scale) / 2;
+  applyPanelTransform(idx);
+  renderAllPanelZones();
+}
+
+function setActivePanel(idx) {
+  // Click same panel again = deselect
+  if (activePanelIdx === idx && document.querySelector('.floor-panel.fp-active')) {
+    activePanelIdx = -1;
+    document.querySelectorAll('.floor-panel').forEach(el => el.classList.remove('fp-active'));
+    return;
   }
-  // Default new fields
-  if (pin.control_counts_as_trigger == null) pin.control_counts_as_trigger = false;
-  if (pin.control_trigger_state === undefined) pin.control_trigger_state = null; // null = Auto
-  return pin;
+  activePanelIdx = idx;
+  document.querySelectorAll('.floor-panel').forEach((el, i) => {
+    el.classList.toggle('fp-active', i === idx);
+  });
 }
 
-function inferControlTriggerState(entityId) {
-  if (!entityId) return null;
-  const domain = String(entityId).split('.')[0];
-  if (domain === 'lock')  return 'unlocked';
-  if (domain === 'cover') return 'open';
-  if (domain === 'switch') return 'on';
-  return null;
-}
+// Render zones onto a specific panel's SVG
+function renderPanelZones(idx) {
+  const panelSvg = getPanelSvg(idx);
+  const floor    = getPanelFloor(idx);
+  if (!panelSvg || !floor) return;
 
-function doorPinWantedControlState(pin) {
-  if (!pin?.control_entity) return null;
-  const explicit = pin.control_trigger_state;
-  if (explicit === null || explicit === undefined || explicit === '') {
-    return inferControlTriggerState(pin.control_entity);
+  const img = getPanelImg(idx);
+  if (!img) return;
+  // If image not yet loaded, defer — onload will call renderPanelZones again
+  if (!img.naturalWidth) {
+    const prev = img.onload;
+    img.onload = () => { if (prev) prev(); renderPanelZones(idx); };
+    return;
   }
-  return String(explicit);
+
+  // Clear — preserve dragging pin element
+  if (_pinDragging) {
+    Array.from(panelSvg.childNodes).forEach(child => {
+      if (child.getAttribute?.('data-pin-id') === _draggingPinId) return;
+      panelSvg.removeChild(child);
+    });
+  } else {
+    while (panelSvg.firstChild) panelSvg.removeChild(panelSvg.firstChild);
+  }
+  panelSvg.setAttribute('width',   img.naturalWidth);
+  panelSvg.setAttribute('height',  img.naturalHeight);
+  panelSvg.setAttribute('viewBox', `0 0 ${img.naturalWidth} ${img.naturalHeight}`);
+
+  // Pass the panel SVG directly — no ID swap, no DOM mutation
+  const savedFloorId = activeFloorId;
+  try {
+    activeFloorId = floor.id;
+    const triggeredZones = zones.filter(z => {
+      const s = getZoneState(z);
+      return s === 'triggered' || s === 'fault';
+    });
+    _renderZonesInternal(panelSvg);
+    const afterCount = panelSvg.childNodes.length;
+    if (triggeredZones.length > 0 && afterCount === 0) {
+      console.warn(`[OW] Panel ${idx}: 0 SVG elements but ${triggeredZones.length} triggered zones! haConnected=${haConnected}, floor=${floor.id}`);
+      triggeredZones.forEach(z => console.warn(`  Zone: ${z.name}, pts=${(z.points||[]).length}, state=${getZoneState(z)}, hidden=${z.hidden}`));
+    } else {
+      console.debug(`[OW] Panel ${idx}: ${afterCount} SVG elements (${triggeredZones.length} triggered)`);
+    }
+  } finally {
+    activeFloorId = savedFloorId;
+  }
+  renderPins(idx); // render lights & sirens for this panel
 }
 
-function doorPinControlTriggered(pin) {
-  if (!pin?.control_counts_as_trigger || !pin?.control_entity) return false;
-  const wanted = (doorPinWantedControlState(pin) || '').toLowerCase();
-  if (!wanted) return false;
-  const st = String(haStates?.[pin.control_entity]?.state || '').toLowerCase();
-  return st === wanted;
+function renderAllPanelZones() {
+  const n = getNumPanels();
+  for (let i = 0; i < n; i++) renderPanelZones(i);
 }
 
-function isDoorTriggered(pin) {
-  const sensorTrig = !!(pin?.sensor_entity && isEntityTriggered(pin.sensor_entity));
-  const controlTrig = doorPinControlTriggered(pin);
-  return sensorTrig || controlTrig;
+// Build zoom/pan binding for a panel
+function bindPanelInteraction(idx) {
+  const panelEl = getPanelEl(idx);
+  if (!panelEl) return;
+
+  // Select panel on click — not passive so preventDefault works in pan handler
+  panelEl.addEventListener('pointerdown', e => { setActivePanel(idx); }, { capture: true });
+
+  // Pin placement — intercept click on the panel SVG when in placing mode
+  panelEl.addEventListener('click', e => {
+    // Live mode: zone polygon click opens popup
+    if (!editorMode && e.target.classList?.contains('zone-polygon')) {
+      const zoneId = e.target.dataset?.zoneId;
+      const zone   = zones.find(z => z.id === zoneId);
+      if (zone && !zone.hidden) {
+        openZonePopup(zoneId, e.clientX, e.clientY);
+        e.stopPropagation();
+        return;
+      }
+    }
+    if (!placingPinType) return;
+    e.stopPropagation();
+    const panelSvg = getPanelSvg(idx);
+    if (!panelSvg) return;
+    const rect = panelSvg.getBoundingClientRect();
+    const z    = PANEL_ZOOMS[idx] || { scale: 1, x: 0, y: 0 };
+    const fpX  = (e.clientX - rect.left - z.x) / z.scale;
+    const fpY  = (e.clientY - rect.top  - z.y) / z.scale;
+    const floor = getPanelFloor(idx);
+    placePinAtFloorplanCoord(fpX, fpY, floor?.id || null);
+  });
+
+  // Zone editor interactions for multi-panel SVGs.
+  const panelSvg = getPanelSvg(idx);
+  if (panelSvg && !panelSvg._owZoneEditorBound) {
+    panelSvg._owZoneEditorBound = true;
+
+    const panelPoint = (e) => {
+      const rect = panelEl.getBoundingClientRect();
+      const z = PANEL_ZOOMS[idx] || { scale: 1, x: 0, y: 0 };
+      return {
+        x: (e.clientX - rect.left - z.x) / z.scale,
+        y: (e.clientY - rect.top  - z.y) / z.scale,
+      };
+    };
+
+    panelSvg.addEventListener('pointerdown', e => {
+      const target = e.target;
+      const sx = e.clientX, sy = e.clientY;
+      const fp = panelPoint(e);
+      const floor = getPanelFloor(idx);
+
+      if (!editorMode) {
+        if (target.classList?.contains('zone-polygon')) {
+          const zoneId = target.dataset.zoneId;
+          const zone = zones.find(z => z.id === zoneId);
+          if (zone?.hidden) { e.stopPropagation(); return; }
+          openZonePopup(zoneId, e.clientX, e.clientY);
+          e.stopPropagation();
+        }
+        return;
+      }
+
+      if (placingPinType) {
+        placePinAtFloorplanCoord(fp.x, fp.y, floor?.id || activeFloorId);
+        e.stopPropagation();
+        return;
+      }
+
+      if (target.classList?.contains('zone-handle')) {
+        draggingHandle = { zoneId: target.dataset.zoneId, idx: Number(target.dataset.index) };
+        panelSvg.setPointerCapture(e.pointerId);
+        e.stopPropagation();
+        return;
+      }
+
+      if (isEditingPoints && selectedZoneId && !isCreatingZone) {
+        const zone = zones.find(z => z.id === selectedZoneId);
+        if (zone && (zone.points || []).length >= 2) {
+          const insideZone = isPointInPolygon(fp.x, fp.y, zone.points);
+          if (!insideZone) {
+            const info = closestEdgeInfo(zone, fp.x, fp.y);
+            if (info) {
+              pushUndo();
+              zone.points.splice(info.insertAfter + 1, 0, { x: Math.round(fp.x), y: Math.round(fp.y) });
+              saveZone(zone);
+              renderZones();
+              renderZonesEditor();
+              e.stopPropagation();
+              return;
+            }
+          }
+        }
+      }
+
+      if (target.classList?.contains('zone-polygon')) {
+        const zoneId = target.dataset.zoneId;
+        const zone = zones.find(z => z.id === zoneId);
+        if (zone?.hidden) { e.stopPropagation(); return; }
+        if (isEditingPoints && selectedZoneId && zoneId !== selectedZoneId) { e.stopPropagation(); return; }
+        if (selectedZoneId === zoneId && !isEditingPoints) {
+          clearZoneEditorSelection(true);
+          e.stopPropagation();
+          return;
+        }
+        selectedZoneId = zoneId;
+        selectedGroupId = null;
+        activePinId = null;
+        activePinType = null;
+        if (isEditingPoints && zone) {
+          draggingZone = { zoneId, startPoints: zone.points.map(p => ({ ...p })) };
+          dragStart = { x: sx, y: sy };
+          panelSvg.setPointerCapture(e.pointerId);
+        }
+        renderZones();
+        renderZonesEditor();
+        e.stopPropagation();
+        return;
+      }
+
+      if (isCreatingZone && currentNewZone) {
+        pushUndo();
+        currentNewZone.points.push({ x: fp.x, y: fp.y });
+        saveZone(currentNewZone);
+        renderZones();
+        const countSpan = document.querySelector(`.zones-list-item[data-zone-id="${currentNewZone.id}"] span:last-child`);
+        if (countSpan) countSpan.textContent = `${currentNewZone.points.length}pts`;
+        e.stopPropagation();
+        return;
+      }
+
+      clearZoneEditorSelection(true);
+    });
+
+    panelSvg.addEventListener('pointermove', e => {
+      if (!editorMode) return;
+      const fp = panelPoint(e);
+      if (draggingHandle) {
+        const zone = zones.find(z => z.id === draggingHandle.zoneId);
+        if (!zone) return;
+        zone.points[draggingHandle.idx] = fp;
+        saveZone(zone);
+        renderZones();
+      } else if (draggingZone && dragStart) {
+        const zone = zones.find(z => z.id === draggingZone.zoneId);
+        if (!zone) return;
+        const z = PANEL_ZOOMS[idx] || { scale: 1 };
+        const dxF = (e.clientX - dragStart.x) / z.scale;
+        const dyF = (e.clientY - dragStart.y) / z.scale;
+        zone.points = draggingZone.startPoints.map(p => ({ x: p.x + dxF, y: p.y + dyF }));
+        saveZone(zone);
+        renderZones();
+      }
+    });
+
+    panelSvg.addEventListener('pointerup', e => {
+      if (draggingHandle || draggingZone) {
+        try { panelSvg.releasePointerCapture(e.pointerId); } catch {}
+      }
+      draggingHandle = null;
+      draggingZone = null;
+      dragStart = null;
+    });
+
+    panelSvg.addEventListener('pointercancel', () => {
+      draggingHandle = null;
+      draggingZone = null;
+      dragStart = null;
+    });
+
+    panelSvg.addEventListener('dblclick', e => {
+      if (!editorMode || !isCreatingZone || !currentNewZone) return;
+      if (currentNewZone.points.length < 3) { alert('A zone needs at least 3 points.'); return; }
+      isCreatingZone = false;
+      currentNewZone = null;
+      saveZones();
+      renderZonesEditor();
+      scheduleHAReload();
+      e.stopPropagation();
+    });
+
+    panelSvg.addEventListener('contextmenu', e => {
+      if (!editorMode) return;
+      e.preventDefault();
+      const target = e.target;
+      if (target.classList?.contains('zone-handle') && isEditingPoints) {
+        const zone = zones.find(z => z.id === target.dataset.zoneId);
+        if (!zone || zone.points.length <= 3) return;
+        pushUndo();
+        zone.points.splice(Number(target.dataset.index), 1);
+        saveZone(zone);
+        renderZones();
+        renderZonesEditor();
+      }
+    });
+  }
+
+  // Pan
+  let panning = false, panStart = null;
+
+  panelEl.addEventListener('pointerdown', e => {
+    if (e.button !== 0 && e.pointerType === 'mouse') return;
+    if (e.target.closest('.zone-handle, .zone-polygon, .floor-panel-handle')) return;
+    if (mapLocked && !editorMode) return; // locked
+    panning  = true;
+    panStart = { x: e.clientX - PANEL_ZOOMS[idx].x, y: e.clientY - PANEL_ZOOMS[idx].y };
+  });
+
+  panelEl.addEventListener('pointermove', e => {
+    if (!panning) return;
+    if (e.pointerType === 'mouse' && e.buttons !== 1) { panning = false; return; }
+    PANEL_ZOOMS[idx].x = e.clientX - panStart.x;
+    PANEL_ZOOMS[idx].y = e.clientY - panStart.y;
+    applyPanelTransform(idx);
+  });
+
+  panelEl.addEventListener('pointerup',    () => { panning = false; });
+  panelEl.addEventListener('pointercancel',() => { panning = false; });
+  // Scroll zoom — always applies to hovered panel regardless of selection
+  panelEl.addEventListener('wheel', e => {
+    e.preventDefault();
+    if (mapLocked && !editorMode) return; // locked
+    const factor   = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+    const rect     = panelEl.getBoundingClientRect();
+    const cx       = e.clientX - rect.left;
+    const cy       = e.clientY - rect.top;
+    const z        = PANEL_ZOOMS[idx];
+    const newScale = Math.min(10, Math.max(0.05, z.scale * factor));
+    z.x = cx - (cx - z.x) * (newScale / z.scale);
+    z.y = cy - (cy - z.y) * (newScale / z.scale);
+    z.scale = newScale;
+    // Clamp to prevent shooting off-screen
+    const img = getPanelImg(idx);
+    if (img && img.naturalWidth) {
+      const iw = img.naturalWidth * z.scale;
+      const ih = img.naturalHeight * z.scale;
+      const margin = 80;
+      z.x = Math.min(rect.width  - margin, Math.max(-(iw - margin), z.x));
+      z.y = Math.min(rect.height - margin, Math.max(-(ih - margin), z.y));
+    }
+    applyPanelTransform(idx);
+  }, { passive: false });
+
+  // Touch pinch-zoom
+  let touches = null, pinchDist0 = null, pinchZoom0 = null;
+  panelEl.addEventListener('touchstart', e => {
+    if (e.touches.length === 2) {
+      touches    = e.touches;
+      pinchDist0 = Math.hypot(e.touches[0].clientX - e.touches[1].clientX,
+                               e.touches[0].clientY - e.touches[1].clientY);
+      pinchZoom0 = PANEL_ZOOMS[idx].scale;
+      panning    = false;
+    }
+  }, { passive: true });
+  panelEl.addEventListener('touchmove', e => {
+    if (e.touches.length === 2 && pinchDist0) {
+      e.preventDefault();
+      const d = Math.hypot(e.touches[0].clientX - e.touches[1].clientX,
+                            e.touches[0].clientY - e.touches[1].clientY);
+      PANEL_ZOOMS[idx].scale = Math.min(10, Math.max(0.1, pinchZoom0 * d / pinchDist0));
+      applyPanelTransform(idx);
+    }
+  }, { passive: false });
+  panelEl.addEventListener('touchend', () => { pinchDist0 = null; }, { passive: true });
 }
 
-function doorPinTriggerSourceEntity(pin) {
-  if (pin?.sensor_entity && isEntityTriggered(pin.sensor_entity)) return pin.sensor_entity;
-  if (doorPinControlTriggered(pin)) return pin.control_entity;
-  return '';
+// Build/rebuild the multi-panel DOM inside #main
+function applyFloorPanels() {
+  const n      = getNumPanels();
+  const dir    = getPanelsDir();
+  const mainEl = document.getElementById('main');
+  if (!mainEl) return;
+
+  if (n <= 1) {
+    // ── Single panel ── restore original DOM if needed
+    if (mainEl.querySelector('.floor-panel')) {
+      mainEl.innerHTML = `
+        <div id="floorplanWrapper" class="floorplan-wrapper">
+          <img id="floorplanImage" src="img/floorplan.png" />
+          <svg id="zonesSvg" class="zones-svg"></svg>
+          <div id="deviceLayer"></div>
+        </div>`;
+      // Re-init with saved floor
+      activeFloorId = getPanelFloor(0)?.id || floors[0]?.id || null;
+      const fp = document.getElementById('floorplanImage');
+      const floor = activeFloor();
+      if (fp && floor?.floorplan) {
+        fp.onload = () => { initFloorplan(); renderZones(); };
+        fp.src = apiPath(floor.floorplan) + '?v=' + Date.now();
+        if (fp.complete) { initFloorplan(); renderZones(); }
+      }
+      bindPan(); // re-bind single-panel pan
+      setZoneSvgInteractionState();
+    }
+    // Hide sidebar zoom when returning to single panel
+    _updateZoomBtnsVisibility();
+    return;
+  }
+
+  // ── Multi-panel ── build panel container
+  mainEl.innerHTML = ''; // clear existing content
+  const container = document.createElement('div');
+  container.className = 'floor-panels-container fp-dir-' + dir;
+  // Direction only — size and position handled by CSS
+  container.style.flexDirection = dir === 'v' ? 'column' : 'row';
+
+  for (let i = 0; i < n; i++) {
+    const floor   = getPanelFloor(i);
+    const fi      = floors.indexOf(floor);
+    const isFirst = fi === 0;
+
+    const panelDiv = document.createElement('div');
+    panelDiv.className = 'floor-panel' + (i === activePanelIdx ? ' fp-active' : '');
+    panelDiv.dataset.panelIdx = i;
+    panelDiv.setAttribute('draggable', 'false');
+
+    // Floor label — hidden if user disabled it
+    const label = document.createElement('div');
+    label.className = 'floor-panel-label';
+    label.textContent = floor?.name || 'Floor ' + (i + 1);
+    if (localStorage.getItem('ow_hide_floor_label') === 'true') label.style.display = 'none';
+
+    // Wrapper (panned/scaled)
+    const wrapper = document.createElement('div');
+    wrapper.className = 'fp-wrapper';
+    wrapper.style.cssText = 'position:absolute;top:0;left:0;transform-origin:top left;';
+
+    // Image
+    const img = document.createElement('img');
+    img.className = 'fp-img';
+    img.style.cssText = 'display:block;user-select:none;pointer-events:none;max-width:none;';
+    const imgSrc = floor?.floorplan ? apiPath(floor.floorplan) : 'img/floorplan.png';
+    // Use floor ID as cache key so image only reloads when floor changes, not every render
+    const imgCacheKey = floor?.id || 'default';
+
+    // SVG — must use createElementNS for proper SVG rendering
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('class', 'fp-svg zones-svg');
+    svg.id = 'fp-svg-' + i;
+    svg.style.cssText = `position:absolute;top:0;left:0;overflow:visible;pointer-events:${editorMode ? 'all' : 'none'};`;
+
+    wrapper.appendChild(img);
+    wrapper.appendChild(svg);
+    panelDiv.appendChild(label);
+    panelDiv.appendChild(wrapper);
+    container.appendChild(panelDiv);
+
+    // Load image then fit and render
+    const panelIdx = i;
+    const onImgLoad = () => {
+      wrapper.style.width  = img.naturalWidth  + 'px';
+      wrapper.style.height = img.naturalHeight + 'px';
+      svg.setAttribute('width',   img.naturalWidth);
+      svg.setAttribute('height',  img.naturalHeight);
+      svg.setAttribute('viewBox', `0 0 ${img.naturalWidth} ${img.naturalHeight}`);
+      requestAnimationFrame(() => {
+        fitPanelToContainer(panelIdx);
+        renderPanelZones(panelIdx);
+      });
+    };
+    img.onload = onImgLoad;
+    img.src = imgSrc + '?v=' + imgCacheKey;
+    // If image was already cached and complete, onload won't fire — call manually
+    if (img.complete && img.naturalWidth) onImgLoad();
+  }
+
+  // Add draggable resize handle between panels
+  if (n === 2) {
+    const handle = document.createElement('div');
+    handle.className = 'floor-panel-handle';
+    // Wider hit area — 8px visible, pointer events on full area
+    handle.style.cssText = dir === 'v'
+      ? 'height:6px;width:100%;cursor:row-resize;background:rgba(255,255,255,0.06);flex-shrink:0;z-index:10;display:flex;align-items:center;justify-content:center;'
+      : 'width:6px;height:100%;cursor:col-resize;background:rgba(255,255,255,0.06);flex-shrink:0;z-index:10;display:flex;align-items:center;justify-content:center;';
+    const dot = document.createElement('div');
+    dot.style.cssText = dir === 'v'
+      ? 'width:40px;height:2px;background:rgba(255,255,255,0.25);border-radius:2px;pointer-events:none;'
+      : 'height:40px;width:2px;background:rgba(255,255,255,0.25);border-radius:2px;pointer-events:none;';
+    handle.appendChild(dot);
+    container.insertBefore(handle, container.children[1]);
+
+    let dragging = false, startPct = 50, startPos = 0;
+    handle.addEventListener('pointerdown', e => {
+      if (mapLocked) return; // locked — don't allow panel resize
+      e.preventDefault();
+      e.stopPropagation();
+      dragging = true;
+      handle.setPointerCapture(e.pointerId);
+      startPos = dir === 'v' ? e.clientY : e.clientX;
+      const panels = container.querySelectorAll('.floor-panel');
+      const total  = dir === 'v' ? container.offsetHeight : container.offsetWidth;
+      const p0Size = dir === 'v' ? panels[0].offsetHeight : panels[0].offsetWidth;
+      startPct = (p0Size / total) * 100;
+      handle.style.background = 'rgba(0,150,255,0.5)';
+    });
+    handle.addEventListener('pointermove', e => {
+      if (!dragging) return;
+      const panels = container.querySelectorAll('.floor-panel');
+      if (panels.length < 2) return;
+      const total = dir === 'v' ? container.offsetHeight : container.offsetWidth;
+      const delta = (dir === 'v' ? e.clientY : e.clientX) - startPos;
+      const newPct = Math.min(80, Math.max(20, startPct + (delta / total) * 100));
+      panels[0].style.flex = `0 0 ${newPct.toFixed(1)}%`;
+      panels[1].style.flex = '1';
+      [0, 1].forEach(i => fitPanelToContainer(i));
+    });
+    handle.addEventListener('pointerup', () => {
+      dragging = false;
+      handle.style.background = 'rgba(255,255,255,0.06)';
+      // Save split position
+      const panels = container.querySelectorAll('.floor-panel');
+      if (panels.length >= 2) {
+        const total = dir === 'v' ? container.offsetHeight : container.offsetWidth;
+        const p0    = dir === 'v' ? panels[0].offsetHeight : panels[0].offsetWidth;
+        localStorage.setItem('ow_fp_split_pct', ((p0 / total) * 100).toFixed(1));
+      }
+    });
+    handle.addEventListener('mouseenter', () => { if (!dragging) handle.style.background = 'rgba(0,150,255,0.5)'; });
+    handle.addEventListener('mouseleave', () => { if (!dragging) handle.style.background = 'rgba(255,255,255,0.06)'; });
+  }
+
+  mainEl.appendChild(container);
+
+  // Restore saved floor panel split position
+  if (n === 2) {
+    const savedPct = localStorage.getItem('ow_fp_split_pct');
+    if (savedPct) {
+      const pct = Math.min(80, Math.max(20, parseFloat(savedPct)));
+      // Apply after layout — use rAF so container has dimensions
+      requestAnimationFrame(() => {
+        const panels = container.querySelectorAll('.floor-panel');
+        if (panels.length >= 2) {
+          panels[0].style.flex = `0 0 ${pct.toFixed(1)}%`;
+          panels[1].style.flex = '1';
+          [0, 1].forEach(i => fitPanelToContainer(i));
+        }
+      });
+    }
+  }
+
+  // Bind interactions for each panel
+  for (let i = 0; i < n; i++) bindPanelInteraction(i);
+  setZoneSvgInteractionState();
+
+  // Update zoom buttons
+  _updateZoomBtnsVisibility();
+  setActivePanel(activePanelIdx < n ? activePanelIdx : 0);
 }
 
-// Linked zones popover (used in editor + runtime zone popup)
-let _doorLinksPopoverEl = null;
-function closeDoorLinksPopover() {
-  if (_doorLinksPopoverEl) { _doorLinksPopoverEl.remove(); _doorLinksPopoverEl = null; }
+// Show/hide sidebar zoom buttons based on panel count
+function _updateZoomBtnsVisibility() {
+  const multi = getNumPanels() > 1;
+  ['zoomIn','zoomOut','zoomReset'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.style.opacity = multi ? '0.45' : '';
+    // Don't disable — just visually indicate they apply to selected panel
+  });
 }
 
-function openDoorLinksPopover(pinId, anchorEl) {
-  closeDoorLinksPopover();
-  const pin = doorPins.find(p => p.id === pinId);
-  if (!pin || !anchorEl) return;
+// Override sidebar zoom/reset to apply to active panel in multi-panel mode
+function bindZoomControlsMultiPanel() {
+  const zoomIn    = document.getElementById('zoomIn');
+  const zoomOut   = document.getElementById('zoomOut');
+  const zoomReset = document.getElementById('zoomReset');
+  if (!zoomIn) return;
 
-  const zids = doorPinZoneIds(pin);
-  const rows = zids
-    .map(zid => zones.find(z => z.id === zid))
-    .filter(Boolean)
-    .map(z => `<div style="padding:4px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">• ${escapeHtml(z.name || z.id)}</div>`)
-    .join('') || `<div style="padding:4px 0;color:#666;">No linked zones</div>`;
+  function zoomPanel(factor) {
+    if (getNumPanels() <= 1) return; // handled by existing bindZoomControls
+    const panelEl = getPanelEl(activePanelIdx);
+    if (!panelEl) return;
+    const vw = panelEl.offsetWidth / 2;
+    const vh = panelEl.offsetHeight / 2;
+    const z  = PANEL_ZOOMS[activePanelIdx];
+    z.x      = vw - (vw - z.x) * factor;
+    z.y      = vh - (vh - z.y) * factor;
+    z.scale  = Math.min(10, Math.max(0.1, z.scale * factor));
+    applyPanelTransform(activePanelIdx);
+  }
 
-  const pop = document.createElement('div');
-  pop.className = 'ow-door-links-popover';
-  pop.style.cssText = 'position:fixed;z-index:9000;background:rgba(14,14,14,0.98);border:1px solid rgba(255,255,255,0.12);border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,0.65);padding:10px 12px;min-width:180px;max-width:260px;color:#e0e0e0;font-size:12px;';
-  pop.innerHTML = `
-    <div style="font-size:10px;letter-spacing:0.08em;text-transform:uppercase;color:#666;margin-bottom:6px;">Linked zones</div>
-    <div style="max-height:160px;overflow:auto;">${rows}</div>
-    <div style="margin-top:8px;display:flex;justify-content:flex-end;gap:6px;">
-      <button id="owDoorLinksEdit" style="background:rgba(0,150,255,0.15);border:1px solid rgba(0,150,255,0.35);color:#4db8ff;border-radius:7px;padding:4px 10px;cursor:pointer;font-size:11px;">Edit door…</button>
-      <button id="owDoorLinksClose" style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);color:#888;border-radius:7px;padding:4px 10px;cursor:pointer;font-size:11px;">Close</button>
+  // Wrap existing onclick handlers to intercept multi-panel mode
+  const origIn    = zoomIn.onclick;
+  const origOut   = zoomOut.onclick;
+  const origReset = zoomReset.onclick;
+
+  zoomIn.onclick = () => {
+    if (mapLocked && !editorMode) return;
+    if (getNumPanels() > 1) zoomPanel(1.15); else origIn?.();
+  };
+  zoomOut.onclick = () => {
+    if (mapLocked && !editorMode) return;
+    if (getNumPanels() > 1) zoomPanel(1 / 1.15); else origOut?.();
+  };
+  zoomReset.onclick = () => {
+    if (mapLocked && !editorMode) return;
+    if (getNumPanels() > 1) fitPanelToContainer(activePanelIdx); else origReset?.();
+  };
+}
+
+async function saveGroup(group) {
+  const fname = groupFilename(group.id);
+  try {
+    // Save group YAML via save-zone route (same directory)
+    await fetch(apiPath("ow/save-zone"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename: fname, content: groupToYaml(group) })
+    });
+    // Update groups_index.json
+    const indexRes = await fetch(apiPath("config/zones/groups_index.json") + "?v=" + Date.now());
+    let index = indexRes.ok ? await indexRes.json() : [];
+    if (!index.includes(fname)) {
+      index.push(fname);
+      await fetch(apiPath("ow/save-zone"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename: "groups_index.json", content: JSON.stringify(index, null, 2) })
+      });
+    }
+    showSaveToast('Group');
+  } catch { /* ignore */ }
+}
+
+async function deleteGroup(groupId) {
+  const fname = groupFilename(groupId);
+  try {
+    await fetch(apiPath("ow/delete-zone"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename: fname })
+    });
+    // Remove from groups_index.json
+    const indexRes = await fetch(apiPath("config/zones/groups_index.json") + "?v=" + Date.now());
+    let index = indexRes.ok ? await indexRes.json() : [];
+    index = index.filter(f => f !== fname);
+    await fetch(apiPath("ow/save-zone"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename: "groups_index.json", content: JSON.stringify(index, null, 2) })
+    });
+  } catch { /* ignore */ }
+}
+
+/* Group state helpers */
+function getGroupState(group) {
+  const members = (group.zone_ids || []).map(id => zones.find(z => z.id === id)).filter(Boolean);
+  if (!members.length) return { anyTriggered: false, anyArmed: false, allDisarmed: true };
+  const anyTriggered = members.some(z => getZoneState(z) === "triggered");
+  const anyArmed     = members.some(z => getZoneState(z) !== "disabled");
+  const allDisarmed  = members.every(z => getZoneState(z) === "disabled");
+  return { anyTriggered, anyArmed, allDisarmed };
+}
+
+
+function currentGroupIdForZone(zoneId) {
+  const group = groups.find(g => (g.zone_ids || []).includes(zoneId));
+  return group ? group.id : '';
+}
+
+async function setZoneGroup(zoneId, groupId) {
+  const changed = [];
+  groups.forEach(g => {
+    const before = (g.zone_ids || []).slice();
+    g.zone_ids = before.filter(id => id !== zoneId);
+    if (before.length !== g.zone_ids.length) changed.push(g);
+  });
+  if (groupId) {
+    const target = groups.find(g => g.id === groupId);
+    if (target && !(target.zone_ids || []).includes(zoneId)) {
+      target.zone_ids = [...(target.zone_ids || []), zoneId];
+      if (!changed.includes(target)) changed.push(target);
+      localStorage.setItem(`zedGroup_${target.id}`, 'expanded');
+    }
+  }
+  for (const g of changed) await saveGroup(g);
+  selectedGroupId = null;
+  renderZones();
+  renderZonesEditor(true);
+}
+
+function setGroupArmed(groupId, armed) {
+  const group = groups.find(g => g.id === groupId);
+  if (!group) return;
+  // Toggle each member zone switch in HA
+  (group.zone_ids || []).forEach(zoneId => {
+    const z = zones.find(z => z.id === zoneId);
+    if (z) owCallSwitch(`switch.overwatch_zone_${zoneSlug(z)}`, armed);
+  });
+  // Toggle the group switch in HA
+  owCallSwitch(`switch.overwatch_zone_group_${groupSlug(group)}`, armed);
+  renderZonesEditor();
+}
+
+/* ─── UNDO ────────────────────────────────────────────────── */
+function pushUndo() {
+  undoStack.push(JSON.stringify(zones));
+  if (undoStack.length > 50) undoStack.shift();
+}
+
+function undoZones() {
+  if (!undoStack.length) return;
+  try {
+    zones = JSON.parse(undoStack.pop());
+    saveZones();
+    renderZones();
+    renderZonesEditor();
+  } catch { /* ignore */ }
+}
+
+/* ─── HA ENTITY TYPE DETECTION ───────────────────────────── */
+function detectEntityType(entityId) {
+  const id = (entityId || "").toLowerCase();
+  if (id.startsWith("binary_sensor.") || id.startsWith("sensor.")) {
+    if (id.includes("person") || id.includes("presence")) return "person";
+    if (id.includes("animal") || id.includes("pet") || id.includes("dog") || id.includes("cat")) return "animal";
+    if (id.includes("vehicle") || id.includes("car") || id.includes("truck")) return "vehicle";
+    if (id.includes("motion") || id.includes("occupancy")) return "motion";
+    if (id.includes("door")) return "door";
+    if (id.includes("window")) return "window";
+    if (id.includes("smoke")) return "smoke";
+    if (id.includes("co") || id.includes("carbon_monoxide")) return "co";
+  }
+  if (id.startsWith("person.")) return "person";
+  return "default";
+}
+
+/* ─── ALARM STATE HELPERS ─────────────────────────────────── */
+function isAlarmArmed() {
+  const alarmEntity = uiConfig.alarm_entity;
+  const checkId = alarmEntity || Object.keys(haStates).find(id => id.startsWith("alarm_control_panel."));
+  if (!checkId) return false;
+  const st = haStates[checkId];
+  if (!st) return false;
+  const s = (st.state || "").toLowerCase();
+  const inverted = !!uiConfig.alarm_entity_inverted;
+  // Standard alarm panel states — not affected by inversion
+  if (s === "armed_home" || s === "armed_away" || s === "armed_night" ||
+      s === "triggered" || s === "pending" || s === "arming") return true;
+  if (s === "disarmed") return false;
+  // Generic on/off entity — inversion swaps the meaning
+  if (inverted) return s === "off";  // off = armed when inverted
+  return s === "on";                  // on = armed normally
+}
+
+function entityTypeColour(type) {
+  const armed  = isAlarmArmed();
+  // If alarm is disarmed but smoke/CO always-armed is enabled, treat smoke & CO as armed
+  const treatAsArmed = armed || (
+    (type === 'smoke' || type === 'co') &&
+    localStorage.getItem('ow_smoke_co_always_armed') === 'true'
+  );
+  const prefix = treatAsArmed ? "color_on_" : "color_off_";
+  const newKey = prefix + type;
+  // localStorage override → uiConfig value → hard-coded default
+  const lsKey  = 'ow_' + newKey;
+  return localStorage.getItem(lsKey) || uiConfig[newKey] || (treatAsArmed ? "#ff3b30" : "#4cd964");
+}
+
+// Always returns the disarmed (off) colour regardless of alarm state
+function entityTypeColourOff(type) {
+  const lsKey = 'ow_color_off_' + type;
+  return localStorage.getItem(lsKey) || uiConfig[`color_off_${type}`] || "#4cd964";
+}
+
+/* ─── ZONE FADE STATE ─────────────────────────────────────── */
+// When a zone's trigger clears, we fade it out over zone_fade_duration seconds
+const zoneFadeState = {}; // zoneId -> { startedAt: ms, hex: string }
+
+function startZoneFade(zoneId, hex) {
+  zoneFadeState[zoneId] = { startedAt: Date.now(), hex };
+}
+
+function getZoneFadeAlpha(zoneId) {
+  const fade = zoneFadeState[zoneId];
+  if (!fade) return 0;
+  // Read duration: localStorage overrides uiConfig, minimum 0.1s to avoid instant clear
+  const _fadeLs = localStorage.getItem('ow_fade_duration');
+  const _fadeCfg = parseFloat(uiConfig.zone_fade_duration);
+  const _fadeVal = _fadeLs !== null ? parseFloat(_fadeLs) : (!isNaN(_fadeCfg) ? _fadeCfg : 3);
+  const dur = Math.max(0.1, isNaN(_fadeVal) ? 3 : _fadeVal) * 1000;
+  const elapsed = Date.now() - fade.startedAt;
+  if (elapsed >= dur) {
+    delete zoneFadeState[zoneId];
+    return 0;
+  }
+  return 0.55 * (1 - elapsed / dur);
+}
+
+/* ─── MASTER ALARM STATE ──────────────────────────────────── */
+// masterEnabled reads from the HA switch entity (switch.overwatch_zone_master).
+// Falls back to localStorage for initial render before HA connects.
+let masterEnabled = localStorage.getItem("masterEnabled") !== "false";
+
+/* ─── ZONE TOGGLE SOURCE ──────────────────────────────────── */
+// 'server' (default) = HA entities are source of truth, toggles call HA switches
+// 'device'           = localStorage per-device, toggles don't affect HA
+const ZONE_MODE_KEY        = 'ow_zone_source';
+const ZONE_LOCAL_PREFIX    = 'ow_zone_enabled_';
+const ZONE_LOCAL_MASTER    = 'ow_zone_master';
+const ZONE_LOCAL_GROUP     = 'ow_zone_group_';
+
+function zoneUseServerState() {
+  return localStorage.getItem(ZONE_MODE_KEY) !== 'device';
+}
+
+// Read zone enabled state — from HA entities (server mode) or localStorage (device mode)
+function zoneIsEnabled(zoneOrId) {
+  const zone = typeof zoneOrId === 'string' ? zones.find(z => z.id === zoneOrId) : zoneOrId;
+  if (!zoneUseServerState()) {
+    return localStorage.getItem(ZONE_LOCAL_PREFIX + (zone?.id || zoneOrId)) !== 'false';
+  }
+  // Server mode — read from haStates (same as getZoneState does)
+  return getZoneState(zone) !== 'disabled';
+}
+
+function setMasterEnabled(val) {
+  masterEnabled = !!val;
+  localStorage.setItem("masterEnabled", masterEnabled);
+  if (zoneUseServerState()) {
+    // Server mode: call HA switch, cascade to all groups and zones
+    owCallSwitch("switch.overwatch_zone_master", val);
+    for (const g of groups) owCallSwitch(`switch.overwatch_zone_group_${groupSlug(g)}`, val);
+    for (const z of zones)  owCallSwitch(`switch.overwatch_zone_${zoneSlug(z)}`, val);
+  } else {
+    // Device mode: store in localStorage
+    localStorage.setItem(ZONE_LOCAL_MASTER, val ? 'true' : 'false');
+    for (const z of zones) localStorage.setItem(ZONE_LOCAL_PREFIX + z.id, val ? 'true' : 'false');
+    for (const g of groups) localStorage.setItem(ZONE_LOCAL_GROUP + g.id, val ? 'true' : 'false');
+  }
+  updateStatusDropdownInPlace();
+  renderZones();
+  logEvent("info", val ? "Master alarm enabled." : "Master alarm disabled.", "system");
+}
+
+function setZoneEnabled(zoneId, val) {
+  const zone = zones.find(z => z.id === zoneId);
+  if (!zone) return;
+  if (zoneUseServerState()) {
+    owCallSwitch(`switch.overwatch_zone_${zoneSlug(zone)}`, !!val);
+  } else {
+    localStorage.setItem(ZONE_LOCAL_PREFIX + zoneId, val ? 'true' : 'false');
+    updateStatusDropdownInPlace();
+    renderZones();
+  }
+  logEvent(
+    "info",
+    val ? `Zone enabled: ${zone.name || zone.id}` : `Zone disabled: ${zone.name || zone.id}`,
+    "zone",
+    { zoneName: zone.name || zone.id, zoneColour: zone.colorHex || "#0096ff" }
+  );
+}
+
+// Issue 30: hide/show a zone visually — no HA entity, no alarm impact
+function setZoneHidden(zoneId, hidden) {
+  const zone = zones.find(z => z.id === zoneId);
+  if (!zone) return;
+  zone.hidden = !!hidden;
+  saveZone(zone);
+  updateStatusDropdownInPlace();
+  renderZones();
+  logEvent(
+    "info",
+    hidden ? `Zone hidden: ${zone.name || zone.id}` : `Zone visible: ${zone.name || zone.id}`,
+    "zone",
+    { zoneName: zone.name || zone.id, zoneColour: zone.colorHex || "#0096ff" }
+  );
+}
+
+/* ─── ENTITY SYNC (dashboard → HA via service call) ──────── */
+// Toggle a zone/group/master switch entity in HA directly.
+// The dashboard reads the state back from haStates (WS subscription).
+// Trigger HA to reload the Overwatch integration so new entities appear without HA restart.
+// Debounced — multiple saves in quick succession only trigger one reload.
+let _haReloadTimer = null;
+function scheduleHAReload(delayMs = 3000) {
+  if (_haReloadTimer) clearTimeout(_haReloadTimer);
+  _haReloadTimer = setTimeout(async () => {
+    try {
+      await fetch(apiPath("ow/reload"), { method: "POST" });
+      logEvent("info", "HA integration reloaded — new entities now active.", "system");
+    } catch {}
+  }, delayMs);
+}
+
+// Convert friendly name to HA entity ID slug
+// "Asphalt Right" -> "asphalt_right" -> switch.overwatch_zone_asphalt_right
+// Must match the nameSlug() function in server.js /ow/zones endpoint
+function nameSlug(name) {
+  return (name || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+}
+function zoneSlug(zone)  { return nameSlug(zone.name)  || zone.id; }
+function groupSlug(group) { return nameSlug(group.name) || group.id; }
+
+function owCallSwitch(entityId, on) {
+  if (IS_DIRECT_MODE) {
+    // Direct Mode: no WebSocket — call HA via backend REST proxy
+    fetch("ow/call-service", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ domain: "switch", service: on ? "turn_on" : "turn_off", entity_id: entityId }),
+    }).catch(e => console.warn("[OW] owCallSwitch REST failed:", e.message));
+    return;
+  }
+  if (!haConnected || !haSocket) {
+    console.warn("[OW] owCallSwitch skipped — not connected:", entityId);
+    return;
+  }
+  console.log(`[OW] owCallSwitch: ${on ? "turn_on" : "turn_off"} ${entityId}`);
+  sendHA({
+    type: "call_service",
+    domain: "switch",
+    service: on ? "turn_on" : "turn_off",
+    service_data: { entity_id: entityId },
+  });
+}
+
+function zoneEntityId(zone) {
+  return `switch.overwatch_zone_${zoneSlug(zone)}`;
+}
+
+function masterEntityId() {
+  return "switch.overwatch_zone_master";
+}
+
+function syncZoneToHA(zone, zoneState) {
+  const on = zoneState !== "disabled";
+  owCallSwitch(zoneEntityId(zone), on);
+}
+
+function syncMasterToHA(armed) {
+  owCallSwitch(masterEntityId(), armed);
+}
+
+/* ─── ZONE STATE COMPUTATION ──────────────────────────────── */
+function isEntityTriggered(entityId) {
+  const st = haStates[entityId];
+  if (!st) return false;
+  const s = (st.state || "").toLowerCase();
+  return s === "on" || s === "open" || s === "opening" || s === "detected" || s === "home" || s === "triggered" || s === "unlocked";
+}
+function zoneTriggerEntities(zone) {
+  if (!zone) return [];
+  // Door pins are evaluated via isDoorTriggered() (sensor OR optional control).
+  // This returns zone-linked sensor entities only.
+  return (zone.sensors || []).filter(e => !isEntityGhosted(e));
+}
+
+function zoneActiveTriggerEntity(zone) {
+  if (!zone) return '';
+  const s = (zone.sensors || []).filter(e => !isEntityGhosted(e)).find(isEntityTriggered);
+  if (s) return s;
+  const dp = doorPins
+    .filter(p => doorPinZoneIds(p).includes(zone.id))
+    .find(p => isDoorTriggered(p));
+  return dp ? (doorPinTriggerSourceEntity(dp) || dp.sensor_entity || dp.control_entity || '') : '';
+}
+
+
+/* Track previous zone states to detect trigger→normal transitions */
+const zonePrevState = {};
+
+function getZoneState(zone) {
+  // Read enabled state — from localStorage (device mode) or HA switch entities (server mode)
+  let enabled, masterOn;
+  if (!zoneUseServerState()) {
+    enabled  = localStorage.getItem(ZONE_LOCAL_PREFIX + zone.id) !== 'false';
+    masterOn = localStorage.getItem(ZONE_LOCAL_MASTER) !== 'false';
+  } else {
+    const switchState = haStates[`switch.overwatch_zone_${zoneSlug(zone)}`];
+    enabled = switchState ? switchState.state !== "off" : zone.enabled !== false;
+    const masterSwitch = haStates["switch.overwatch_zone_master"];
+    masterOn = masterSwitch ? masterSwitch.state !== "off" : masterEnabled;
+  }
+
+  if (!enabled || !masterOn) return "disabled";
+  if (!haConnected) return "normal";
+  const sensors = (zone.sensors || []).filter(e => !isEntityGhosted(e));
+  const zoneDoorPins = doorPins.filter(p => doorPinZoneIds(p).includes(zone.id));
+  if (!sensors.length && !zoneDoorPins.length) return "normal";
+  const anyTriggered = sensors.some(isEntityTriggered) || zoneDoorPins.some(isDoorTriggered);
+  // Only fault if haStates has loaded (>50 entities) — avoids false fault at startup
+  // before the get_states response arrives. Also allow a brief grace period via
+  // haStatesLoaded flag set after the first successful states fetch.
+  const statesReady = haStatesLoaded || Object.keys(haStates).length > 50;
+  const anyUnavailable = statesReady && sensors.some(id => {
+    const st = haStates[id];
+    return !st || st.state === "unavailable";
+  });
+  if (anyTriggered)   return "triggered";
+  if (anyUnavailable) return "fault";
+  return "normal";
+}
+
+/* ─── ZONE STATE CHANGE TRACKING & LOGGING ────────────────── */
+// Called after every HA state update (not from the render loop).
+// Compares all zone states against previous, logs transitions, starts fades.
+function checkZoneStateChanges() {
+  if (!haConnected) return;
+  for (const zone of zones) {
+    const sensors = zoneTriggerEntities(zone);
+    const zoneDoorPins = doorPins.filter(p => doorPinZoneIds(p).includes(zone.id));
+    // Compute raw state without the prev-state side effects
+    let state = "normal";
+    if (getZoneState(zone) === "disabled") {
+      state = "disabled";
+    } else {
+      const anyTriggered = sensors.some(isEntityTriggered) || zoneDoorPins.some(isDoorTriggered);
+      const statesReady2   = haStatesLoaded || Object.keys(haStates).length > 50;
+      const anyUnavailable = statesReady2 && sensors.length > 0 && sensors.some(id => {
+        const st = haStates[id];
+        return !st || (st.state || "").toLowerCase() === "unavailable";
+      });
+      if (anyTriggered)   state = "triggered";
+      else if (anyUnavailable) state = "fault";
+    }
+
+    const prev = zonePrevState[zone.id];
+
+    // Normal → Triggered: clear any stale fade (zone is lit up again)
+    if (prev !== "triggered" && state === "triggered") {
+      delete zoneFadeState[zone.id]; // cancel any in-progress fade
+      const triggeredEntity = sensors.find(isEntityTriggered) || sensors[0];
+      const type            = detectEntityType(triggeredEntity || "");
+      const zoneColour      = resolveColour(entityTypeColour(type));
+      const armedStr        = isAlarmArmed()
+        ? (uiConfig.alarm_label_armed    || "Armed")
+        : (uiConfig.alarm_label_disarmed || "Disarmed");
+      logEvent(
+        "warn",
+        `Triggered — ${triggeredEntity || "unknown"} [${armedStr}]`,
+        "zone",
+        { zoneName: zone.name || zone.id, zoneColour, entityId: triggeredEntity }
+      );
+      syncZoneToHA(zone, "triggered");
+    }
+
+    // Triggered → anything else (cleared): always start a fresh fade
+    if (prev === "triggered" && state !== "triggered") {
+      const type       = detectEntityType(sensors[0] || "");
+      const zoneColour = resolveColour(entityTypeColour(type));
+      startZoneFade(zone.id, zoneColour); // always fresh — prev trigger cleared
+      logEvent(
+        "ok",
+        `Cleared`,
+        "zone",
+        { zoneName: zone.name || zone.id, zoneColour }
+      );
+      syncZoneToHA(zone, state);
+    }
+
+    // Normal → Fault (new offline entity)
+    if (prev !== "fault" && state === "fault") {
+      const offlineEntity = sensors.find(id => {
+        const st = haStates[id];
+        return !st || (st.state || "").toLowerCase() === "unavailable";
+      });
+      logEvent(
+        "warn",
+        `Fault — entity unavailable: ${offlineEntity || "unknown"}`,
+        "zone",
+        { zoneName: zone.name || zone.id, zoneColour: "#ff9500", entityId: offlineEntity }
+      );
+      syncZoneToHA(zone, "fault");
+    }
+
+    // Fault → normal/cleared
+    if (prev === "fault" && state === "normal") {
+      logEvent(
+        "ok",
+        `Fault cleared`,
+        "zone",
+        { zoneName: zone.name || zone.id, zoneColour: "#ff9500" }
+      );
+      syncZoneToHA(zone, "normal");
+    }
+
+    zonePrevState[zone.id] = state;
+  }
+
+  // ── Auto floor switching ──────────────────────────────────────
+  if (floors.length > 1 && localStorage.getItem("ow_auto_floor") === "true") {
+    _evaluateAutoFloor();
+  }
+}
+
+// Auto floor switch state
+let _autoFloorStayTimer   = null;
+let _autoFloorReturnTimer = null;
+let _autoFloorLocked      = false; // true while stay timer is running
+
+function _evaluateAutoFloor() {
+  // Find all currently triggered zones and their floors
+  const triggered = zones.filter(z => {
+    const state = getZoneState(z);
+    return state === "triggered";
+  });
+
+  if (triggered.length === 0) {
+    // Nothing triggered — if we're not locked, nothing to do
+    // If stay timer already running, let it run
+    return;
+  }
+
+  // Collision resolution: armed beats disarmed, then most recent sensor change
+  function zoneScore(z) {
+    const isArmed  = getZoneState(z) !== "disabled";
+    const sensors  = z.sensors || [];
+    const lastSeen = sensors.reduce((best, sid) => {
+      const st = haStates[sid];
+      if (!st) return best;
+      const ts = new Date(st.last_changed || 0).getTime();
+      return ts > best ? ts : best;
+    }, 0);
+    return { isArmed, lastSeen };
+  }
+
+  const winner = triggered.sort((a, b) => {
+    const sa = zoneScore(a), sb = zoneScore(b);
+    if (sa.isArmed !== sb.isArmed) return sa.isArmed ? -1 : 1;
+    return sb.lastSeen - sa.lastSeen;
+  })[0];
+
+  const fi    = floors.findIndex(f => f.id === winner.floor_id) >= 0
+    ? floors.findIndex(f => f.id === winner.floor_id)
+    : 0;
+  const targetFloorId = floors[fi]?.id;
+
+  if (!targetFloorId || targetFloorId === activeFloorId) {
+    // Already on the right floor — reset stay timer
+    if (_autoFloorStayTimer) { clearTimeout(_autoFloorStayTimer); _autoFloorStayTimer = null; }
+    _startStayTimer();
+    return;
+  }
+
+  // Switch to winning floor
+  _autoFloorLocked = true;
+  if (_autoFloorReturnTimer) { clearTimeout(_autoFloorReturnTimer); _autoFloorReturnTimer = null; }
+  setActiveFloor(targetFloorId);
+  renderZones();
+  if (editorMode) renderZonesEditor();
+  if (document.getElementById("floorFlyout")) renderFloorFlyout();
+
+  _startStayTimer();
+}
+
+function _startStayTimer() {
+  if (_autoFloorStayTimer) clearTimeout(_autoFloorStayTimer);
+  const staySecs = parseInt(localStorage.getItem("ow_floor_stay_secs") || "30");
+  _autoFloorStayTimer = setTimeout(() => {
+    _autoFloorStayTimer = null;
+    _startReturnTimer();
+  }, staySecs * 1000);
+}
+
+function _startReturnTimer() {
+  if (_autoFloorReturnTimer) clearTimeout(_autoFloorReturnTimer);
+  const returnSecs = parseInt(localStorage.getItem("ow_floor_return_secs") || "60");
+  _autoFloorReturnTimer = setTimeout(() => {
+    _autoFloorReturnTimer = null;
+    _autoFloorLocked = false;
+    const defaultFloorId = localStorage.getItem("ow_default_floor") || floors[0]?.id;
+    if (defaultFloorId && defaultFloorId !== activeFloorId) {
+      setActiveFloor(defaultFloorId);
+      renderZones();
+      if (editorMode) renderZonesEditor();
+      if (document.getElementById("floorFlyout")) renderFloorFlyout();
+    }
+  }, returnSecs * 1000);
+}
+// Flash phase: alternates between high/low opacity — JS-driven, no CSS animation needed
+let flashPhase = false;
+setInterval(() => {
+  flashPhase = !flashPhase;
+  if (haConnected || Object.keys(zoneFadeState).length > 0) renderZones();
+
+  // Live-update all dots in the dropdown if it's open
+  if (haConnected) {
+    const dd = document.getElementById("statusDropdown");
+    if (dd && dd.style.display !== "none") {
+
+      // ── Zone member dots ───────────────────────────────────
+      dd.querySelectorAll(".zone-list-dot[data-zone-id]").forEach(dot => {
+        const zone = zones.find(z => z.id === dot.dataset.zoneId);
+        if (!zone) return;
+        const st = getZoneState(zone);
+        const isOff = getZoneState(zone) === "disabled";
+        const activeEntity = zoneActiveTriggerEntity(zone);
+        const anyActive = !!activeEntity;
+        const isDisarmedActive = isOff && anyActive;
+        const isTriggered = st === "triggered";
+        dot.classList.toggle("flashing", isTriggered || isDisarmedActive);
+        dot.style.background = isTriggered
+          ? "#ff3b30"
+          : isDisarmedActive
+          ? resolveColour(entityTypeColourOff(detectEntityType(activeEntity || "door")))
+          : st === "fault" ? "#ff9500"
+          : isOff ? (zone.colorHex || "#0096ff")  // disarmed + clear → zone colour dimmed
+          :          "#ff3b30";                     // armed + clear → red
+        dot.style.opacity = (isOff && !isDisarmedActive) ? "0.3" : "1";
+      });
+
+      // ── Group dots ─────────────────────────────────────────
+      dd.querySelectorAll(".zone-list-dot[data-group-dot]").forEach(dot => {
+        const gid = dot.dataset.groupDot;
+        let members;
+        if (gid === "__ungrouped") {
+          const groupedIds = new Set(groups.flatMap(g => g.zone_ids || []));
+          members = zones.filter(z => !groupedIds.has(z.id));
+        } else {
+          const group = groups.find(g => g.id === gid);
+          if (!group) return;
+          members = (group.zone_ids || []).map(id => zones.find(z => z.id === id)).filter(Boolean);
+          dot._groupHex = group.colorHex || "#ff3b30";
+        }
+        const groupHex = dot._groupHex || "#888";
+
+        if (!members.length) {
+          dot.style.background = groupHex;
+          dot.style.opacity = "0.3";
+          dot.classList.remove("flashing");
+          return;
+        }
+
+        const anyTriggered  = members.some(z => getZoneState(z) === "triggered");
+        const allArmed      = members.every(z => getZoneState(z) !== 'disabled');
+        const allDisarmed   = members.every(z => getZoneState(z) === "disabled");
+        const someArmed     = !allArmed && !allDisarmed; // mixed
+
+        // Colour logic:
+        // All armed            → red (solid or flashing if triggered)
+        // Mixed armed/disarmed → orange (solid or flashing if triggered)
+        // All disarmed         → group colour (dimmed)
+        const colour  = allDisarmed ? groupHex
+                      : someArmed   ? "#ff9500"  // orange = mixed
+                      :               "#ff3b30";  // red = all armed
+        const opacity = allDisarmed ? 0.35 : 1;
+        const flash   = anyTriggered && !allDisarmed;
+
+        dot.classList.toggle("flashing", flash);
+        dot.style.background = colour;
+        dot.style.opacity    = String(opacity);
+      });
+    }
+
+    // Update status bar dot
+    const dotEl = document.getElementById("statusDot");
+    if (dotEl) {
+      const anyTriggered = zones.some(z => getZoneState(z) === "triggered");
+      if (anyTriggered) dotEl.classList.add("triggered");
+      else if (!dotEl.classList.contains("armed-away") && !dotEl.classList.contains("armed-home")) {
+        dotEl.classList.remove("triggered");
+      }
+    }
+  }
+}, 700);
+
+function renderZones() {
+  if (_pinDragging) return; // never re-render during drag — would remove dragged element
+  // In multi-panel mode, render to each panel's SVG instead of the single zonesSvg
+  if (getNumPanels() > 1 && document.querySelector('.floor-panel')) {
+    renderAllPanelZones();
+    return;
+  }
+  _renderZonesInternal();
+  renderPins(); // render lights & sirens on single panel
+}
+
+// Internal zone drawing — draws into whatever element currently has id="zonesSvg"
+// Called by renderZones() (single panel) and renderPanelZones() (multi-panel via ID swap)
+function _renderZonesInternal(targetSvg) {
+  const svg = targetSvg || document.getElementById("zonesSvg");
+  if (!svg) return;
+  // Clear SVG — but preserve any pin element currently being dragged
+  if (_pinDragging) {
+    // Remove everything EXCEPT the currently dragged pin element
+    Array.from(svg.childNodes).forEach(child => {
+      if (child.dataset?.pinId !== undefined && child === svg.querySelector(`[data-pin-id="${_draggingPinId}"]`)) return;
+      svg.removeChild(child);
+    });
+  } else {
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+  }
+
+  const now = Date.now();
+  const showHighlight      = highlightedZoneId  && now < highlightedUntil;
+  const showGroupHighlight = highlightedGroupId && now < highlightedGroupUntil;
+
+  // ── Group member highlight layer ────────────────────────────
+  // Works in both editor mode (selectedGroupId) and live mode (highlightedGroupId from dropdown).
+  const _curFloorId   = activeFloorId;
+  const _isFirstFloor = !_curFloorId || floors.length === 0 || floors[0]?.id === _curFloorId;
+  const activeGrpId  = (editorMode && selectedGroupId) ? selectedGroupId
+                     : showGroupHighlight ? highlightedGroupId : null;
+  if (activeGrpId) {
+    const activeGrp = groups.find(g => g.id === activeGrpId);
+    if (activeGrp) {
+      const grpHex = activeGrp.colorHex || "#ff3b30";
+
+      // Single fill-only pass — no per-polygon strokes so overlaps never show seams
+      const fillGroup = document.createElementNS("http://www.w3.org/2000/svg", "g");
+      fillGroup.setAttribute("fill", grpHex);
+      fillGroup.setAttribute("fill-opacity", "0.72");
+      fillGroup.setAttribute("stroke", "none");
+      fillGroup.setAttribute("style", `filter: drop-shadow(0 0 3px ${grpHex})`);
+
+      let hasMembers = false;
+      (activeGrp.zone_ids || []).forEach(zid => {
+        const zone = zones.find(z => z.id === zid);
+        if (!zone || !zone.points?.length || zone.hidden) return;
+        // Filter by floor: zones with floor_id only show on their assigned floor
+        if (floors.length > 1 && zone.floor_id && zone.floor_id !== _curFloorId) return;
+        const poly = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
+        poly.setAttribute("points", zone.points.map(p => `${p.x},${p.y}`).join(" "));
+        fillGroup.appendChild(poly);
+        hasMembers = true;
+      });
+
+      if (hasMembers) svg.appendChild(fillGroup);
+    }
+  }
+
+  // Flash mode: 'zone' = only the triggered zone flashes, 'group' = all zones in the group flash
+  const flashMode = localStorage.getItem('ow_flash_mode') || 'zone';
+  const groupFlashZoneIds = new Set();
+  if (flashMode === 'group') {
+    zones.forEach(zone => {
+      if (haConnected && getZoneState(zone) === 'triggered') {
+        // Find which group this zone belongs to and add all member zones
+        const parentGroup = groups.find(g => (g.zone_ids || []).includes(zone.id));
+        if (parentGroup) {
+          (parentGroup.zone_ids || []).forEach(id => groupFlashZoneIds.add(id));
+        } else {
+          groupFlashZoneIds.add(zone.id); // ungrouped — flash itself
+        }
+      }
+    });
+  }
+
+  // Filter to active floor — zones with no floor_id belong to the first floor
+  // Exception: in multi-panel mode, unassigned zones show on ALL panels so
+  // panels aren't empty before users assign zones to floors.
+  const currentFloorId = _curFloorId;
+  const isFirstFloor   = _isFirstFloor;
+  const inMultiPanel   = getNumPanels() > 1 && document.querySelector('.floor-panel');
+
+  zones.forEach(zone => {
+    const zoneFloor = zone.floor_id;
+    if (currentFloorId && floors.length > 1) {
+      // Zones with floor_id: only show on their assigned floor's panel
+      if (zoneFloor && zoneFloor !== currentFloorId) return;
+      // Zones without floor_id: belong to first floor only
+      if (!zoneFloor && !isFirstFloor) return;
+    }
+
+    const pts = zone.points || [];
+    if (!pts.length) return;
+
+
+    const isSelected     = zone.id === selectedZoneId;
+    const isHighlight    = showHighlight && zone.id === highlightedZoneId;
+    const zoneState    = getZoneState(zone);
+    const isDisabled   = zoneState === "disabled";
+    const isHidden     = zone.hidden === true;
+    const isTriggered  = haConnected && zoneState === "triggered";
+    const isFault      = haConnected && zoneState === "fault";
+    const fadeAlpha    = getZoneFadeAlpha(zone.id);
+    const isFading     = fadeAlpha > 0;
+    const showInLive   = isHighlight || isTriggered || isFault || isFading;
+
+    // Hidden zones: never show in live mode, show faded outline in editor only
+    if (isHidden && !editorMode) return;
+    // In live mode: show all non-hidden zones (disarmed zones show with off-colours)
+    if (!editorMode && !pts.length) return;
+
+    // Group member zones are already rendered by the group layer above.
+    // Skip individual rendering for them (unless they are also the selected zone).
+    const activeGrp2 = (editorMode && selectedGroupId) ? groups.find(g => g.id === selectedGroupId)
+                     : (showGroupHighlight && highlightedGroupId) ? groups.find(g => g.id === highlightedGroupId)
+                     : null;
+    if (activeGrp2 && (activeGrp2.zone_ids || []).includes(zone.id) && !isSelected && editorMode) return;
+
+    const pointsStr = pts.map(p => `${p.x},${p.y}`).join(" ");
+
+    const poly = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
+    poly.setAttribute("points", pointsStr || "0,0");
+    poly.dataset.zoneId = zone.id;
+
+    let cls = "zone-polygon";
+    if (editorMode && isSelected) cls += " selected";
+    if (isHighlight) cls += " zone-highlight";
+    poly.setAttribute("class", cls);
+
+    if (isHighlight) {
+      // Highlight: zone's own colour at strong opacity + glow, matching editor selected-zone style
+      const hex = zone.colorHex || "#0096ff";
+      poly.style.fill        = hexToRgba(hex, 0.72);
+      poly.style.stroke      = hex;
+      poly.style.strokeWidth = String(2.5 / zoom.scale);
+      poly.style.filter      = `drop-shadow(0 0 4px ${hex})`;
+
+    } else if (isHidden && editorMode) {
+      // Hidden zone in editor: very faint dotted outline, not interactive
+      poly.style.fill             = "rgba(80,80,80,0.06)";
+      poly.style.stroke           = "rgba(80,80,80,0.20)";
+      poly.style.strokeWidth      = String(1 / zoom.scale);
+      poly.style.strokeDasharray  = String(4 / zoom.scale) + " " + String(6 / zoom.scale);
+      poly.style.pointerEvents    = "none";
+
+    } else if (isDisabled && editorMode) {
+      // Disarmed zone in editor: preserve the configured zone colour, but dim/dash it
+      // so the user can still see/edit zone geometry without implying the zone is armed.
+      const hex = zone.colorHex || "#0096ff";
+      if (isSelected) {
+        poly.style.fill        = hexToRgba(hex, 0.55);
+        poly.style.stroke      = hex;
+        poly.style.strokeWidth = String(2.5 / zoom.scale);
+      } else {
+        poly.style.fill        = hexToRgba(hex, 0.16);
+        poly.style.stroke      = hexToRgba(hex, 0.48);
+        poly.style.strokeWidth = String(1 / zoom.scale);
+      }
+      poly.style.strokeDasharray = String(6 / zoom.scale) + " " + String(4 / zoom.scale);
+
+    } else if (!editorMode && (isTriggered || (flashMode === 'group' && groupFlashZoneIds.has(zone.id) && haConnected))) {
+      const triggeredEntity = zoneActiveTriggerEntity(zone)
+        || zoneActiveTriggerEntity(zones.find(z => groupFlashZoneIds.has(z.id) && getZoneState(z) === 'triggered'));
+      const type = detectEntityType(triggeredEntity || "door");
+      const hex  = resolveColour(entityTypeColour(type));
+      const fillAlpha   = flashPhase ? 0.18 : 0.65;
+      poly.style.transition  = 'none'; // bypass CSS transition so flash is instant
+      poly.style.fill        = hexToRgba(hex, fillAlpha);
+      poly.style.stroke      = hexToRgba(hex, fillAlpha * 0.7);
+      poly.style.strokeWidth = String(1 / zoom.scale);
+
+    } else if (isFading) {
+      const fadeHex = zoneFadeState[zone.id]?.hex || "#ff3b30";
+      // Stroke fades in exact lockstep with fill
+      poly.style.fill        = hexToRgba(fadeHex, fadeAlpha * 0.75);
+      poly.style.stroke      = hexToRgba(fadeHex, fadeAlpha * 0.4);
+      poly.style.strokeWidth = String(1 / zoom.scale);
+
+    } else if (isFault) {
+      // Fault: flash between dark orange and bright yellow for clear distinction
+      poly.style.transition  = 'none';
+      poly.style.fill        = flashPhase ? 'rgba(255,200,0,0.65)' : 'rgba(255,120,0,0.28)';
+      poly.style.stroke      = flashPhase ? 'rgba(255,220,0,0.9)'  : 'rgba(255,120,0,0.5)';
+      poly.style.strokeWidth = String(1.5 / zoom.scale);
+
+    } else if (editorMode) {
+      const hex = zone.colorHex || "#0096ff";
+      if (isSelected) {
+        // Selected zone: strong highlight matching group member style
+        poly.style.fill        = hexToRgba(hex, 0.72);
+        poly.style.stroke      = hex;
+        poly.style.strokeWidth = String(2.5 / zoom.scale);
+      } else {
+        poly.style.fill        = hexToRgba(hex, 0.18);
+        poly.style.stroke      = hexToRgba(hex, 0.35);
+        poly.style.strokeWidth = String(1 / zoom.scale);
+      }
+    } else {
+      // Live mode — transparent unless a sensor/door/window is active
+      const activeEntity = zoneActiveTriggerEntity(zone);
+      const anyActive = !!activeEntity;
+      const hideDisarmedFlash = localStorage.getItem('ow_hide_disarmed_flash') === 'true';
+      if (anyActive && isDisabled && !hideDisarmedFlash) {
+        // Disarmed zone with active sensor/door/window — flash in off-colour
+        const type = detectEntityType(activeEntity || "door");
+        const hex  = resolveColour(entityTypeColourOff(type));
+        const fillAlpha = flashPhase ? 0.15 : 0.45;
+        poly.style.fill        = hexToRgba(hex, fillAlpha);
+        poly.style.stroke      = hexToRgba(hex, fillAlpha * 0.8);
+        poly.style.strokeWidth = String(1 / zoom.scale);
+      } else {
+        // Clear zone — invisible but must still receive clicks
+        poly.style.fill   = 'rgba(0,0,0,0)';
+        poly.style.stroke = 'none';
+      }
+      // ALL live-mode polygons must be clickable to open the zone popup
+      poly.style.pointerEvents = 'all';
+    }
+
+    svg.appendChild(poly);
+    // In live mode, every zone polygon must be clickable to open the zone popup
+    if (!editorMode && !isHidden) poly.style.pointerEvents = 'all';
+
+    // Handles shown when editing points OR when actively creating this zone
+    if (editorMode && isSelected && (isEditingPoints || (isCreatingZone && zone.id === currentNewZone?.id))) {
+      const handleR = 7 / zoom.scale;
+      pts.forEach((p, idx) => {
+        const c = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+        c.setAttribute("cx", p.x);
+        c.setAttribute("cy", p.y);
+        c.setAttribute("r", handleR);
+        c.setAttribute("class", "zone-handle");
+        c.dataset.zoneId = zone.id;
+        c.dataset.index  = idx;
+        svg.appendChild(c);
+      });
+    }
+  });
+}
+
+// Resolve a colour value — if it's a CSS var, look it up from uiConfig directly
+function resolveColour(col) {
+  if (!col) return "#ff3b30";
+  if (col.startsWith("#")) return col;
+  // Fallback: return a safe default
+  return "#ff3b30";
+}
+
+/* ─── YAML EXPORT ─────────────────────────────────────────── */
+function generateZonesYaml() {
+  let out = "zones:\n";
+  zones.forEach(z => {
+    out += ` - id: ${z.id}\n`;
+    out += `   name: "${(z.name || "").replace(/"/g, '\\"')}"\n`;
+    out += `   color: "${z.colorHex || "#0096ff"}"\n`;
+    out += `   enabled: ${z.enabled !== false}\n`;
+    out += `   points:\n`;
+    (z.points  || []).forEach(p => { out += `     - [${Math.round(p.x)}, ${Math.round(p.y)}]\n`; });
+    out += `   sensors:\n`;
+    (z.sensors || []).forEach(s => { out += `     - ${s}\n`; });
+    out += `   cameras:\n`;
+    (z.cameras || []).forEach(s => { out += `     - ${s}\n`; });
+    out += `   lights:\n`;
+    (z.lights  || []).forEach(s => { out += `     - ${s}\n`; });
+    out += `   sirens:\n`;
+    (z.sirens  || []).forEach(s => { out += `     - ${s}\n`; });
+  });
+  return out;
+}
+
+/* ─── ENTITY DOT REFRESH (issue 11 — avoids full re-render while typing) ── */
+function refreshEntityStateDots(container) {
+  if (!container) return;
+  // Update state class on each entity dot without touching inputs
+  container.querySelectorAll(".ha-entity-row").forEach(row => {
+    const entityId = row.dataset.entityId;
+    if (!entityId) return;
+    const dot = row.querySelector(".ha-entity-state");
+    const lbl = row.querySelector(".ha-entity-type");
+    const st = haStates[entityId];
+    const stateStr = st ? st.state : (haConnected ? "unavailable" : "—");
+    const stateClass = st ? (isEntityTriggered(entityId) ? "on" : "off") : "unavailable";
+    if (dot) { dot.className = "ha-entity-state " + stateClass; }
+    if (lbl) lbl.textContent = stateStr;
+  });
+}
+
+/* ─── ZONE EDITOR DOM PRESERVATION ─────────────────────── */
+function captureZoneEditorScrollState(container) {
+  if (!container) return [];
+  return Array.from(container.querySelectorAll('.zed-list, .zed-right-content, .ha-entity-list, #groupMemberList'))
+    .map(el => ({ selector: el.id ? `#${CSS.escape(el.id)}` : `.${Array.from(el.classList).map(c => CSS.escape(c)).join('.')}`, scrollTop: el.scrollTop, scrollLeft: el.scrollLeft }));
+}
+function restoreZoneEditorScrollState(container, state) {
+  if (!container || !state?.length) return;
+  requestAnimationFrame(() => state.forEach(s => { const el = container.querySelector(s.selector); if (el) { el.scrollTop = s.scrollTop; el.scrollLeft = s.scrollLeft; } }));
+}
+function zoneEditorHasActiveControl(container) {
+  const panel = container?.querySelector('.zones-editor');
+  const activeEl = document.activeElement;
+  if (!panel || !activeEl || !panel.contains(activeEl)) return false;
+  return activeEl.matches('input, textarea, select, [contenteditable="true"]') || !!activeEl.closest('.entity-search-results, .zone-handle, .ha-device-tabs');
+}
+
+/* ─── ZONES EDITOR PANEL (draggable) ──────────────────────── */
+let editorPosRestored = false;
+let editorDrag = { active: false, startX: 0, startY: 0 };
+let editorSize = { w: 560, h: 420 };
+let editorPos  = { x: 20, y: 70 };
+
+// Restore saved editor size and position
+(function() {
+  const sw = localStorage.getItem('editorW'), sh = localStorage.getItem('editorH');
+  if (sw) editorSize.w = Math.max(240, parseInt(sw));
+  if (sh) editorSize.h = Math.max(300, parseInt(sh));
+  const sx = localStorage.getItem('editorX'), sy = localStorage.getItem('editorY');
+  if (sx !== null) editorPos.x = Math.max(0, Math.min(window.innerWidth  - 50, parseInt(sx)));
+  if (sy !== null) editorPos.y = Math.max(0, Math.min(window.innerHeight - 50, parseInt(sy)));
+})();
+
+function makeDraggableEditor(containerEl) {
+  const container = containerEl || document.getElementById("zonesEditorContainer");
+  if (!container) return;
+  const panel = container.querySelector(".zones-editor");
+  const titlebar = container.querySelector(".zones-editor-titlebar");
+  if (!panel || !titlebar) return;
+
+  // Restore saved position only once per session
+  if (!editorPosRestored) {
+    editorPosRestored = true;
+    const savedX = localStorage.getItem("editorX");
+    const savedY = localStorage.getItem("editorY");
+    if (savedX !== null) editorPos.x = Math.max(0, Math.min(window.innerWidth  - 50, parseInt(savedX)));
+    if (savedY !== null) editorPos.y = Math.max(0, Math.min(window.innerHeight - 50, parseInt(savedY)));
+  }
+
+  panel.style.left = editorPos.x + "px";
+  panel.style.top  = editorPos.y + "px";
+
+  // Remove any old listeners by cloning the titlebar (simplest approach)
+  const newTitlebar = titlebar.cloneNode(true);
+  titlebar.parentNode.replaceChild(newTitlebar, titlebar);
+
+  newTitlebar.addEventListener("pointerdown", e => {
+    // Don't drag if clicking the close button
+    if (e.target.closest(".zones-editor-close")) return;
+    editorDrag.active = true;
+    editorDrag.startX = e.clientX - editorPos.x;
+    editorDrag.startY = e.clientY - editorPos.y;
+    newTitlebar.setPointerCapture(e.pointerId);
+    e.preventDefault();
+  });
+
+  newTitlebar.addEventListener("pointermove", e => {
+    if (!editorDrag.active) return;
+    editorPos.x = Math.max(0, Math.min(window.innerWidth  - 50, e.clientX - editorDrag.startX));
+    editorPos.y = Math.max(0, Math.min(window.innerHeight - 50, e.clientY - editorDrag.startY));
+    panel.style.left = editorPos.x + "px";
+    panel.style.top  = editorPos.y + "px";
+  });
+
+  newTitlebar.addEventListener("pointerup", () => {
+    editorDrag.active = false;
+    localStorage.setItem("editorX", editorPos.x);
+    localStorage.setItem("editorY", editorPos.y);
+  });
+
+  // Re-wire close button on the cloned titlebar
+  const closeBtn = newTitlebar.querySelector("#zonesCloseBtn");
+  if (closeBtn) {
+    closeBtn.onclick = () => {
+      editorMode = false;
+      isCreatingZone = false;
+      isEditingPoints = false;
+      currentNewZone = null;
+      activePinId = null; activePinType = null;
+      placingPinType = null; placingEntityId = null;
+      editorPosRestored = false;
+      setZoneSvgInteractionState();
+      const zonesBtn = document.getElementById("zonesBtn");
+      if (zonesBtn) zonesBtn.classList.remove("active");
+      closeDoorLinksPopover();
+      renderZonesEditor();
+      renderZones();
+    };
+  }
+}
+
+/* ─── PIN RENDERING (LIGHTS & SIRENS) ────────────────────── */
+// panelIdx: undefined = single panel, number = multi-panel index
+function renderPins(panelIdx) {
+  const hideLights  = localStorage.getItem('ow_hide_lights')   === 'true';
+  const hideSirens  = localStorage.getItem('ow_hide_sirens')   === 'true';
+  const hideCameras = localStorage.getItem('ow_hide_cam_pins') === 'true';
+
+  // Determine SVG and floor context
+  let svg, floorId, isFirst;
+  if (panelIdx !== undefined) {
+    svg     = getPanelSvg(panelIdx);
+    const f = getPanelFloor(panelIdx);
+    floorId = f?.id || null;
+    isFirst = floors.length === 0 || floors[0]?.id === floorId;
+  } else {
+    svg     = document.getElementById('zonesSvg');
+    floorId = activeFloorId;
+    isFirst = !floorId || floors.length === 0 || floors[0]?.id === floorId;
+  }
+  if (!svg) return;
+
+  // Remove existing pin elements (they have data-pin attribute)
+  // Skip removal if a pin is being dragged — would break pointer capture
+  if (!_pinDragging) {
+    svg.querySelectorAll('[data-pin]').forEach(el => el.remove());
+  }
+
+  const scale = (panelIdx !== undefined ? PANEL_ZOOMS[panelIdx]?.scale : zoom.scale) || 1;
+
+  // Helper: is pin visible on this floor?
+  function pinOnFloor(pin) {
+    if (!pin.floor_id) return isFirst;
+    return pin.floor_id === floorId;
+  }
+
+  // Render lights
+  if (!hideLights) {
+    lights.forEach(pin => {
+      if (!pinOnFloor(pin)) return;
+      const isOn   = haStates[pin.entity_id]?.state === 'on';
+      const isEdit = editorMode && activePinType === 'light' && activePinId === pin.id;
+      svg.appendChild(makeLightPin(pin, isOn, isEdit, scale));
+    });
+  }
+
+  // Render sirens
+  if (!hideSirens) {
+    sirens.forEach(pin => {
+      if (!pinOnFloor(pin)) return;
+      const sirenState = haStates[pin.entity_id]?.state;
+      const isOn   = sirenState === 'on' || (sirenState === 'unknown' && pin._localOn);
+      const isEdit = editorMode && activePinType === 'siren' && activePinId === pin.id;
+      svg.appendChild(makeSirenPin(pin, isOn || isEdit, isEdit, scale));
+    });
+  }
+
+  // Render camera pins
+  if (!hideCameras) {
+    cameraPins.forEach(pin => {
+      if (!pinOnFloor(pin)) return;
+      const isEdit = editorMode && activePinType === 'camera' && activePinId === pin.id;
+      svg.appendChild(makeCameraPin(pin, isEdit, scale));
+    });
+  }
+
+  // Render door pins (always visible — doors are structural)
+  doorPins.forEach(pin => {
+    if (!pinOnFloor(pin)) return;
+    if (pin.x == null || pin.y == null) return; // not placed on map yet
+    const isEdit = editorMode && activePinType === 'door' && activePinId === pin.id;
+    svg.appendChild(makeDoorPin(pin, isEdit, scale));
+  });
+}
+
+function makeLightPin(pin, isOn, isEdit, scale) {
+  const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  g.setAttribute('data-pin', 'light');
+  g.setAttribute('data-pin-id', pin.id);
+  g.style.cursor = 'pointer';
+  g.style.pointerEvents = 'all';
+
+  const ICON_R   = 14 / scale;           // icon badge radius — scales with zoom so it stays same screen size
+  const cx = pin.x, cy = pin.y;
+  const hasDir   = pin.direction !== undefined && pin.direction !== null && pin.direction !== '';
+  // Glow radius — each slider step = 1.5% of image width (finer control)
+  const svgEl   = g.closest('svg') || document.getElementById('zonesSvg');
+  const imgW    = svgEl ? Number(svgEl.getAttribute('width') || 2000) : 2000;
+  const glowRadius = (pin.radius || 3) * (imgW * 0.006); // smaller steps: 1→0.6%, 10→6%
+
+  const showGlow = isOn || (editorMode && isEdit);
+
+  if (showGlow) {
+    const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+    // Very slow, very subtle breathing — mostly steady, just a gentle pulse
+    const breathe = isOn ? (0.85 + 0.15 * Math.sin(Date.now() / 3000 * Math.PI)) : 0.65;
+
+    // Check if any zone at this location is currently triggered — dim glow so zone takes priority
+    const nearTriggeredZone = zones.some(z => {
+      const state = getZoneState(z);
+      if (state !== 'triggered' && state !== 'fault') return false;
+      const pts = z.points || [];
+      if (pts.length < 3) return false;
+      return isPointInPolygon(pin.x, pin.y, pts);
+    });
+    const glowOpacityScale = nearTriggeredZone ? 0.15 : 1.0; // near transparent when zone triggered
+
+    if (!hasDir) {
+      // ── Omnidirectional radial glow ────────────────────────
+      const grad = document.createElementNS('http://www.w3.org/2000/svg', 'radialGradient');
+      grad.id = `lg-${pin.id}`;
+      grad.setAttribute('cx', '50%'); grad.setAttribute('cy', '50%'); grad.setAttribute('r', '50%');
+      const s1 = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
+      s1.setAttribute('offset', '0%');   s1.setAttribute('stop-color', '#ffff44'); s1.setAttribute('stop-opacity', String((0.75 + 0.25 * breathe) * glowOpacityScale));
+      const s2 = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
+      s2.setAttribute('offset', '45%');  s2.setAttribute('stop-color', '#ffee00'); s2.setAttribute('stop-opacity', String((0.35 + 0.30 * breathe) * glowOpacityScale));
+      const s3 = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
+      s3.setAttribute('offset', '100%'); s3.setAttribute('stop-color', '#ffcc00'); s3.setAttribute('stop-opacity', String((0.05 + 0.10 * breathe) * glowOpacityScale));
+      grad.appendChild(s1); grad.appendChild(s2); grad.appendChild(s3); defs.appendChild(grad); g.appendChild(defs);
+
+      const glow = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      glow.setAttribute('cx', cx); glow.setAttribute('cy', cy);
+      glow.setAttribute('r', glowRadius);
+      glow.setAttribute('fill', `url(#lg-${pin.id})`);
+      glow.setAttribute('pointer-events', 'none');
+      g.appendChild(glow);
+
+    } else {
+      // ── Directional cone + small source glow ───────────────
+      const dir    = Number(pin.direction);
+      const spread = pin.spread || 35; // degrees half-angle
+      const rad    = d => d * Math.PI / 180;
+
+      // Cone gradient
+      const coneGrad = document.createElementNS('http://www.w3.org/2000/svg', 'radialGradient');
+      coneGrad.id = `lg-cone-${pin.id}`;
+      coneGrad.setAttribute('cx', '0%'); coneGrad.setAttribute('cy', '50%');
+      coneGrad.setAttribute('r', '100%'); coneGrad.setAttribute('fx', '0%');
+      const c1 = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
+      c1.setAttribute('offset', '0%'); c1.setAttribute('stop-color', '#ffee88'); c1.setAttribute('stop-opacity', String(0.25 + 0.55 * breathe));
+      const c2 = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
+      c2.setAttribute('offset', '100%'); c2.setAttribute('stop-color', '#ffaa00'); c2.setAttribute('stop-opacity', '0');
+      coneGrad.appendChild(c1); coneGrad.appendChild(c2); defs.appendChild(coneGrad); g.appendChild(defs);
+
+      // Cone path: arc-tipped triangle
+      const x1 = cx + glowRadius * Math.sin(rad(dir - spread));
+      const y1 = cy - glowRadius * Math.cos(rad(dir - spread));
+      const x2 = cx + glowRadius * Math.sin(rad(dir + spread));
+      const y2 = cy - glowRadius * Math.cos(rad(dir + spread));
+      const xM = cx + glowRadius * Math.sin(rad(dir));
+      const yM = cy - glowRadius * Math.cos(rad(dir));
+      const cone = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      cone.setAttribute('d', `M${cx},${cy} L${x1},${y1} Q${xM},${yM} ${x2},${y2} Z`);
+      cone.setAttribute('fill', `url(#lg-cone-${pin.id})`);
+      cone.setAttribute('pointer-events', 'none');
+      g.appendChild(cone);
+
+      // Small tight source glow at icon
+      const srcGrad = document.createElementNS('http://www.w3.org/2000/svg', 'radialGradient');
+      srcGrad.id = `lg-src-${pin.id}`;
+      srcGrad.setAttribute('cx', '50%'); srcGrad.setAttribute('cy', '50%'); srcGrad.setAttribute('r', '50%');
+      const ss1 = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
+      ss1.setAttribute('offset', '0%'); ss1.setAttribute('stop-color', '#ffee88'); ss1.setAttribute('stop-opacity', '0.7');
+      const ss2 = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
+      ss2.setAttribute('offset', '100%'); ss2.setAttribute('stop-color', '#ffaa00'); ss2.setAttribute('stop-opacity', '0');
+      srcGrad.appendChild(ss1); srcGrad.appendChild(ss2); defs.appendChild(srcGrad);
+
+      const srcGlow = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      srcGlow.setAttribute('cx', cx); srcGlow.setAttribute('cy', cy);
+      srcGlow.setAttribute('r', ICON_R * 2.5);
+      srcGlow.setAttribute('fill', `url(#lg-src-${pin.id})`);
+      srcGlow.setAttribute('pointer-events', 'none');
+      g.appendChild(srcGlow);
+    }
+  }
+
+  // Small subtle background to make icon readable on any background
+  const bg = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+  bg.setAttribute('cx', cx); bg.setAttribute('cy', cy); bg.setAttribute('r', ICON_R * 0.9);
+  bg.setAttribute('fill', 'rgba(0,0,0,0.45)');
+  bg.setAttribute('stroke', isEdit ? '#0096ff' : (isOn ? 'rgba(255,220,0,0.6)' : 'rgba(255,255,255,0.12)'));
+  bg.setAttribute('stroke-width', String((isEdit ? 2.5 : 1) / scale));
+  g.appendChild(bg);
+
+  // Clean geometric bulb icon — simple shapes readable at any size
+  const iconScale = ICON_R / 10;
+  const iconG = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  iconG.setAttribute('transform', `translate(${cx},${cy}) scale(${iconScale})`);
+  const mk = (tag, attrs) => {
+    const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    Object.entries(attrs).forEach(([k,v]) => el.setAttribute(k, v));
+    return el;
+  };
+  if (isOn) {
+    iconG.appendChild(mk('circle', {cx:'0',cy:'-1',r:'6',fill:'#ffee00'}));
+    iconG.appendChild(mk('rect',   {x:'-3',y:'4',width:'6',height:'2.5',rx:'1',fill:'#ffcc00'}));
+    iconG.appendChild(mk('circle', {cx:'-2',cy:'-3',r:'1.5',fill:'rgba(255,255,255,0.45)'}));
+  } else {
+    iconG.appendChild(mk('circle', {cx:'0',cy:'-1',r:'6',fill:'none',stroke:'#ccc','stroke-width':'1.8'}));
+    iconG.appendChild(mk('rect',   {x:'-3',y:'4',width:'6',height:'2.5',rx:'1',fill:'none',stroke:'#ccc','stroke-width':'1.8'}));
+    iconG.appendChild(mk('line',   {x1:'-4.5',y1:'5',x2:'4.5',y2:'-6',stroke:'#ff6666','stroke-width':'1.8','stroke-linecap':'round'}));
+  }
+  g.appendChild(iconG);
+
+  // Live mode: tap to toggle. Editor mode: handled by makePinDraggable (tap=select, drag=move)
+  if (editorMode) {
+    makePinDraggable(g, pin, 'light');
+  } else {
+    let _moved = false;
+    g.addEventListener('pointerdown', e => { _moved = false; e.stopPropagation(); });
+    g.addEventListener('pointermove', e => { if (Math.hypot(e.movementX, e.movementY) > 2) _moved = true; });
+    g.addEventListener('pointerup',   e => { e.stopPropagation(); if (!_moved) togglePinEntity(pin.entity_id, pin.id); });
+  }
+
+  return g;
+}
+
+function makeSirenPin(pin, isOn, isEdit, scale) {
+  const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  g.setAttribute('data-pin', 'siren');
+  g.setAttribute('data-pin-id', pin.id);
+  g.style.cursor = 'pointer';
+  g.style.pointerEvents = 'all'; // always clickable even when SVG is pointer-events:none
+
+  const R  = 14 / scale;
+  const cx = pin.x, cy = pin.y;
+
+  // Pulsing rings + flash glow when on
+  if (isOn) {
+    const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+    const grad = document.createElementNS('http://www.w3.org/2000/svg', 'radialGradient');
+    grad.id = `sg-${pin.id}`;
+    grad.setAttribute('cx', '50%'); grad.setAttribute('cy', '50%'); grad.setAttribute('r', '50%');
+    const s1 = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
+    s1.setAttribute('offset', '0%'); s1.setAttribute('stop-color', '#ff3b30'); s1.setAttribute('stop-opacity', String(flashPhase ? 0.7 : 0.35));
+    const s2 = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
+    s2.setAttribute('offset', '100%'); s2.setAttribute('stop-color', '#ff3b30'); s2.setAttribute('stop-opacity', '0');
+    grad.appendChild(s1); grad.appendChild(s2); defs.appendChild(grad); g.appendChild(defs);
+
+    // 3 rings at different expansion stages driven by time
+    const ringPhase = (Date.now() % 1600) / 1600;
+    const maxRingR  = R * (2 + (pin.radius || 4)); // radius setting controls max expansion
+
+    // Red glow scaled to match ring max size
+    const flashGlow = document.createElementNS('http://www.w3.org/2000/svg', 'ellipse');
+    flashGlow.setAttribute('cx', cx); flashGlow.setAttribute('cy', cy);
+    flashGlow.setAttribute('rx', maxRingR); flashGlow.setAttribute('ry', maxRingR);
+    flashGlow.setAttribute('fill', `url(#sg-${pin.id})`);
+    g.appendChild(flashGlow);
+    [0, 0.33, 0.66].forEach((offset) => {
+      const phase = (ringPhase + offset) % 1;
+      const ringR = R * 1.2 + (maxRingR - R * 1.2) * phase;
+      const ringO = Math.max(0, 0.7 * (1 - phase));
+      const ring  = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      ring.setAttribute('cx', cx); ring.setAttribute('cy', cy);
+      ring.setAttribute('r', ringR);
+      ring.setAttribute('fill', 'none');
+      ring.setAttribute('stroke', '#ff3b30');
+      ring.setAttribute('stroke-width', String(1.5 / scale));
+      ring.setAttribute('opacity', String(ringO));
+      g.appendChild(ring);
+    });
+  }
+
+  // Subtle background circle — matches light icon style
+  const bg = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+  bg.setAttribute('cx', cx); bg.setAttribute('cy', cy); bg.setAttribute('r', R * 0.9);
+  bg.setAttribute('fill', isOn ? 'rgba(40,0,0,0.5)' : 'rgba(40,40,40,0.5)');
+  bg.setAttribute('stroke', isEdit ? '#0096ff' : (isOn ? 'rgba(255,80,60,0.7)' : 'rgba(255,255,255,0.35)'));
+  bg.setAttribute('stroke-width', String((isEdit ? 2.5 : 1.2) / scale));
+  g.appendChild(bg);
+
+  // No edit ring needed — bg stroke handles it
+  if (isEdit) {
+    // Already handled above
+  }
+
+  // MDI bell icon — mdi:bell / mdi:bell-outline
+  const iconG = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  const sirenIconScale = R / 12;
+  iconG.setAttribute('transform', `translate(${cx - 12 * sirenIconScale},${cy - 12 * sirenIconScale}) scale(${sirenIconScale})`);
+  const bell = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  bell.setAttribute('d', 'M21,19V20H3V19L5,17V11C5,7.9 7.03,5.17 10,4.29C10,4.19 10,4.1 10,4A2,2 0 0,1 12,2A2,2 0 0,1 14,4C14,4.1 14,4.19 14,4.29C16.97,5.17 19,7.9 19,11V17L21,19M14,21A2,2 0 0,1 12,23A2,2 0 0,1 10,21');
+  bell.setAttribute('fill', isOn ? '#ff3b30' : 'none');
+  bell.setAttribute('stroke', isOn ? '#ff1a0e' : '#ccc');
+  bell.setAttribute('stroke-width', isOn ? '0.5' : '1.2');
+  iconG.appendChild(bell);
+  // Off-state: red diagonal slash in MDI 0-24 coordinate space
+  if (!isOn) {
+    const slash = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    slash.setAttribute('x1', '2');  slash.setAttribute('y1', '22');
+    slash.setAttribute('x2', '22'); slash.setAttribute('y2', '2');
+    slash.setAttribute('stroke', '#ff5555');
+    slash.setAttribute('stroke-width', '2');
+    slash.setAttribute('stroke-linecap', 'round');
+    iconG.appendChild(slash);
+  }
+  g.appendChild(iconG);
+
+  if (editorMode) {
+    makePinDraggable(g, pin, 'siren');
+  } else {
+    let _moved = false;
+    g.addEventListener('pointerdown', e => { _moved = false; e.stopPropagation(); });
+    g.addEventListener('pointermove', e => { if (Math.hypot(e.movementX, e.movementY) > 2) _moved = true; });
+    g.addEventListener('pointerup',   e => { e.stopPropagation(); if (!_moved) togglePinEntity(pin.entity_id, pin.id); });
+  }
+
+  return g;
+}
+
+function makeCameraPin(pin, isEdit, scale) {
+  const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  g.setAttribute('data-pin', 'camera');
+  g.setAttribute('data-pin-id', pin.id);
+  g.style.cursor = 'pointer';
+  g.style.pointerEvents = 'all';
+
+  const R  = 14 / scale;
+  const cx = pin.x, cy = pin.y;
+
+  // Background circle
+  const bg = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+  bg.setAttribute('cx', cx); bg.setAttribute('cy', cy); bg.setAttribute('r', R * 0.9);
+  bg.setAttribute('fill', 'rgba(0,0,0,0.25)');
+  bg.setAttribute('stroke', isEdit ? '#0096ff' : 'rgba(100,180,255,0.5)');
+  bg.setAttribute('stroke-width', String((isEdit ? 2.5 : 1.2) / scale));
+  g.appendChild(bg);
+
+  // Camera icon — simple geometric: rectangle body + circle lens
+  const iconS = R / 10;
+  const iconG = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  iconG.setAttribute('transform', `translate(${cx},${cy}) scale(${iconS})`);
+  const mk = (tag, attrs) => {
+    const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    Object.entries(attrs).forEach(([k,v]) => el.setAttribute(k,v));
+    return el;
+  };
+  // Camera body
+  iconG.appendChild(mk('rect', {x:'-7',y:'-4',width:'14',height:'10',rx:'2',fill:'none',stroke:'#64b4ff','stroke-width':'1.5'}));
+  // Lens
+  iconG.appendChild(mk('circle', {cx:'0',cy:'1',r:'3.2',fill:'none',stroke:'#64b4ff','stroke-width':'1.5'}));
+  // Viewfinder bump on top-left
+  iconG.appendChild(mk('rect', {x:'-5',y:'-7',width:'4',height:'3',rx:'1',fill:'#64b4ff'}));
+  g.appendChild(iconG);
+
+  // Interaction
+  if (editorMode) {
+    makePinDraggable(g, pin, 'camera');
+  } else {
+    let _moved = false;
+    g.addEventListener('pointerdown', e => { _moved = false; e.stopPropagation(); });
+    g.addEventListener('pointermove', e => { if (Math.hypot(e.movementX, e.movementY) > 2) _moved = true; });
+    g.addEventListener('pointerup', e => {
+      e.stopPropagation();
+      if (!_moved && pin.entity_id && window.openCameraModal) {
+        window.openCameraModal(pin.entity_id);
+      }
+    });
+  }
+
+  return g;
+}
+
+let activePinType = null; // 'light' | 'siren' | 'camera' | 'door' | null
+let activePinId   = null;
+let placingPinType  = null; // 'light' | 'siren' | 'camera' — click-to-place mode
+let placingEntityId = null;
+let placingZoneId   = null;
+let _placingExistingPinId = null; // if set, update existing pin position rather than create new
+let _activeZoneTab  = 'sensors'; // persists across renderZonesEditor re-renders
+
+function selectPin(type, id) {
+  // Toggle — clicking same pin deselects it
+  if (activePinType === type && activePinId === id) {
+    activePinId = null; activePinType = null;
+  } else {
+    activePinType   = type;
+    activePinId     = id;
+    selectedZoneId  = null;
+    selectedGroupId = null;
+  }
+}
+
+// Called when user clicks a map to place a pin (single or multi-panel)
+function placePinAtFloorplanCoord(x, y, floorId) {
+  const type     = placingPinType;
+  const entityId = placingEntityId || '';
+  const zoneId   = placingZoneId;
+  const existingPinId = _placingExistingPinId;
+  placingPinType  = null;
+  placingEntityId = null;
+  placingZoneId   = null;
+  _placingExistingPinId = null;
+  // Reset cursors
+  document.querySelectorAll('#zonesSvg, .fp-svg').forEach(s => s.style.cursor = '');
+
+  // If placing an existing unpositioned pin (e.g. from search-add), just update its position
+  if (existingPinId && type === 'door') {
+    const existing = doorPins.find(p => p.id === existingPinId);
+    if (existing) {
+      existing.x = Math.round(x);
+      existing.y = Math.round(y);
+      existing.floor_id = floorId || activeFloorId || null;
+      saveDoorPin(existing);
+      selectPin('door', existing.id);
+      renderZones(); renderZonesEditor();
+      return;
+    }
+  }
+
+  // Inherit floor from the zone the entity belongs to
+  const zone = zones.find(z => z.id === zoneId);
+  const pinFloor = zone?.floor_id || floorId || activeFloorId || null;
+
+  const pin = {
+    id:        (type === 'light' ? 'light_' : type === 'siren' ? 'siren_' : type === 'door' ? 'door_' : 'campin_') + Date.now(),
+    name:      entityId.split('.').pop() || (type === 'light' ? 'New Light' : type === 'siren' ? 'New Siren' : type === 'door' ? 'New Door' : 'New Camera'),
+    entity_id: type === 'door' ? undefined : entityId,
+    sensor_entity: type === 'door' ? '' : undefined,
+    control_entity: type === 'door' ? null : undefined,
+    zone_ids: type === 'door' ? [zoneId] : undefined,
+    zone_id:   type === 'door' ? zoneId : undefined,
+    floor_id:  pinFloor,
+    x:         Math.round(x),
+    y:         Math.round(y),
+    rotation:  0,
+    direction: type !== 'door' ? null : undefined,
+  };
+  if (type === 'light')  { lights.push(pin);      saveLight(pin);      selectPin('light',  pin.id); }
+  else if (type === 'siren') { sirens.push(pin);  saveSiren(pin);      selectPin('siren',  pin.id); }
+  else if (type === 'door') { doorPins.push(pin); saveDoorPin(pin);    selectPin('door',   pin.id); }
+  else                   { cameraPins.push(pin);  saveCameraPin(pin);  selectPin('camera', pin.id); }
+  renderZones(); renderZonesEditor();
+}
+
+function makeDoorPin(pin, isEdit, scale) {
+  const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  g.setAttribute('data-pin', 'door');
+  g.setAttribute('data-pin-id', pin.id);
+  g.style.cursor = 'pointer';
+  g.style.pointerEvents = 'all';
+
+  const sensorState  = haStates[pin.sensor_entity]?.state;
+  const isOpen       = ['on','open','opening','detected','unlocked'].includes(String(sensorState || '').toLowerCase());
+  const noSensor     = !pin.sensor_entity;
+  const controlState = pin.control_entity ? haStates[pin.control_entity]?.state : null;
+  const isLocked     = controlState === 'locked' || controlState === 'off';
+  const isUnlocked   = controlState === 'unlocked' || controlState === 'on';
+  const hasControl   = !!pin.control_entity;
+
+  const rootCS     = getComputedStyle(document.documentElement);
+  const colOnDoor  = rootCS.getPropertyValue('--color-door-open').trim()  || '#ff6b35';
+  const colOffDoor = rootCS.getPropertyValue('--color-door-closed').trim() || '#ffcc00';
+
+  // Zone arm state — find the zone this pin belongs to
+  const linkedZones = doorPinZoneIds(pin).map(zid => zones.find(z => z.id === zid)).filter(Boolean);
+  const zoneArmed   = linkedZones.length ? linkedZones.some(z => getZoneState(z) !== 'disabled') : true;
+
+  // Open door: use armed colour if zone armed, disarmed colour if zone disarmed
+  // Closed door: always green (safe, shut)
+  const colOpen = noSensor ? '#888' : zoneArmed ? colOnDoor : colOffDoor;
+  const col     = noSensor ? '#888' : isOpen ? colOpen : '#34c759';
+
+  const mk = (tag, attrs) => {
+    const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    Object.entries(attrs).forEach(([k,v]) => el.setAttribute(k,String(v)));
+    return el;
+  };
+
+  // W = opening width, H = wall/frame height (thickness)
+  const W   = Math.max(4, pin.sizeW || 20);
+  const H   = Math.max(1, pin.sizeH || 4);
+  const T   = Math.max(0.5, W * 0.05);
+  const jT  = T * 1.2;
+
+  const doorType  = pin.doorType || 'single';
+  const doorHand  = pin.doorHand || 'left';
+  const isSliding = doorType === 'sliding';
+  const isDouble  = doorType === 'double';
+
+  const cx = pin.x, cy = pin.y;
+  const rot = pin.rotation || 0;
+  const iconG = mk('g', { transform: `translate(${cx},${cy}) rotate(${rot})` });
+
+  // Jamb rect helper — draws wall segment
+  function jamb(x1, x2) {
+    iconG.appendChild(mk('rect', {
+      x:x1, y:-H/2, width:Math.max(0.5, x2-x1), height:H,
+      fill:col, 'fill-opacity':'0.5', stroke:col, 'stroke-width':T*0.3
+    }));
+  }
+
+  if (isSliding) {
+    // Two jambs + track + panel
+    jamb(-W/2, -W/2+H);  // left jamb
+    jamb( W/2-H,  W/2);  // right jamb
+    // Track
+    iconG.appendChild(mk('line', { x1:-W/2+H, y1:0, x2:W/2-H, y2:0,
+      stroke:col, 'stroke-width':T*0.4, 'stroke-dasharray':`${T*2},${T}` }));
+    const panelW = (W - H*2) * 0.9;
+    if (isOpen) {
+      // Panel at left side
+      iconG.appendChild(mk('rect', { x:-W/2+H, y:-H/2, width:panelW, height:H,
+        fill:col, 'fill-opacity':'0.7', stroke:col, 'stroke-width':T*0.4 }));
+    } else {
+      // Panel centred in opening
+      const gap = (W - H*2 - panelW) / 2;
+      iconG.appendChild(mk('rect', { x:-W/2+H+gap, y:-H/2, width:panelW, height:H,
+        fill:col, 'fill-opacity':'0.5', stroke:col, 'stroke-width':T*0.4 }));
+    }
+
+  } else if (isDouble) {
+    // Two jambs at outer edges, two panels from jamb face to centre
+    jamb(-W/2, -W/2+H);  // left jamb
+    jamb( W/2-H,  W/2);  // right jamb
+    const panelL = W/2 - H;  // each panel length
+
+    [[-W/2+H, 'left'],[W/2-H, 'right']].forEach(([hinge, side]) => {
+      const fx    = 0;
+      const sweep = side === 'left' ? 0 : 1;
+      const panelDX = side === 'left' ? panelL : -panelL;
+      // Hinge dot
+      iconG.appendChild(mk('circle', { cx:hinge, cy:0, r:jT*0.6, fill:col }));
+      if (isOpen) {
+        const angle = side === 'left' ? -90 : 90;
+        const pg = mk('g', { transform:`rotate(${angle},${hinge},0)` });
+        pg.appendChild(mk('line', { x1:hinge, y1:0, x2:hinge+panelDX, y2:0,
+          stroke:col, 'stroke-width':T*1.5 }));
+        iconG.appendChild(pg);
+        iconG.appendChild(mk('path', {
+          d:`M ${hinge} ${-panelL} A ${panelL} ${panelL} 0 0 ${sweep} ${fx} 0`,
+          fill:'none', stroke:col, 'stroke-width':T*0.5, 'stroke-dasharray':`${T*2},${T}`
+        }));
+      } else {
+        iconG.appendChild(mk('line', { x1:hinge, y1:0, x2:fx, y2:0,
+          stroke:col, 'stroke-width':T*1.5 }));
+      }
+    });
+
+  } else {
+    // Single door — left and right jambs (same as double, no centre)
+    jamb(-W/2, -W/2+H);  // hinge-side jamb
+    jamb( W/2-H,  W/2);  // free-side jamb
+
+    // Hinge face x (inner edge of hinge jamb)
+    const hinge  = doorHand === 'left' ? -W/2+H : W/2-H;
+    const freeX  = doorHand === 'left' ?  W/2-H : -W/2+H;
+    const panelL = W - H*2;  // panel = opening minus both jambs
+    const panelDX = doorHand === 'left' ? panelL : -panelL;
+    const sweep  = doorHand === 'left' ? 0 : 1;
+
+    // Hinge dot
+    iconG.appendChild(mk('circle', { cx:hinge, cy:0, r:jT*0.6, fill:col }));
+
+    if (isOpen) {
+      // Panel perpendicular — rotated 90° at hinge face, NO horizontal line
+      const angle = doorHand === 'left' ? -90 : 90;
+      const pg = mk('g', { transform:`rotate(${angle},${hinge},0)` });
+      pg.appendChild(mk('line', { x1:hinge, y1:0, x2:hinge+panelDX, y2:0,
+        stroke:col, 'stroke-width':T*1.5 }));
+      iconG.appendChild(pg);
+      iconG.appendChild(mk('path', {
+        d:`M ${hinge} ${-panelL} A ${panelL} ${panelL} 0 0 ${sweep} ${freeX} 0`,
+        fill:'none', stroke:col, 'stroke-width':T*0.5, 'stroke-dasharray':`${T*2},${T}`
+      }));
+    } else {
+      // Closed — horizontal panel line only, no arc
+      iconG.appendChild(mk('line', { x1:hinge, y1:0, x2:freeX, y2:0,
+        stroke:col, 'stroke-width':T*1.5 }));
+    }
+  }
+
+  // Aura when open — siren-style expanding rings, centred on door opening
+  if (isOpen && !isEdit) {
+    const suppressDisarmed = localStorage.getItem('ow_hide_door_alert_disarmed') === 'true';
+    const showAura = !suppressDisarmed || zoneArmed;
+    if (showAura) {
+    const auraRadius = pin.auraRadius || 3;
+    const maxRingR   = (W/2) * (0.8 + auraRadius * 0.4);
+    const minRingR   = W * 0.1;
+    const ringPhase  = (Date.now() % 1600) / 1600;
+    // Centre: middle of the opening gap (between the two jambs)
+    const auraCX = 0;
+    const auraCY = 0;  // at the threshold line — centre of the door opening
+    const glowId = `dg-${pin.id}`;
+    const defs = mk('defs', {});
+    const grad = mk('radialGradient', { id:glowId, cx:'50%', cy:'50%', r:'50%' });
+    const s1 = mk('stop', { offset:'0%', 'stop-color':colOpen, 'stop-opacity':'0.3' });
+    const s2 = mk('stop', { offset:'100%', 'stop-color':colOpen, 'stop-opacity':'0' });
+    grad.appendChild(s1); grad.appendChild(s2); defs.appendChild(grad);
+    iconG.insertBefore(defs, iconG.firstChild);
+    const glow = mk('ellipse', { cx:auraCX, cy:auraCY, rx:maxRingR, ry:maxRingR, fill:`url(#${glowId})` });
+    iconG.insertBefore(glow, iconG.firstChild);
+    [0, 0.33, 0.66].forEach(offset => {
+      const phase = (ringPhase + offset) % 1;
+      const r     = minRingR + (maxRingR - minRingR) * phase;
+      const op    = Math.max(0, 0.7 * (1 - phase));
+      iconG.appendChild(mk('circle', { cx:auraCX, cy:auraCY, r, fill:'none', stroke:colOpen,
+        'stroke-width':T*0.8, opacity:op }));
+    });
+    }
+  }
+
+  // Editor box
+  if (isEdit) {
+    iconG.appendChild(mk('rect', {
+      x:-W/2-T, y:-W/2-T, width:W+T*2, height:W/2+H/2+T*2,
+      fill:'none', stroke:'#0096ff', 'stroke-width':1.5/scale,
+      rx:1.5/scale, 'stroke-dasharray':`${3/scale},${2/scale}`
+    }));
+  }
+
+  // Lock badge
+  if (hasControl && controlState) {
+    const br = Math.max(2.5, W*0.1);
+    const bx = W/2+br*1.5;
+    const by = -H/2;
+    const lc = isLocked ? '#ff3b30' : '#34c759';
+    iconG.appendChild(mk('circle', { cx:bx, cy:by, r:br, fill:'rgba(10,10,10,0.9)', stroke:lc, 'stroke-width':0.8 }));
+    const sym = mk('text', { x:bx, y:by+br*0.38, 'text-anchor':'middle', 'font-size':br*1.3, fill:lc, 'font-family':'sans-serif', style:'pointer-events:none;user-select:none' });
+    sym.textContent = isLocked ? '🔒' : '🔓';
+    iconG.appendChild(sym);
+  }
+
+  g.appendChild(iconG);
+
+  if (editorMode) {
+    makePinDraggable(g, pin, 'door');
+  } else {
+    let _moved = false;
+    g.addEventListener('pointerdown', e => { _moved = false; e.stopPropagation(); });
+    g.addEventListener('pointermove', e => { if (Math.hypot(e.movementX, e.movementY) > 2) _moved = true; });
+    g.addEventListener('pointerup', e => {
+      e.stopPropagation();
+      if (_moved) return;
+      if (!hasControl || !pin.control_entity) return;
+      const label  = pin.name || pin.sensor_entity?.split('.').pop() || 'door';
+      const action = isLocked ? 'Unlock' : isUnlocked ? 'Lock' : isOpen ? 'Close' : 'Open';
+      if (confirm(`${action} ${label}?`)) {
+        const domain = pin.control_entity.startsWith('lock.') ? 'lock' : 'switch';
+        const svc    = domain === 'lock' ? (isLocked ? 'unlock' : 'lock') : (isLocked ? 'turn_on' : 'turn_off');
+        _callService(pin.control_entity, svc);
+      }
+    });
+  }
+  return g;
+}
+
+function makePinDraggable(g, pin, type) {
+  let dragging = false, startClient = null, startPos = null, hasMoved = false;
+
+  g.addEventListener('pointerdown', e => {
+    if (e.button !== 0 && e.pointerType === 'mouse') return;
+    e.stopPropagation();
+    e.preventDefault();
+    dragging      = true;
+    _pinDragging  = true;
+    _draggingPinId = pin.id;
+    hasMoved      = false;
+    startClient   = { x: e.clientX, y: e.clientY };
+    startPos      = { x: pin.x, y: pin.y };
+    g.setPointerCapture(e.pointerId);
+  });
+
+  g.addEventListener('pointermove', e => {
+    if (!dragging) return;
+    const dx = e.clientX - startClient.x;
+    const dy = e.clientY - startClient.y;
+    if (!hasMoved && Math.hypot(dx, dy) < 4) return;
+    hasMoved = true;
+    // Get zoom scale for this panel/single
+    const panelSvg = g.closest('.fp-svg');
+    let s = zoom.scale || 1;
+    if (panelSvg) {
+      const match = panelSvg.id?.match(/fp-svg-(\d+)/);
+      if (match) s = PANEL_ZOOMS[Number(match[1])]?.scale || 1;
+    }
+    const newX = Math.round(startPos.x + dx / s);
+    const newY = Math.round(startPos.y + dy / s);
+    // Move g visually via SVG translate — no DOM recreation, pointer capture preserved
+    g.setAttribute('transform', `translate(${newX - startPos.x},${newY - startPos.y})`);
+    pin.x = newX;
+    pin.y = newY;
+  });
+
+  g.addEventListener('pointerup', e => {
+    if (!dragging) return;
+    dragging       = false;
+    _pinDragging   = false;
+    _draggingPinId = null;
+    g.removeAttribute('transform');
+    if (hasMoved) {
+      if (type === 'light')  saveLight(pin);
+      else if (type === 'siren') saveSiren(pin);
+      else if (type === 'camera') saveCameraPin(pin);
+      else saveDoorPin(pin);
+      renderZones();
+    } else {
+      e.stopPropagation(); // prevent SVG empty-canvas handler from clearing activePinId
+      selectPin(type, pin.id);
+      console.log('[OW PIN] tap: activePinId=', activePinId, 'selectedZoneId=', selectedZoneId);
+      renderZones();
+      renderZonesEditor();
+    }
+  });
+
+  g.addEventListener('pointercancel', () => { dragging = false; _pinDragging = false; _draggingPinId = null; g.removeAttribute('transform'); });
+}
+
+let _pinAnimRunning = false;
+let _pinDragging    = false; // set during drag to suppress renderPins from removing the dragged element
+let _draggingPinId  = null;  // id of pin currently being dragged
+/* ─── ZONE DETAIL POPUP ───────────────────────────────────── */
+let _zonePopupZoneId = null;
+let _zonePopupEl     = null;
+let _zonePopupTimer  = null; // for camera snapshot refresh
+
+function openZonePopup(zoneId, clientX, clientY) {
+  closeZonePopup();
+  _zonePopupZoneId = zoneId;
+
+  const popup = document.createElement('div');
+  popup.id = 'zonePopup';
+  popup.style.cssText = `
+    position:fixed; z-index:8000;
+    background:rgba(14,14,14,0.97);
+    border:1px solid rgba(255,255,255,0.12);
+    border-radius:12px;
+    box-shadow:0 8px 32px rgba(0,0,0,0.6);
+    width:300px; max-height:80vh;
+    overflow-y:auto;
+    font-size:13px; color:#e0e0e0;
+    pointer-events:all;
+    user-select:none;
+  `;
+  document.body.appendChild(popup);
+  _zonePopupEl = popup;
+
+  // Position: prefer right of click, flip left if near right edge
+  const pw = 308;
+  let left = clientX + 12;
+  let top  = clientY - 40;
+  if (left + pw > window.innerWidth  - 10) left = clientX - pw - 12;
+  if (top  + 500 > window.innerHeight - 10) top  = window.innerHeight - 510;
+  if (top  < 10) top = 10;
+  popup.style.left = left + 'px';
+  popup.style.top  = top  + 'px';
+
+  // ── Make draggable via title bar ─────────────────────────
+  renderZonePopupContent();
+
+  // ── Click-outside to close ────────────────────────────────
+  // Defer by one frame so the opening click doesn't immediately close it
+  requestAnimationFrame(() => {
+    function _outsideClose(e) {
+      if (_zonePopupEl && !_zonePopupEl.contains(e.target)) {
+        closeZonePopup();
+        document.removeEventListener('pointerdown', _outsideClose, true);
+      }
+    }
+    document.addEventListener('pointerdown', _outsideClose, true);
+    // Store ref so closeZonePopup can remove it if called programmatically
+    popup._outsideClose = _outsideClose;
+  });
+
+  // Attach drag after content is rendered (need the titlebar)
+  requestAnimationFrame(() => {
+    const titlebar = popup.querySelector('#zpTitlebar');
+    if (!titlebar) return;
+    let dragging = false, ox = 0, oy = 0;
+    titlebar.style.cursor = 'grab';
+    titlebar.addEventListener('pointerdown', e => {
+      if (e.target.closest('button')) return; // don't drag on button clicks
+      dragging = true;
+      ox = e.clientX - popup.offsetLeft;
+      oy = e.clientY - popup.offsetTop;
+      titlebar.style.cursor = 'grabbing';
+      titlebar.setPointerCapture(e.pointerId);
+      e.preventDefault();
+    });
+    titlebar.addEventListener('pointermove', e => {
+      if (!dragging) return;
+      let nx = e.clientX - ox;
+      let ny = e.clientY - oy;
+      nx = Math.max(0, Math.min(window.innerWidth  - popup.offsetWidth,  nx));
+      ny = Math.max(0, Math.min(window.innerHeight - popup.offsetHeight, ny));
+      popup.style.left = nx + 'px';
+      popup.style.top  = ny + 'px';
+    });
+    titlebar.addEventListener('pointerup',    () => { dragging = false; titlebar.style.cursor = 'grab'; });
+    titlebar.addEventListener('pointercancel',() => { dragging = false; titlebar.style.cursor = 'grab'; });
+  });
+}
+
+function closeZonePopup() {
+  if (_zonePopupTimer) { clearInterval(_zonePopupTimer); _zonePopupTimer = null; }
+  if (_zonePopupEl) {
+    if (_zonePopupEl._outsideClose) {
+      document.removeEventListener('pointerdown', _zonePopupEl._outsideClose, true);
+    }
+    _zonePopupEl.remove();
+    _zonePopupEl = null;
+  }
+  _zonePopupZoneId = null;
+}
+
+function renderZonePopupContent() {
+  const popup = _zonePopupEl;
+  if (!popup || !_zonePopupZoneId) return;
+  const zone = zones.find(z => z.id === _zonePopupZoneId);
+  if (!zone) { closeZonePopup(); return; }
+
+  const showThumbs = localStorage.getItem('ow_zone_popup_thumbs') === 'true';
+  const zState     = getZoneState(zone);
+  const isArmed    = zState !== 'disabled';
+  const sensors_   = (zone.sensors || []).filter(e => !isEntityGhosted(e));
+  const doors_     = doorPins.filter(p => doorPinZoneIds(p).includes(zone.id) && (p.sensor_entity || p.control_entity) && !isEntityGhosted(p.sensor_entity) && !isEntityGhosted(p.control_entity));
+  const lights_    = (zone.lights  || []).filter(e => !isEntityGhosted(e));
+  const sirens_    = (zone.sirens  || []).filter(e => !isEntityGhosted(e));
+  const cameras_   = (zone.cameras || []).filter(e => !isEntityGhosted(e));
+
+  // ── Arm/Disarm row ────────────────────────────────────────
+  const showArmDisarm = canArmDisarm();
+  const armHtml = `
+    <div id="zpTitlebar" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;padding-bottom:10px;border-bottom:1px solid rgba(255,255,255,0.08);">
+      <div style="font-weight:600;font-size:14px;color:#fff;flex:1;">🏠 ${escapeHtml(zone.name)}</div>
+      <div style="display:flex;gap:5px;margin-left:8px;">
+        ${showArmDisarm ? `
+        <button id="zpArm"    style="background:${isArmed   ? 'rgba(0,150,255,0.3)'  : 'rgba(255,255,255,0.06)'};border:1px solid ${isArmed   ? 'rgba(0,150,255,0.6)'  : 'rgba(255,255,255,0.12)'};color:${isArmed   ? '#4db8ff' : '#666'};border-radius:6px;padding:4px 10px;cursor:pointer;font-size:11px;font-weight:600;">Armed</button>
+        <button id="zpDisarm" style="background:${!isArmed  ? 'rgba(255,59,48,0.3)'  : 'rgba(255,255,255,0.06)'};border:1px solid ${!isArmed  ? 'rgba(255,59,48,0.6)'  : 'rgba(255,255,255,0.12)'};color:${!isArmed  ? '#ff6b6b' : '#666'};border-radius:6px;padding:4px 10px;cursor:pointer;font-size:11px;font-weight:600;">Disarmed</button>
+        ` : `<span id="zpArmStatus" style="font-size:11px;color:#555;padding:4px 6px;">${isArmed ? '🔵 Armed' : '⚪ Disarmed'}</span>`}
+        <button id="zpClose"  style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);color:#888;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:12px;line-height:1;">✕</button>
+      </div>
+    </div>`;
+
+  // ── Sensors ───────────────────────────────────────────────
+  const sensorHtml = sensors_.length ? `
+    <div style="margin-bottom:10px;">
+      <div style="font-size:10px;text-transform:uppercase;color:#555;letter-spacing:0.1em;margin-bottom:4px;">Sensors</div>
+      ${sensors_.map(e => {
+        const triggered = isEntityTriggered(e);
+        const state = haStates[e]?.state || '—';
+        return `<div data-sensor-id="${escapeHtml(e)}" style="display:flex;align-items:center;padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.04);">
+          <span class="sensor-dot" style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${triggered ? '#ff3b30' : '#34c759'};margin-right:7px;flex-shrink:0;"></span>
+          <span style="flex:1;color:#ccc;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(e.split('.').pop())}</span>
+          <span class="sensor-state" style="color:${triggered ? '#ff6b6b' : '#34c759'};font-size:11px;font-weight:600;margin-left:6px;">${escapeHtml(state.toUpperCase())}</span>
+        </div>`;
+      }).join('')}
+    </div>` : '';
+
+  // ── Doors & Windows ───────────────────────────────────────
+  const doorHtml = doors_.length ? `
+    <div style="margin-bottom:10px;">
+      <div style="font-size:10px;text-transform:uppercase;color:#555;letter-spacing:0.1em;margin-bottom:4px;">Doors & Windows</div>
+      ${doors_.map(pin => {
+        const sensorId = pin.sensor_entity || '';
+        const state = doorPinDisplayState(pin);
+        const open = pin.sensor_entity ? doorPinIsOpen(pin) : false;
+        const info = doorControlInfo(pin);
+        const label = pin.name || sensorId.split('.').pop() || pin.control_entity || 'door/window';
+        return `<div class="zp-door-row" data-door-pin-id="${escapeHtml(pin.id)}" data-door-sensor-id="${escapeHtml(sensorId)}" style="display:flex;align-items:center;padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.04);gap:6px;">
+          <span class="door-dot" style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${open ? '#ff9500' : '#34c759'};flex-shrink:0;"></span>
+          <span title="${escapeHtml(sensorId)}" style="flex:1;color:#ccc;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">🚪 ${escapeHtml(label)}</span>
+          <span class="door-state" style="color:${open ? '#ff9500' : '#34c759'};font-size:11px;font-weight:600;margin-left:4px;">${escapeHtml(String(state).toUpperCase())}</span>
+          ${info ? `<button class="zp-door-control" data-pin-id="${escapeHtml(pin.id)}" style="background:rgba(0,150,255,0.15);border:1px solid rgba(0,150,255,0.35);color:#4db8ff;border-radius:5px;padding:3px 8px;cursor:pointer;font-size:11px;flex-shrink:0;">${escapeHtml(info.label)}</button>` : ''}
+        </div>`;
+      }).join('')}
+    </div>` : '';
+
+  // ── Lights ────────────────────────────────────────────────
+  const allLightsOn  = lights_.length && lights_.every(e => haStates[e]?.state === 'on');
+  const someLight    = lights_.some(e => haStates[e]?.state === 'on');
+  const lightHtml = lights_.length ? `
+    <div style="margin-bottom:10px;">
+      <div style="display:flex;align-items:center;margin-bottom:4px;">
+        <div style="font-size:10px;text-transform:uppercase;color:#555;letter-spacing:0.1em;flex:1;">Lights</div>
+        ${lights_.length > 1 ? `<button class="zp-all-lights" data-on="${allLightsOn ? '0' : '1'}"
+          style="background:${someLight ? 'rgba(255,204,0,0.2)' : 'rgba(255,255,255,0.06)'};border:1px solid ${someLight ? 'rgba(255,204,0,0.4)' : 'rgba(255,255,255,0.1)'};color:${someLight ? '#ffcc00' : '#888'};border-radius:5px;padding:2px 8px;cursor:pointer;font-size:10px;font-weight:600;">
+          ${allLightsOn ? 'All OFF' : 'All ON'}</button>` : ''}
+      </div>
+      ${lights_.map(e => {
+        const on = haStates[e]?.state === 'on';
+        return `<div style="display:flex;align-items:center;padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.04);">
+          <span style="flex:1;color:#ccc;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">💡 ${escapeHtml(e.split('.').pop())}</span>
+          <button class="zp-light-toggle" data-entity="${escapeHtml(e)}"
+            style="background:${on ? 'rgba(255,204,0,0.2)' : 'rgba(255,255,255,0.06)'};border:1px solid ${on ? 'rgba(255,204,0,0.5)' : 'rgba(255,255,255,0.12)'};color:${on ? '#ffcc00' : '#888'};border-radius:5px;padding:3px 10px;cursor:pointer;font-size:11px;font-weight:600;min-width:40px;">
+            ${on ? 'ON' : 'OFF'}</button>
+        </div>`;
+      }).join('')}
+    </div>` : '';
+
+  // ── Sirens ────────────────────────────────────────────────
+  const allSirensOn  = sirens_.length && sirens_.every(e => haStates[e]?.state === 'on');
+  const someSiren    = sirens_.some(e => haStates[e]?.state === 'on');
+  const sirenHtml = sirens_.length ? `
+    <div style="margin-bottom:10px;">
+      <div style="display:flex;align-items:center;margin-bottom:4px;">
+        <div style="font-size:10px;text-transform:uppercase;color:#555;letter-spacing:0.1em;flex:1;">Sirens</div>
+        ${sirens_.length > 1 ? `<button class="zp-all-sirens" data-on="${allSirensOn ? '0' : '1'}"
+          style="background:${someSiren ? 'rgba(255,59,48,0.2)' : 'rgba(255,255,255,0.06)'};border:1px solid ${someSiren ? 'rgba(255,59,48,0.4)' : 'rgba(255,255,255,0.1)'};color:${someSiren ? '#ff6b6b' : '#888'};border-radius:5px;padding:2px 8px;cursor:pointer;font-size:10px;font-weight:600;">
+          ${allSirensOn ? 'All OFF' : 'All ON'}</button>` : ''}
+      </div>
+      ${sirens_.map(e => {
+        const on = haStates[e]?.state === 'on';
+        return `<div style="display:flex;align-items:center;padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.04);">
+          <span style="flex:1;color:#ccc;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">🔊 ${escapeHtml(e.split('.').pop())}</span>
+          <button class="zp-siren-toggle" data-entity="${escapeHtml(e)}"
+            style="background:${on ? 'rgba(255,59,48,0.2)' : 'rgba(255,255,255,0.06)'};border:1px solid ${on ? 'rgba(255,59,48,0.5)' : 'rgba(255,255,255,0.12)'};color:${on ? '#ff6b6b' : '#888'};border-radius:5px;padding:3px 10px;cursor:pointer;font-size:11px;font-weight:600;min-width:40px;">
+            ${on ? 'ON' : 'OFF'}</button>
+        </div>`;
+      }).join('')}
+    </div>` : '';
+
+  // ── Cameras ───────────────────────────────────────────────
+  const cameraHtml = cameras_.length ? `
+    <div style="margin-bottom:6px;">
+      <div style="font-size:10px;text-transform:uppercase;color:#555;letter-spacing:0.1em;margin-bottom:4px;">Cameras</div>
+      ${cameras_.map(e => {
+        const resolvedId = getCamLowRes(e);
+        const thumbUrl = showThumbs
+          ? ((window.OW && window.OW.apiPath)
+              ? window.OW.apiPath(`ow/snap-cache/${encodeURIComponent(resolvedId)}`)
+              : `ow/snap-cache/${encodeURIComponent(resolvedId)}`) + `?t=${Date.now()}`
+          : null;
+        return `<div style="margin-bottom:6px;">
+          ${showThumbs ? `<img data-cam="${escapeHtml(e)}" data-resolved-cam="${escapeHtml(resolvedId)}" src="${thumbUrl}" style="width:100%;height:120px;object-fit:cover;border-radius:6px;background:#111;display:block;margin-bottom:4px;" onerror="this.style.display='none'">` : ''}
+          <div style="display:flex;align-items:center;padding:2px 0;">
+            <span style="flex:1;color:#ccc;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">📷 ${escapeHtml(e.split('.').pop())}</span>
+            <button class="zp-cam-view" data-entity="${escapeHtml(e)}" style="background:rgba(0,150,255,0.15);border:1px solid rgba(0,150,255,0.35);color:#0096ff;border-radius:5px;padding:3px 10px;cursor:pointer;font-size:11px;">▶ View</button>
+          </div>
+        </div>`;
+      }).join('')}
+    </div>` : '';
+
+  popup.innerHTML = `<div style="padding:14px;">${armHtml}${sensorHtml}${doorHtml}${lightHtml}${sirenHtml}${cameraHtml}</div>`;
+
+  // ── Wire events ───────────────────────────────────────────
+  popup.querySelector('#zpClose')?.addEventListener('click', closeZonePopup);
+
+  popup.querySelectorAll('.zp-door-control').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      const pin = doorPins.find(p => p.id === btn.dataset.pinId);
+      if (!pin) return;
+      callDoorPinControl(pin);
+      setTimeout(refreshZonePopupIfOpen, 250);
+    });
+  });
+
+  popup.querySelectorAll('.zp-door-links').forEach(btn => {
+    btn.addEventListener('click', e => { e.stopPropagation(); openDoorLinksPopover(btn.dataset.pinId, btn); });
+  });
+
+  // Arm/Disarm — optimistic: flip the zone switch in haStates immediately
+  // Arm/Disarm — only for IPs in the allowed list
+  const zSwitchId = `switch.overwatch_zone_${zoneSlug(zone)}`;
+  if (canArmDisarm()) {
+    popup.querySelector('#zpArm')?.addEventListener('click', () => {
+      owCallSwitch(zSwitchId, true);
+      if (haStates[zSwitchId]) haStates[zSwitchId] = { ...haStates[zSwitchId], state: 'on' };
+      else haStates[zSwitchId] = { state: 'on' };
+      refreshZonePopupIfOpen();
+    });
+    popup.querySelector('#zpDisarm')?.addEventListener('click', () => {
+      owCallSwitch(zSwitchId, false);
+      if (haStates[zSwitchId]) haStates[zSwitchId] = { ...haStates[zSwitchId], state: 'off' };
+      else haStates[zSwitchId] = { state: 'off' };
+      refreshZonePopupIfOpen();
+    });
+  }
+
+  // Individual light toggles — optimistic
+  popup.querySelectorAll('.zp-light-toggle').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const e = btn.dataset.entity;
+      const on = haStates[e]?.state === 'on';
+      if (haStates[e]) haStates[e] = { ...haStates[e], state: on ? 'off' : 'on' };
+      _callService(e, on ? 'turn_off' : 'turn_on');
+      refreshZonePopupIfOpen();
+    });
+  });
+
+  // All lights on/off
+  popup.querySelector('.zp-all-lights')?.addEventListener('click', btn => {
+    const turnOn = btn.currentTarget.dataset.on === '1';
+    lights_.forEach(e => {
+      if (haStates[e]) haStates[e] = { ...haStates[e], state: turnOn ? 'on' : 'off' };
+      _callService(e, turnOn ? 'turn_on' : 'turn_off');
+    });
+    refreshZonePopupIfOpen();
+  });
+
+  // Individual siren toggles — optimistic
+  popup.querySelectorAll('.zp-siren-toggle').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const e = btn.dataset.entity;
+      const on = haStates[e]?.state === 'on';
+      if (haStates[e]) haStates[e] = { ...haStates[e], state: on ? 'off' : 'on' };
+      _callService(e, on ? 'turn_off' : 'turn_on');
+      refreshZonePopupIfOpen();
+    });
+  });
+
+  // All sirens on/off
+  popup.querySelector('.zp-all-sirens')?.addEventListener('click', btn => {
+    const turnOn = btn.currentTarget.dataset.on === '1';
+    sirens_.forEach(e => {
+      if (haStates[e]) haStates[e] = { ...haStates[e], state: turnOn ? 'on' : 'off' };
+      _callService(e, turnOn ? 'turn_on' : 'turn_off');
+    });
+    refreshZonePopupIfOpen();
+  });
+
+  // Camera view buttons
+  popup.querySelectorAll('.zp-cam-view').forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (window.openCameraModal) window.openCameraModal(btn.dataset.entity);
+    });
+  });
+
+  // Re-attach drag (titlebar was recreated)
+  const titlebar = popup.querySelector('#zpTitlebar');
+  if (titlebar && !titlebar._dragBound) {
+    titlebar._dragBound = true;
+    let dragging = false, ox = 0, oy = 0;
+    titlebar.style.cursor = 'grab';
+    titlebar.addEventListener('pointerdown', e => {
+      if (e.target.closest('button')) return;
+      dragging = true; ox = e.clientX - popup.offsetLeft; oy = e.clientY - popup.offsetTop;
+      titlebar.style.cursor = 'grabbing'; titlebar.setPointerCapture(e.pointerId); e.preventDefault();
+    });
+    titlebar.addEventListener('pointermove', e => {
+      if (!dragging) return;
+      popup.style.left = Math.max(0, Math.min(window.innerWidth  - popup.offsetWidth,  e.clientX - ox)) + 'px';
+      popup.style.top  = Math.max(0, Math.min(window.innerHeight - popup.offsetHeight, e.clientY - oy)) + 'px';
+    });
+    titlebar.addEventListener('pointerup',    () => { dragging = false; titlebar.style.cursor = 'grab'; });
+    titlebar.addEventListener('pointercancel',() => { dragging = false; titlebar.style.cursor = 'grab'; });
+  }
+
+  // Thumbnail refresh — match snapshot interval setting, only update <img> srcs (don't re-render whole popup)
+  if (_zonePopupTimer) { clearInterval(_zonePopupTimer); _zonePopupTimer = null; }
+  if (showThumbs && cameras_.length) {
+    const intervalMs = (parseInt(localStorage.getItem('ow_snap_interval') || window.OW?.uiConfig?.cam_snapshot_interval || 2) || 2) * 1000;
+    _zonePopupTimer = setInterval(() => {
+      popup.querySelectorAll('img[data-cam]').forEach(img => {
+        const e    = img.dataset.cam;
+        const res  = getCamLowRes(e);
+        const base = (window.OW && window.OW.apiPath)
+          ? window.OW.apiPath(`ow/snap-cache/${encodeURIComponent(res)}`)
+          : `ow/snap-cache/${encodeURIComponent(res)}`;
+        img.src = `${base}?t=${Date.now()}`;
+        img.style.display = 'block';
+      });
+    }, intervalMs);
+  }
+}
+
+// Surgical refresh — update button states/sensor dots WITHOUT rebuilding img tags
+function refreshZonePopupIfOpen() {
+  const popup = _zonePopupEl;
+  if (!popup || !_zonePopupZoneId) return;
+  const zone = zones.find(z => z.id === _zonePopupZoneId);
+  if (!zone) { closeZonePopup(); return; }
+
+  // Arm/Disarm buttons (only exist if canArmDisarm() was true when popup opened)
+  const zState  = getZoneState(zone);
+  const isArmed = zState !== 'disabled';
+  if (canArmDisarm()) {
+    const btnArm    = popup.querySelector('#zpArm');
+    const btnDisarm = popup.querySelector('#zpDisarm');
+    if (btnArm) {
+      btnArm.style.background   = isArmed ? 'rgba(0,150,255,0.3)'  : 'rgba(255,255,255,0.06)';
+      btnArm.style.borderColor  = isArmed ? 'rgba(0,150,255,0.6)'  : 'rgba(255,255,255,0.12)';
+      btnArm.style.color        = isArmed ? '#4db8ff' : '#666';
+    }
+    if (btnDisarm) {
+      btnDisarm.style.background  = !isArmed ? 'rgba(255,59,48,0.3)'  : 'rgba(255,255,255,0.06)';
+      btnDisarm.style.borderColor = !isArmed ? 'rgba(255,59,48,0.6)'  : 'rgba(255,255,255,0.12)';
+      btnDisarm.style.color       = !isArmed ? '#ff6b6b' : '#666';
+    }
+  } else {
+    // View-only — update the status text
+    const statusSpan = popup.querySelector('#zpArmStatus');
+    if (statusSpan) statusSpan.textContent = isArmed ? '🔵 Armed' : '⚪ Disarmed';
+  }
+
+  // Sensor dots + state text
+  popup.querySelectorAll('[data-sensor-id]').forEach(row => {
+    const e = row.dataset.sensorId;
+    const triggered = isEntityTriggered(e);
+    const state = haStates[e]?.state || '—';
+    const dot  = row.querySelector('.sensor-dot');
+    const text = row.querySelector('.sensor-state');
+    if (dot)  { dot.style.background = triggered ? '#ff3b30' : '#34c759'; }
+    if (text) { text.textContent = state.toUpperCase(); text.style.color = triggered ? '#ff6b6b' : '#34c759'; }
+  });
+
+  // Door/window rows + control button labels
+  popup.querySelectorAll('[data-door-pin-id]').forEach(row => {
+    const pin = doorPins.find(p => p.id === row.dataset.doorPinId);
+    if (!pin) return;
+    const state = doorPinDisplayState(pin);
+    const open = pin.sensor_entity ? doorPinIsOpen(pin) : false;
+    const dot = row.querySelector('.door-dot');
+    const text = row.querySelector('.door-state');
+    const btn = row.querySelector('.zp-door-control');
+    const info = doorControlInfo(pin);
+    if (dot)  { dot.style.background = open ? '#ff9500' : '#34c759'; }
+    if (text) { text.textContent = String(state).toUpperCase(); text.style.color = open ? '#ff9500' : '#34c759'; }
+    if (btn && info) btn.textContent = info.label;
+  });
+
+  // Light buttons
+  popup.querySelectorAll('.zp-light-toggle').forEach(btn => {
+    const on = haStates[btn.dataset.entity]?.state === 'on';
+    btn.style.background   = on ? 'rgba(255,204,0,0.2)'     : 'rgba(255,255,255,0.06)';
+    btn.style.borderColor  = on ? 'rgba(255,204,0,0.5)'     : 'rgba(255,255,255,0.12)';
+    btn.style.color        = on ? '#ffcc00' : '#888';
+    btn.textContent        = on ? 'ON' : 'OFF';
+  });
+
+  // Siren buttons
+  popup.querySelectorAll('.zp-siren-toggle').forEach(btn => {
+    const on = haStates[btn.dataset.entity]?.state === 'on';
+    btn.style.background   = on ? 'rgba(255,59,48,0.2)'     : 'rgba(255,255,255,0.06)';
+    btn.style.borderColor  = on ? 'rgba(255,59,48,0.5)'     : 'rgba(255,255,255,0.12)';
+    btn.style.color        = on ? '#ff6b6b' : '#888';
+    btn.textContent        = on ? 'ON' : 'OFF';
+  });
+
+  // All-on/off buttons
+  const lights_ = zone.lights || [];
+  const sirens_ = zone.sirens || [];
+  const allLightsOn = lights_.length && lights_.every(e => haStates[e]?.state === 'on');
+  const allSirensOn = sirens_.length && sirens_.every(e => haStates[e]?.state === 'on');
+  const allLightsBtn = popup.querySelector('.zp-all-lights');
+  const allSirensBtn = popup.querySelector('.zp-all-sirens');
+  if (allLightsBtn) { allLightsBtn.textContent = allLightsOn ? 'All OFF' : 'All ON'; allLightsBtn.dataset.on = allLightsOn ? '0' : '1'; }
+  if (allSirensBtn) { allSirensBtn.textContent = allSirensOn ? 'All OFF' : 'All ON'; allSirensBtn.dataset.on = allSirensOn ? '0' : '1'; }
+}
+
+function startPinAnimLoop() {
+  if (_pinAnimRunning) return;
+  _pinAnimRunning = true;
+  function loop() {
+    // Don't run animation loop in editor mode (causes flicker on selected pins)
+    // or during drag (would interfere with pointer capture)
+    if (editorMode || _pinDragging) { _pinAnimRunning = false; return; }
+    const hasActiveSirens = sirens.some(p => haStates[p.entity_id]?.state === 'on');
+    const hasActiveLights = lights.some(p => haStates[p.entity_id]?.state === 'on');
+    const suppressDoorDisarmed = localStorage.getItem('ow_hide_door_alert_disarmed') === 'true';
+    const hasOpenDoors    = doorPins.some(p => {
+      if (p.sensor_entity && isEntityGhosted(p.sensor_entity)) return false;
+      if (p.control_entity && isEntityGhosted(p.control_entity)) return false;
+      if (!isDoorTriggered(p)) return false;
+      if (suppressDoorDisarmed) {
+        // Check if the zone is disarmed — check arm switch directly (not getZoneState
+        // which would return 'triggered' because the open door makes the zone triggered)
+        const linked = doorPinZoneIds(p).map(zid => zones.find(z => z.id === zid)).filter(Boolean);
+      const zone = linked[0] || null;
+        if (!zone) return true;
+        let zoneEnabled;
+        if (!zoneUseServerState()) {
+          zoneEnabled = localStorage.getItem(ZONE_LOCAL_PREFIX + zone.id) !== 'false';
+        } else {
+          const sw = haStates[`switch.overwatch_zone_${zoneSlug(zone)}`];
+          zoneEnabled = sw ? sw.state !== 'off' : zone.enabled !== false;
+        }
+        const masterSw = haStates['switch.overwatch_zone_master'];
+        const masterOn = masterSw ? masterSw.state !== 'off' : masterEnabled;
+        if (!zoneEnabled || !masterOn) return false; // zone/master disarmed — suppress
+      }
+      return true;
+    });
+    if (hasActiveSirens || hasActiveLights || hasOpenDoors) {
+      renderPins();
+      if (getNumPanels() > 1) {
+        const n = getNumPanels();
+        for (let i = 0; i < n; i++) renderPins(i);
+      }
+      requestAnimationFrame(loop);
+    } else {
+      _pinAnimRunning = false;
+    }
+  }
+  requestAnimationFrame(loop);
+}
+
+function renderZonesEditor(force = false) {
+  const container = document.getElementById("zonesEditorContainer");
+  if (!container) return;
+
+  if (!editorMode) { container.innerHTML = ""; return; }
+
+  // Don't blow away DOM while the user is interacting with editor controls.
+  if (!force && zoneEditorHasActiveControl(container)) {
+    refreshEntityStateDots(container);
+    return;
+  }
+  const __zedScrollState = captureZoneEditorScrollState(container);
+
+  const selectedZone  = selectedZoneId  ? zones.find(z => z.id === selectedZoneId)   : null;
+  const selectedGroup = selectedGroupId ? groups.find(g => g.id === selectedGroupId) : null;
+
+  const needsPoints   = selectedZone && (selectedZone.points || []).length < 3;
+  const editPtsLabel  = isCreatingZone ? "✏️ Adding Points" : isEditingPoints ? "✔ Done Editing" : needsPoints ? "Add Points" : "Edit Zone";
+  const hasSelection = !!(selectedZone || selectedGroup || activePinId);
+  // Use saved size if user has customised it, otherwise default narrow when nothing selected
+  // When something is selected, guarantee both panels fit
+  const editorW = hasSelection ? Math.max(editorSize.w, 420) : 260;
+  const editorH = editorSize.h;
+
+  // ── Build left panel zone list with group headers ──────────
+  function buildZoneList() {
+    // Only show zones on the active floor
+    const curFloorId = activeFloorId;
+    const firstFloor = !curFloorId || floors.length === 0 || floors[0]?.id === curFloorId;
+    const floorZones = floors.length > 1
+      ? zones.filter(z => z.floor_id === curFloorId || (!z.floor_id && firstFloor))
+      : zones;
+
+    const sortedGroups = [...groups].sort((a, b) => (a.name||"").localeCompare(b.name||""));
+    const groupedZoneIds = new Set(groups.flatMap(g => g.zone_ids || []));
+    const ungroupedZones = floorZones.filter(z => !groupedZoneIds.has(z.id))
+      .sort((a, b) => (a.name||a.id).localeCompare(b.name||b.id));
+    let html = "";
+
+    sortedGroups.forEach(g => {
+      // Skip groups with no members on current floor
+      const hasFloorMembers = (g.zone_ids || []).some(id => floorZones.find(z => z.id === id));
+      // Always show selected group or groups with no members yet (newly created)
+      if (floors.length > 1 && !hasFloorMembers && g.id !== selectedGroupId && (g.zone_ids || []).length > 0) return;
+      const gSel = g.id === selectedGroupId;
+      const gState = getGroupState(g);
+      const gHex    = g.colorHex || "#ff3b30";
+      const gColour = gState.anyTriggered ? "#ff3b30" : gState.anyArmed ? gHex : gHex;
+      const gOpacity = gState.anyArmed ? 1 : 0.35;
+      const gFlash  = gState.anyTriggered;
+      const storageKey = `zedGroup_${g.id}`;
+      const collapsed  = localStorage.getItem(storageKey) !== "expanded";
+      html += `
+        <div class="zed-group-header ${gSel ? 'selected' : ''}" data-group-id="${g.id}" data-storage-key="${storageKey}">
+          <div class="zone-list-dot${gFlash ? ' flashing' : ''}" style="background:${gColour};opacity:${gOpacity};width:6px;height:6px;flex-shrink:0;"></div>
+          <span style="flex:1;font-size:11px;font-weight:600;color:#999;text-transform:uppercase;letter-spacing:0.06em;">${escapeHtml(g.name || g.id)}</span>
+          <span class="zed-chevron" style="font-size:11px;color:#555;transition:transform 0.2s;display:inline-block;transform:rotate(${collapsed ? '-90' : '0'}deg);">▾</span>
+        </div>
+        <div class="zed-group-members" data-group-id="${g.id}" style="${collapsed ? 'display:none;' : ''}">`;
+      const memberZones = (g.zone_ids || [])
+        .map(id => floorZones.find(zz => zz.id === id))
+        .filter(Boolean)
+        .sort((a, b) => (a.name||a.id).localeCompare(b.name||b.id));
+      memberZones.forEach(z => { html += buildZoneItem(z, true); });
+      html += `</div>`;
+    });
+
+    if (ungroupedZones.length > 0) {
+      html += `<div class="zed-group-header" style="cursor:default;">
+        <div style="width:6px;height:6px;flex-shrink:0;background:transparent;"></div>
+        <span style="flex:1;font-size:11px;font-weight:600;color:#555;text-transform:uppercase;letter-spacing:0.06em;">Ungrouped</span>
+      </div>`;
+      ungroupedZones.forEach(z => { html += buildZoneItem(z, false); });
+    }
+    return html || `<div style="color:#555;font-size:11px;padding:8px;">No zones yet.</div>`;
+  }
+
+  function buildZoneItem(z, indented) {
+    const state = getZoneState(z);
+    const isOff = getZoneState(z) === "disabled";
+    const activeEntity = zoneActiveTriggerEntity(z);
+    const dotColour = isOff ? "#444" :
+      state === "triggered" ? resolveColour(entityTypeColour(detectEntityType(activeEntity || (z.sensors||[])[0] || "door"))) :
+      state === "fault" ? "#ff9500" : (z.colorHex || "#0096ff");
+    const sel = z.id === selectedZoneId;
+    return `<div class="zones-list-item ${sel ? 'selected' : ''}" data-zone-id="${z.id}" style="${indented ? 'padding-left:20px;' : ''}">
+      <div class="zone-list-dot" style="background:${dotColour};opacity:${isOff ? 0.4 : 1};"></div>
+      <span style="flex:1;opacity:${isOff ? 0.5 : 1};font-size:12px;">${escapeHtml(z.name || z.id)}</span>
+      ${z.hidden ? `<span style="font-size:9px;color:#555;">hidden</span>` : state === "triggered" ? `<span style="font-size:9px;color:#ff3b30;">⚠</span>` : `<span style="font-size:9px;color:#444;">${(z.points||[]).length}pt</span>`}
+    </div>`;
+  }
+
+  // ── Build pin right panel (light, siren, camera or door) ─────
+  function buildPinRightPanel() {
+    const pin = activePinType === 'light'   ? lights.find(p => p.id === activePinId)
+              : activePinType === 'siren'   ? sirens.find(p => p.id === activePinId)
+              : activePinType === 'camera'  ? cameraPins.find(p => p.id === activePinId)
+              : activePinType === 'door'    ? doorPins.find(p => p.id === activePinId)
+              : null;
+    if (!pin) return '';
+
+    const isLight  = activePinType === 'light';
+    const isCamera = activePinType === 'camera';
+    const isDoor   = activePinType === 'door';
+    const label    = isLight ? 'Light' : isCamera ? 'Camera' : isDoor ? 'Door' : 'Siren';
+    const icon     = isLight ? '💡'   : isCamera ? '📷'     : isDoor ? '🚪'   : '🔊';
+
+    return `
+      <div class="zed-right-content">
+        <div class="zones-editor-section-title">${icon} ${label}</div>
+        <div class="zones-editor-row">
+          <label>Name</label>
+          <input id="pinNameInput" class="zones-editor-input" value="${escapeHtml(pin.name || '')}" placeholder="Name">
+        </div>
+        ${isDoor ? `
+        <div class="zones-editor-row">
+          <label>Sensor entity</label>
+          <div style="position:relative;flex:1;">
+            <input id="pinEntityInput" class="zones-editor-input" value="${escapeHtml(pin.sensor_entity || '')}"
+              placeholder="binary_sensor.door_contact" autocomplete="off" style="width:100%;">
+            <div id="pinEntityResults" style="display:none;position:absolute;top:100%;left:0;right:0;background:#1a1a1a;border:1px solid rgba(255,255,255,0.15);border-radius:6px;z-index:100;max-height:160px;overflow-y:auto;"></div>
+          </div>
+        </div>
+        <div class="zones-editor-row">
+          <label>Control entity</label>
+          <div style="position:relative;flex:1;">
+            <input id="pinControlEntityInput" class="zones-editor-input" value="${escapeHtml(pin.control_entity || '')}"
+              placeholder="lock.* or switch.* (optional)" autocomplete="off" style="width:100%;">
+            <div id="pinCtrlResults" style="display:none;position:absolute;top:100%;left:0;right:0;background:#1a1a1a;border:1px solid rgba(255,255,255,0.15);border-radius:6px;z-index:100;max-height:160px;overflow-y:auto;"></div>
+          </div>
+        </div>
+
+        <div style="position:relative;margin-top:6px;">
+          <div style="display:flex;align-items:center;gap:8px;">
+            <label style="font-size:12px;color:#aaa;flex:1;display:flex;align-items:center;gap:8px;">
+              <input type="checkbox" id="pinControlCountsChk" ${pin.control_counts_as_trigger ? 'checked' : ''} style="accent-color:#0096ff;">
+              <span>Count control entity as triggered</span>
+            </label>
+            <button id="pinControlTriggerCog" title="Trigger settings" style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);color:#888;border-radius:7px;padding:4px 8px;cursor:pointer;font-size:12px;line-height:1;">⚙</button>
+          </div>
+          <div id="pinControlTriggerPopover" style="display:none;position:absolute;right:0;top:100%;margin-top:6px;background:rgba(14,14,14,0.98);border:1px solid rgba(255,255,255,0.12);border-radius:10px;box-shadow:0 10px 32px rgba(0,0,0,0.65);padding:10px 12px;z-index:120;min-width:220px;">
+            <div style="font-size:10px;letter-spacing:0.08em;text-transform:uppercase;color:#666;margin-bottom:6px;">Trigger when control state is…</div>
+            <select id="pinControlTriggerSelect" style="width:100%;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:7px 8px;color:#ddd;font-size:12px;">
+              <option value="">Auto</option>
+              <option value="unlocked">unlocked</option>
+              <option value="open">open</option>
+              <option value="on">on</option>
+            </select>
+            <div style="font-size:10px;color:#555;margin-top:6px;line-height:1.25;">Auto infers: lock→unlocked, cover→open, switch→on. Unknown domains do nothing unless overridden.</div>
+          </div>
+        </div>
+
+        <div style="margin-top:10px;">
+          <label style="font-size:12px;color:#aaa;">Linked zones</label>
+          <input id="pinZonesSearchInput" type="text" value="" placeholder="Search zones…" autocomplete="off"
+            style="width:100%;margin-top:6px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:6px 8px;color:#ccc;font-size:12px;outline:none;">
+          <div id="pinZonesList" style="margin-top:6px;border:1px solid rgba(255,255,255,0.10);border-radius:10px;padding:6px 8px;max-height:160px;overflow:auto;"></div>
+          <div style="font-size:10px;color:#555;margin-top:3px;">Checked zones float to the top. List is alphabetical.</div>
+        </div>
+
+        <div style="margin-top:10px;">
+          <label style="font-size:12px;color:#aaa;">Door type</label>
+          <div style="display:flex;gap:6px;margin-top:4px;flex-wrap:wrap;">
+            <button id="doorTypeSingle"  class="settings-toggle ${(pin.doorType||'single')==='single' ?'active':''}" style="flex:1;font-size:11px;min-width:60px;">Single</button>
+            <button id="doorTypeDouble"  class="settings-toggle ${pin.doorType==='double' ?'active':''}" style="flex:1;font-size:11px;min-width:60px;">Double</button>
+            <button id="doorTypeSliding" class="settings-toggle ${pin.doorType==='sliding'?'active':''}" style="flex:1;font-size:11px;min-width:60px;">Sliding</button>
+          </div>
+        </div>
+        <div style="margin-top:8px;${(pin.doorType==='double'||pin.doorType==='sliding')?'display:none;':''}" id="doorHandRow">
+          <label style="font-size:12px;color:#aaa;">Hinge side</label>
+          <div style="display:flex;gap:6px;margin-top:4px;">
+            <button id="doorHandLeft"  class="settings-toggle ${(pin.doorHand||'left')==='left' ?'active':''}" style="flex:1;font-size:11px;">Left</button>
+            <button id="doorHandRight" class="settings-toggle ${pin.doorHand==='right'?'active':''}" style="flex:1;font-size:11px;">Right</button>
+          </div>
+        </div>
+        <div style="margin-top:8px;">
+          <label style="font-size:12px;color:#aaa;">Width <span id="pinSizeWVal" style="color:#64b4ff;font-weight:600;">${pin.sizeW||20}</span></label>
+          <input id="pinSizeWInput" type="range" min="4" max="100" step="1" value="${pin.sizeW||20}"
+            style="width:100%;accent-color:#64b4ff;margin-top:4px;display:block;">
+          <div style="font-size:10px;color:#555;margin-top:1px;">Door opening width on map</div>
+        </div>
+        <div style="margin-top:6px;">
+          <label style="font-size:12px;color:#aaa;">Height <span id="pinSizeDVal" style="color:#64b4ff;font-weight:600;">${pin.sizeH||4}</span></label>
+          <input id="pinSizeDInput" type="range" min="1" max="30" step="1" value="${pin.sizeH||4}"
+            style="width:100%;accent-color:#64b4ff;margin-top:4px;display:block;">
+          <div style="font-size:10px;color:#555;margin-top:1px;">Frame/wall thickness on map</div>
+        </div>
+        <div style="margin-top:6px;">
+          <label style="font-size:12px;color:#aaa;">Aura radius <span id="pinAuraRadVal" style="color:#ff6b6b;font-weight:600;">${pin.auraRadius||3}</span></label>
+          <input id="pinAuraRadInput" type="range" min="1" max="10" step="1" value="${pin.auraRadius||3}"
+            style="width:100%;accent-color:#ff6b6b;margin-top:4px;display:block;">
+          <div style="font-size:10px;color:#555;margin-top:1px;">Open door aura size</div>
+        </div>
+        <div style="margin-top:8px;">
+          <label style="font-size:12px;color:#aaa;">Rotation <span id="pinRotationVal" style="color:#64b4ff;font-weight:600;">${pin.rotation || 0}°</span></label>
+          <input id="pinRotationInput" type="range" min="0" max="359" step="1" value="${pin.rotation || 0}"
+            style="width:100%;accent-color:#64b4ff;margin-top:4px;display:block;">
+          <div style="font-size:10px;color:#555;margin-top:2px;">Rotate to align with wall</div>
+        </div>` : `
+        <div class="zones-editor-row">
+          <label>Entity</label>
+          <input id="pinEntityInput" class="zones-editor-input" value="${escapeHtml(pin.entity_id || '')}"
+            placeholder="${isLight ? 'light.* or switch.*' : isCamera ? 'camera.*' : 'switch.* or siren.*'}" autocomplete="off">
+        </div>`}
+        ${isLight ? `
+        <div style="margin-top:12px;border-top:1px solid rgba(255,255,255,0.06);padding-top:10px;">
+          <label style="font-size:12px;color:#aaa;">Range <span id="pinRadiusVal" style="color:#ffcc44;font-weight:600;">${pin.radius || 3}</span></label>
+          <input id="pinRadiusInput" type="range" min="1" max="10" step="1" value="${pin.radius || 3}"
+            style="width:100%;accent-color:#ffcc44;margin-top:4px;display:block;">
+          <div style="font-size:10px;color:#555;margin-top:2px;">Distance glow extends from icon</div>
+        </div>
+        <div style="margin-top:12px;">
+          <label style="font-size:12px;color:#aaa;">Direction <span id="pinDirVal" style="color:#ffcc44;font-weight:600;">${pin.direction !== null && pin.direction !== undefined && pin.direction !== '' ? pin.direction + '°' : 'none'}</span></label>
+          <input id="pinDirectionInput" type="range" min="-1" max="359" step="1" value="${pin.direction !== null && pin.direction !== undefined && pin.direction !== '' ? pin.direction : -1}"
+            style="width:100%;accent-color:#ffcc44;margin-top:4px;display:block;">
+          <div style="font-size:10px;color:#555;margin-top:2px;">Slide fully left for omnidirectional glow</div>
+        </div>
+        <div id="pinSpreadRow" style="margin-top:12px;${(pin.direction !== null && pin.direction !== undefined && pin.direction !== '') ? '' : 'display:none;'}">
+          <label style="font-size:12px;color:#aaa;">Spread <span id="pinSpreadVal" style="color:#ffcc44;font-weight:600;">${pin.spread || 35}°</span></label>
+          <input id="pinSpreadInput" type="range" min="5" max="90" step="5" value="${pin.spread || 35}"
+            style="width:100%;accent-color:#ffcc44;margin-top:4px;display:block;">
+          <div style="font-size:10px;color:#555;margin-top:2px;">Cone half-angle — narrow for spotlight, wide for flood</div>
+        </div>
+        ` : ''}
+        <div class="zones-editor-row" style="margin-top:4px;">
+          <label style="color:#555;font-size:11px;">Position</label>
+          <span style="font-size:11px;color:#555;">${Math.round(pin.x)}, ${Math.round(pin.y)}</span>
+        </div>
+        ${isLight ? `
+        <div style="margin-top:10px;border-top:1px solid rgba(255,255,255,0.06);padding-top:8px;">
+          <label style="font-size:12px;color:#aaa;">Tap action</label>
+          <div style="display:flex;gap:6px;margin-top:4px;">
+            <button id="pinTapThis" class="settings-toggle ${!pin.tapAll && !pin.tapAllSirens ? 'active' : ''}" style="flex:1;font-size:11px;">This light</button>
+            <button id="pinTapAll"  class="settings-toggle ${pin.tapAll ? 'active' : ''}" style="flex:1;font-size:11px;">All zone lights</button>
+          </div>
+        </div>` : isCamera ? `
+        <div style="margin-top:10px;border-top:1px solid rgba(255,255,255,0.06);padding-top:8px;">
+          <div style="font-size:11px;color:#666;">Tap opens full-screen camera view.</div>
+        </div>` : isDoor ? `
+        <div style="margin-top:10px;border-top:1px solid rgba(255,255,255,0.06);padding-top:8px;">
+          <div style="font-size:11px;color:#666;">Tap will show a confirmation before toggling the control entity.</div>
+        </div>` : `
+        <div style="margin-top:10px;border-top:1px solid rgba(255,255,255,0.06);padding-top:8px;">
+          <label style="font-size:12px;color:#aaa;">Tap action</label>
+          <div style="display:flex;gap:6px;margin-top:4px;flex-wrap:wrap;">
+            <button id="pinTapThis"       class="settings-toggle ${!pin.tapZone && !pin.tapAll ? 'active' : ''}" style="flex:1;font-size:11px;min-width:80px;">This siren</button>
+            <button id="pinTapZone"       class="settings-toggle ${pin.tapZone ? 'active' : ''}"                 style="flex:1;font-size:11px;min-width:80px;">Zone sirens</button>
+            <button id="pinTapAllSirens"  class="settings-toggle ${pin.tapAll  ? 'active' : ''}"                 style="flex:1;font-size:11px;min-width:80px;">All sirens</button>
+          </div>
+        </div>
+        <div style="margin-top:10px;">
+          <label style="font-size:12px;color:#aaa;">Aura radius <span id="pinRadiusVal" style="color:#ff6666;font-weight:600;">${pin.radius || 4}</span></label>
+          <input id="pinRadiusInput" type="range" min="1" max="10" step="1" value="${pin.radius || 4}"
+            style="width:100%;accent-color:#ff6666;margin-top:4px;display:block;">
+          <div style="font-size:10px;color:#555;margin-top:2px;">Pulsing ring size when active</div>
+        </div>`}
+        <button id="pinDoneBtn" style="margin-top:10px;background:rgba(0,150,255,0.15);border:1px solid rgba(0,150,255,0.4);color:#0096ff;border-radius:8px;padding:6px 12px;cursor:pointer;width:100%;font-size:12px;">Done</button>
+        <button id="pinDeleteBtn" style="margin-top:6px;background:rgba(255,59,48,0.15);border:1px solid rgba(255,59,48,0.4);color:#ff3b30;border-radius:8px;padding:6px 12px;cursor:pointer;width:100%;font-size:12px;">Delete ${label}</button>
+      </div>`;
+  }
+
+  // ── Build right panel ──────────────────────────────────────
+  function buildRightPanel() {
+    if (selectedGroup && !selectedZone) {
+      // Group config panel
+      const members = (selectedGroup.zone_ids || []).map(id => zones.find(z => z.id === id)).filter(Boolean);
+      const allArmed = members.length > 0 && members.every(z => getZoneState(z) !== 'disabled');
+      return `
+        <div class="zed-right-content">
+          <div class="zones-editor-row"><label>Group Name</label>
+            <input type="text" id="groupNameInput" value="${escapeHtml(selectedGroup.name || "")}" placeholder="Group name">
+          </div>
+          <div class="zones-editor-row"><label>Colour</label>
+            <input type="color" id="groupColorInput" value="${selectedGroup.colorHex || '#ff3b30'}">
+          </div>
+          <div class="zones-editor-row" style="align-items:center;">
+            <label>Group Armed</label>
+            <label class="zone-toggle-switch">
+              <input type="checkbox" id="groupArmedToggle" ${allArmed ? "checked" : ""}>
+              <span class="zone-toggle-track"></span>
+            </label>
+          </div>
+          <div style="font-size:11px;color:#666;margin-top:4px;">Members</div>
+          <div id="groupMemberList" style="border:1px solid #222;border-radius:8px;padding:4px;flex:1;overflow-y:auto;">
+            ${[...zones]
+              .sort((a, b) => {
+                const aIn = (selectedGroup.zone_ids || []).includes(a.id);
+                const bIn = (selectedGroup.zone_ids || []).includes(b.id);
+                if (aIn !== bIn) return aIn ? -1 : 1; // checked first
+                return (a.name||a.id).localeCompare(b.name||b.id);
+              })
+              .map(z => {
+                const inGroup = (selectedGroup.zone_ids || []).includes(z.id);
+                return `<label style="display:flex;align-items:center;gap:6px;padding:4px 6px;cursor:pointer;border-radius:6px;${inGroup ? 'background:rgba(255,255,255,0.04);' : ''}">
+                  <input type="checkbox" class="group-member-chk" data-zone-id="${z.id}" ${inGroup ? "checked" : ""} style="accent-color:#0096ff;">
+                  <div class="zone-list-dot" style="background:${z.colorHex || '#0096ff'};width:6px;height:6px;flex-shrink:0;"></div>
+                  <span style="font-size:12px;color:${inGroup ? '#fff' : '#888'};">${escapeHtml(z.name || z.id)}</span>
+                  ${floors.length > 1 ? `<span style="font-size:10px;color:#555;margin-left:auto;">${escapeHtml(floors.find(f => f.id === z.floor_id)?.name || floors[0]?.name || '')}</span>` : ''}
+                </label>`;
+              }).join("")}
+          </div>
+        </div>`;
+    }
+
+    if (selectedZone) {
+      // Zone config panel
+      const modeHint = isCreatingZone
+        ? `<div class="zone-mode-hint">✏️ Click map to add points · Double-click to finish</div>`
+        : isEditingPoints
+        ? `<div class="zone-mode-hint">🔧 Click edge to insert · Right-click handle to remove</div>`
+        : "";
+      return `
+        <div class="zed-right-content">
+          ${modeHint}
+          <div class="zones-editor-row"><label>Name</label>
+            <input type="text" id="zoneNameInput" value="${escapeHtml(selectedZone.name || "")}" placeholder="Zone name">
+          </div>
+          <div class="zones-editor-row"><label>Colour</label>
+            <input type="color" id="zoneColorInput" value="${selectedZone.colorHex || '#0096ff'}">
+          </div>
+          <div class="zones-editor-row" style="align-items:center;gap:8px;">
+            <label style="flex:0 0 auto;">Armed</label>
+            <label class="zone-toggle-switch">
+              <input type="checkbox" id="zoneEnabledToggle" ${zoneIsEnabled(selectedZone) ? "checked" : ""}>
+              <span class="zone-toggle-track"></span>
+            </label>
+            <span style="flex:1;"></span>
+            <span style="font-size:11px;color:#666;">Visible</span>
+            <button id="zoneHiddenToggle"
+              style="background:none;border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:5px 8px;cursor:pointer;line-height:0;color:${selectedZone.hidden ? 'rgba(255,255,255,0.25)' : 'rgba(255,255,255,0.7)'};"
+            >${selectedZone.hidden
+              ? `<svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M1 12C1 12 5 5 12 5s11 7 11 7-4 7-11 7S1 12 1 12z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M3 3l18 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>`
+              : `<svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M1 12C1 12 5 5 12 5s11 7 11 7-4 7-11 7S1 12 1 12z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2"/></svg>`
+            }</button>
+          </div>
+          ${floors.length > 1 ? `
+          <div class="zones-editor-row" style="align-items:center;">
+            <label style="flex:0 0 auto;">Floor</label>
+            <select id="zoneFloorSelect" style="flex:1;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:5px 8px;color:#fff;font-size:12px;">
+              ${floors.map(f => `<option value="${f.id}" ${(selectedZone.floor_id || floors[0]?.id) === f.id ? 'selected' : ''}>${escapeHtml(f.name)}</option>`).join('')}
+            </select>
+          </div>` : ''}
+          <div class="zones-editor-row" style="align-items:center;">
+            <label style="flex:0 0 auto;">Group</label>
+            <select id="zoneGroupSelect" style="flex:1;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:5px 8px;color:#fff;font-size:12px;">
+              <option value="">— Ungrouped —</option>
+              ${[...groups].sort((a,b)=>(a.name||a.id).localeCompare(b.name||b.id)).map(g => `<option value="${escapeHtml(g.id)}" ${currentGroupIdForZone(selectedZone.id) === g.id ? 'selected' : ''}>${escapeHtml(g.name || g.id)}</option>`).join('')}
+            </select>
+          </div>
+          <div class="zones-editor-row" style="align-items:center;">
+            <label style="flex:0 0 auto;">HA Area</label>
+            <select id="zoneHAAreaSelect" style="flex:1;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:5px 8px;color:#fff;font-size:12px;">
+              <option value="">— None —</option>
+              ${(_haRegistry.areas||[]).map(a => `<option value="${escapeHtml(a.area_id)}" ${selectedZone.ha_area_id === a.area_id ? 'selected' : ''}>${escapeHtml(a.name)}</option>`).join('')}
+            </select>
+            ${selectedZone.ha_area_id ? `<button id="zoneHAAreaSync" title="Sync entities from HA area" style="background:rgba(0,150,255,0.1);border:1px solid rgba(0,150,255,0.3);color:#4db8ff;border-radius:7px;padding:5px 8px;cursor:pointer;font-size:11px;margin-left:6px;flex-shrink:0;">↻ Sync</button>` : ''}
+          </div>
+          <div class="ha-section" style="margin-top:2px;flex:1;display:flex;flex-direction:column;">
+            <div class="ha-device-tabs" id="haDeviceTabs">
+              <button class="ha-device-tab ${_activeZoneTab==='sensors'?'active':''}" data-tab="sensors">Sensors</button>
+              <button class="ha-device-tab ${_activeZoneTab==='cameras'?'active':''}" data-tab="cameras">Cameras</button>
+              <button class="ha-device-tab ${_activeZoneTab==='lights'?'active':''}" data-tab="lights">Lights</button>
+              <button class="ha-device-tab ${_activeZoneTab==='sirens'?'active':''}" data-tab="sirens">Sirens</button>
+              <button class="ha-device-tab ${_activeZoneTab==='doors'?'active':''}" data-tab="doors">Doors &amp; Windows</button>
+            </div>
+            <div class="ha-tab-panel" id="tabPanel_sensors" style="${_activeZoneTab==='sensors'?'flex:1;overflow-y:auto;':'display:none;'}">
+              <div class="entity-search-wrap"><input type="text" id="entitySearchInput" class="entity-search-input" placeholder="Search HA entities…" autocomplete="off">
+              <div class="entity-search-results" id="entitySearchResults" style="display:none;"></div></div>
+              <div class="ha-entity-list" id="zoneEntityList">${(selectedZone.sensors||[]).map(e=>deviceRow(e,"sensors",selectedZone)).join("")}</div>
+            </div>
+            <div class="ha-tab-panel" id="tabPanel_cameras" style="${_activeZoneTab==='cameras'?'flex:1;overflow-y:auto;':'display:none;'}">
+              <div class="entity-search-wrap"><input type="text" id="cameraSearchInput" class="entity-search-input" placeholder="Search camera entities…" autocomplete="off">
+              <div class="entity-search-results" id="cameraSearchResults" style="display:none;"></div></div>
+              <div class="ha-entity-list" id="zoneCameraList">${(selectedZone.cameras||[]).map(e=>deviceRow(e,"cameras",selectedZone)).join("")}</div>
+            </div>
+            <div class="ha-tab-panel" id="tabPanel_lights" style="${_activeZoneTab==='lights'?'flex:1;overflow-y:auto;':'display:none;'}">
+              <div class="entity-search-wrap"><input type="text" id="lightSearchInput" class="entity-search-input" placeholder="Search light entities…" autocomplete="off">
+              <div class="entity-search-results" id="lightSearchResults" style="display:none;"></div></div>
+              <div class="ha-entity-list" id="zoneLightList">${(selectedZone.lights||[]).map(e=>deviceRow(e,"lights",selectedZone)).join("")}</div>
+            </div>
+            <div class="ha-tab-panel" id="tabPanel_sirens" style="${_activeZoneTab==='sirens'?'flex:1;overflow-y:auto;':'display:none;'}">
+              <div class="entity-search-wrap"><input type="text" id="sirenSearchInput" class="entity-search-input" placeholder="Search siren entities…" autocomplete="off">
+              <div class="entity-search-results" id="sirenSearchResults" style="display:none;"></div></div>
+              <div class="ha-entity-list" id="zoneSirenList">${(selectedZone.sirens||[]).map(e=>deviceRow(e,"sirens",selectedZone)).join("")}</div>
+            </div>
+            <div class="ha-tab-panel" id="tabPanel_doors" style="${_activeZoneTab==='doors'?'flex:1;overflow-y:auto;':'display:none;'}">
+              <div style="font-size:11px;color:#555;padding:6px 0 8px;">Place door &amp; window sensors on the map. Each has a sensor (open/closed) and an optional control entity (lock/switch). Use the search below to add a sensor without placing it on the map.</div>
+              <div class="entity-search-wrap"><input type="text" id="doorSearchInput" class="entity-search-input" placeholder="Search doors &amp; windows…" autocomplete="off">
+              <div class="entity-search-results" id="doorSearchResults" style="display:none;"></div></div>
+              <div class="ha-entity-list" id="zoneDoorList">${doorPins.filter(p=>doorPinZoneIds(p).includes(selectedZone.id)).map(p=>doorPinRow(p, selectedZone)).join("")}</div>
+              <button id="addDoorPinBtn" style="margin-top:8px;width:100%;background:rgba(0,150,255,0.1);border:1px solid rgba(0,150,255,0.3);color:#0096ff;border-radius:6px;padding:6px;cursor:pointer;font-size:12px;">+ Place Door or Window on Map</button>
+            </div>
+          </div>
+        </div>`;
+    }
+
+    // Nothing selected — hide right panel
+    return ``;
+  }
+
+  container.innerHTML = `
+    <div class="zones-editor" style="left:${editorPos.x}px;top:${editorPos.y}px;width:${editorW}px;height:${editorH}px;">
+      <div class="zones-editor-titlebar">
+        <h3>Zones ${floors.length > 1 ? `<span style="font-size:10px;font-weight:400;color:#666;margin-left:6px;">— ${escapeHtml(activeFloor()?.name || '')}</span>` : ''}</h3>
+        <button class="zones-editor-close" id="zonesCloseBtn" title="Close editor">✕</button>
+      </div>
+      <div class="zed-body">
+        <!-- LEFT PANEL -->
+          <div class="zed-left" style="${(!selectedZone && !selectedGroup && !activePinId) ? 'border-right:none;width:100%;' : '' }">
+          ${floors.length > 1 ? (
+            '<div style="padding:4px 8px;border-bottom:1px solid rgba(255,255,255,0.06);display:flex;align-items:center;gap:4px;">'
+            + '<select id="editorFloorSelect" style="flex:1;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:5px 8px;color:#fff;font-size:12px;">'
+            + floors.map(f => '<option value="' + f.id + '"' + (f.id === activeFloorId ? ' selected' : '') + '>' + escapeHtml(f.name) + '</option>').join('')
+            + '</select>'
+            + (!IS_DIRECT_MODE ? '<button id="floorConfigZedBtn" title="Configure floor" style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:5px 8px;color:#888;font-size:12px;cursor:pointer;flex-shrink:0;">⚙</button>' : '')
+            + '</div>'
+          ) : (!IS_DIRECT_MODE ? '<div style="padding:4px 8px;border-bottom:1px solid rgba(255,255,255,0.06);display:flex;justify-content:flex-end;"><button id="floorConfigZedBtn" title="Configure floor" style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:5px 8px;color:#888;font-size:12px;cursor:pointer;">⚙ Configure floor</button></div>' : '')}
+          <div class="zed-list" id="zonesList">${buildZoneList()}</div>
+          <div class="zed-actions">
+            <button id="addGroupBtn">+ Group</button>
+            <button id="addZoneBtn">+ Zone</button>
+            ${!IS_DIRECT_MODE ? '<button id="addFloorZedBtn">+ Floor</button>' : ''}
+            ${selectedZone ? `<button id="editPointsBtn" style="${isEditingPoints ? 'border-color:rgba(255,204,0,0.5);color:#ffcc00;' : ''}">${editPtsLabel}</button>` : ""}
+            ${selectedZone ? `<button id="undoZonesBtn" title="Undo last change">↩ Undo</button>` : ""}
+            ${(selectedZone || selectedGroup) ? `<button id="deleteZoneBtn" class="danger">Delete</button>` : ""}
+          </div>
+        </div>
+        <!-- RIGHT PANEL — completely hidden when nothing selected -->
+        <div class="zed-right" style="${(!selectedZone && !selectedGroup && !activePinId) ? 'display:none;' : ''}">${activePinId ? buildPinRightPanel() : buildRightPanel()}</div>
+      </div>
+      <div class="zed-resize-handle" id="zedResizeHandle"></div>
     </div>
   `;
 
-  document.body.appendChild(pop);
-  _doorLinksPopoverEl = pop;
+  restoreZoneEditorScrollState(container, __zedScrollState);
 
-  const rect = anchorEl.getBoundingClientRect();
-  const pad = 8;
-  const w = pop.offsetWidth || 220;
-  const h = pop.offsetHeight || 180;
-  let left = rect.left;
-  let top  = rect.bottom + pad;
-  if (left + w > window.innerWidth - 10) left = window.innerWidth - w - 10;
-  if (top + h > window.innerHeight - 10) top = rect.top - h - pad;
-  if (top < 10) top = 10;
-  if (left < 10) left = 10;
-  pop.style.left = Math.round(left) + 'px';
-  pop.style.top  = Math.round(top) + 'px';
-
-  pop.querySelector('#owDoorLinksClose')?.addEventListener('click', e => { e.stopPropagation(); closeDoorLinksPopover(); });
-  pop.querySelector('#owDoorLinksEdit')?.addEventListener('click', e => {
-    e.stopPropagation();
-    closeDoorLinksPopover();
-    if (!editorMode) editorMode = true;
-    selectPin('door', pin.id);
-    renderZones();
-    renderZonesEditor(true);
+  // ── Wire events ────────────────────────────────────────────
+  // Zone list item clicks
+  container.querySelectorAll(".zones-list-item").forEach(item => {
+    item.onclick = () => {
+      selectedZoneId  = item.dataset.zoneId;
+      selectedGroupId = null;
+      activePinId     = null; activePinType = null; // deselect any pin
+      isCreatingZone = false; currentNewZone = null;
+      renderZones(); renderZonesEditor();
+    };
   });
 
-  setTimeout(() => {
-    function outside(e) {
-      if (_doorLinksPopoverEl && !_doorLinksPopoverEl.contains(e.target) && e.target !== anchorEl) {
-        closeDoorLinksPopover();
-        document.removeEventListener('pointerdown', outside, true);
+  // Group header clicks
+  container.querySelectorAll(".zed-group-header[data-group-id]").forEach(hdr => {
+    hdr.onclick = (e) => {
+      const gid = hdr.dataset.groupId;
+      const key = hdr.dataset.storageKey;
+      // If clicking the chevron area (right side), toggle collapse only
+      const chevron = hdr.querySelector(".zed-chevron");
+      const membersEl = container.querySelector(`.zed-group-members[data-group-id="${gid}"]`);
+      if (membersEl && key) {
+        const collapsed = membersEl.style.display === "none";
+        membersEl.style.display = collapsed ? "" : "none";
+        if (chevron) chevron.style.transform = `rotate(${collapsed ? "0" : "-90"}deg)`;
+        localStorage.setItem(key, collapsed ? "expanded" : "collapsed");
+      }
+      // Also select the group (show right panel)
+      selectedGroupId = gid;
+      selectedZoneId  = null;
+      activePinId = null; activePinType = null;
+      renderZones();
+      // Re-render only the left panel actions + right panel without blowing away the list
+      // Full re-render needed to show right panel
+      renderZonesEditor();
+    };
+  });
+
+  // Floor selector — switches active floor, reloads floorplan and re-renders zone list
+  document.getElementById("editorFloorSelect")?.addEventListener("change", e => {
+    setActiveFloor(e.target.value);
+    selectedZoneId  = null;
+    selectedGroupId = null;
+    activePinId = null; activePinType = null;
+    isCreatingZone = false; currentNewZone = null;
+    renderZonesEditor(true);
+    renderZones();
+  });
+
+  // Floor config button (⚙ inline in floor selector)
+  document.getElementById("floorConfigZedBtn")?.addEventListener("click", () => {
+    openFloorConfigPanel(activeFloorId || floors[0]?.id);
+  });
+
+  // Add Floor
+  document.getElementById("addFloorZedBtn")?.addEventListener("click", async () => {
+    const name = prompt("New floor name:", "New Floor");
+    if (!name?.trim()) return;
+    const id = "floor_" + Date.now();
+    const newFloor = { id, name: name.trim(), floorplan: null, ha_floor_id: null, ha_auto_add_areas: true, ha_linked_area_ids: [] };
+    const res = await saveFloor(newFloor);
+    if (res?.floors) { floors.length = 0; res.floors.forEach(f => floors.push(f)); }
+    setActiveFloor(id);
+    // Open config panel immediately so user can set floorplan image
+    renderZonesEditor();
+    openFloorConfigPanel(id);
+  });
+
+  // Add Zone
+  document.getElementById("addZoneBtn")?.addEventListener("click", () => {
+    const id = "zone_" + Date.now();
+    const nz = { id, name: "New Zone", colorHex: "#0096ff", color: hexToRgba("#0096ff", 0.25),
+                 points: [], sensors: [], cameras: [], lights: [], sirens: [], enabled: true, hidden: false,
+                 floor_id: activeFloorId || null };
+    pushUndo(); zones.push(nz);
+    selectedZoneId = id; selectedGroupId = null;
+    isCreatingZone = true; isEditingPoints = false; currentNewZone = nz;
+    saveZone(nz); renderZones(); renderZonesEditor();
+    scheduleHAReload(); // new zone = new HA entity needed
+  });
+
+  // Add Group
+  document.getElementById("addGroupBtn")?.addEventListener("click", () => {
+    const id = "grp_" + Date.now();
+    const ng = { id, name: "New Group", colorHex: "#ff3b30", zone_ids: [] };
+    groups.push(ng);
+    selectedGroupId = id; selectedZoneId = null;
+    saveGroup(ng); renderZonesEditor();
+  });
+
+  // Add Light / Add Siren — now triggered via 📍 button in zone's Lights/Sirens tab
+
+  // Delete
+  document.getElementById("deleteZoneBtn")?.addEventListener("click", () => {
+    if (selectedGroup && !selectedZone) {
+      if (!confirm(`Delete group "${selectedGroup.name}"?`)) return;
+      deleteGroup(selectedGroupId);
+      groups = groups.filter(g => g.id !== selectedGroupId);
+      selectedGroupId = null;
+      renderZonesEditor();
+    } else if (selectedZone) {
+      pushUndo();
+      deleteZoneFile(selectedZoneId);
+      zones = zones.filter(z => z.id !== selectedZoneId);
+      // Remove from any group
+      groups.forEach(g => { g.zone_ids = (g.zone_ids||[]).filter(id => id !== selectedZoneId); saveGroup(g); });
+      selectedZoneId = null; isCreatingZone = false; isEditingPoints = false; currentNewZone = null;
+      renderZones(); renderZonesEditor();
+      scheduleHAReload(); // zone deleted — remove HA entity
+    }
+  });
+
+  // Edit Zone points
+  document.getElementById("editPointsBtn")?.addEventListener("click", () => {
+    const zone = zones.find(z => z.id === selectedZoneId);
+    if (zone && (zone.points || []).length < 3) {
+      // Zone not complete yet — resume creation mode so more points can be added
+      isCreatingZone  = true;
+      isEditingPoints = false;
+      currentNewZone  = zone;
+    } else {
+      isEditingPoints = !isEditingPoints;
+      isCreatingZone  = false;
+      currentNewZone  = null;
+    }
+    renderZones(); renderZonesEditor();
+  });
+
+  // ── Group config wiring ──────────────────────────────────
+  if (selectedGroup && !selectedZone) {
+    document.getElementById("groupNameInput")?.addEventListener("input", e => {
+      selectedGroup.name = e.target.value;
+      saveGroup(selectedGroup);
+      renderZonesEditor();
+      // Also update the group header name in the left panel tree immediately
+      const treeHdr = document.querySelector(`.zed-group-header[data-group-id="${CSS.escape(selectedGroup.id)}"] span`);
+      if (treeHdr) treeHdr.textContent = e.target.value || '(unnamed)';
+    });
+    document.getElementById("groupNameInput")?.addEventListener("blur", e => {
+      const newName = e.target.value.trim();
+      if (newName && window.OW_Automations?.repushAll) {
+        window.OW_Automations.repushAll().then(() =>
+          logEvent("ok", `Automations updated for renamed group "${newName}".`, "system")
+        );
+      }
+    });
+
+    document.getElementById("groupColorInput")?.addEventListener("input", e => {
+      selectedGroup.colorHex = e.target.value;
+      saveGroup(selectedGroup);
+      renderZones();
+      renderZonesEditor();
+    });
+
+    document.getElementById("groupArmedToggle")?.addEventListener("change", e => {
+      setGroupArmed(selectedGroupId, e.target.checked);
+    });
+
+    document.querySelectorAll(".group-member-chk").forEach(chk => {
+      chk.addEventListener("change", e => {
+        const zid = e.target.dataset.zoneId;
+        selectedGroup.zone_ids = selectedGroup.zone_ids || [];
+        if (e.target.checked) {
+          if (!selectedGroup.zone_ids.includes(zid)) selectedGroup.zone_ids.push(zid);
+        } else {
+          selectedGroup.zone_ids = selectedGroup.zone_ids.filter(id => id !== zid);
+        }
+        saveGroup(selectedGroup);
+        renderZonesEditor();
+      });
+    });
+
+    document.getElementById("deleteGroupBtn")?.addEventListener("click", () => {
+      if (!confirm(`Delete group "${selectedGroup.name}"?`)) return;
+      deleteGroup(selectedGroupId);
+      groups = groups.filter(g => g.id !== selectedGroupId);
+      selectedGroupId = null;
+      renderZonesEditor();
+    });
+  }
+
+  // ── Pin config wiring ─────────────────────────────────────
+  if (activePinId) {
+    const pin = activePinType === 'light'  ? lights.find(p => p.id === activePinId)
+              : activePinType === 'siren'  ? sirens.find(p => p.id === activePinId)
+              : activePinType === 'door'   ? doorPins.find(p => p.id === activePinId)
+              : cameraPins.find(p => p.id === activePinId);
+
+    const savePin = () => {
+      if (activePinType === 'light')  saveLight(pin);
+      else if (activePinType === 'siren') saveSiren(pin);
+      else if (activePinType === 'door') saveDoorPin(pin);
+      else saveCameraPin(pin);
+    };
+
+    if (pin) {
+      document.getElementById('pinNameInput')?.addEventListener('input', e => {
+        pin.name = e.target.value; savePin();
+      });
+
+      // Door-specific: sensor + control entity autocomplete + rotation
+      if (activePinType === 'door') {
+        const wireEntitySearch = (inputId, resultsId, prefixes, onSelect) => {
+          const inp = document.getElementById(inputId);
+          const res = document.getElementById(resultsId);
+          if (!inp || !res) return;
+          inp.addEventListener('keydown', e => e.stopPropagation());
+          inp.addEventListener('input', e => {
+            e.stopPropagation();
+            const q = inp.value.trim().toLowerCase();
+            if (!q) { res.style.display = 'none'; return; }
+            const matches = Object.keys(haStates).filter(id =>
+              prefixes.some(p => id.startsWith(p)) && id.toLowerCase().includes(q)
+            ).slice(0, 10);
+            res.innerHTML = matches.map(id =>
+              `<div class="entity-search-result" data-id="${escapeHtml(id)}" style="padding:5px 8px;cursor:pointer;font-size:11px;color:#ccc;border-bottom:1px solid rgba(255,255,255,0.05);">${escapeHtml(id)}</div>`
+            ).join('') || `<div style="padding:6px 8px;color:#555;font-size:11px;">No matches</div>`;
+            res.style.display = 'block';
+            res.querySelectorAll('[data-id]').forEach(row => {
+              row.addEventListener('mousedown', e => {
+                e.preventDefault();
+                inp.value = row.dataset.id;
+                res.style.display = 'none';
+                onSelect(row.dataset.id);
+              });
+            });
+          });
+          inp.addEventListener('blur', () => setTimeout(() => res.style.display = 'none', 150));
+        };
+
+        wireEntitySearch('pinEntityInput', 'pinEntityResults',
+          ['binary_sensor.', 'sensor.'],
+          val => { pin.sensor_entity = val; savePin(); renderZones(); }
+        );
+        // Also save on blur
+        document.getElementById('pinEntityInput')?.addEventListener('blur', e => {
+          pin.sensor_entity = e.target.value.trim(); savePin(); renderZones();
+        });
+
+        wireEntitySearch('pinControlEntityInput', 'pinCtrlResults',
+          ['lock.', 'cover.', 'switch.', 'input_boolean.', 'button.'],
+          val => { pin.control_entity = val; savePin(); renderZones(); }
+        );
+        document.getElementById('pinControlEntityInput')?.addEventListener('blur', e => {
+          pin.control_entity = e.target.value.trim() || null; savePin(); renderZones();
+        });
+
+        // Control trigger options
+        const ctlChk = document.getElementById('pinControlCountsChk');
+        if (ctlChk) {
+          ctlChk.addEventListener('change', e => {
+            pin.control_counts_as_trigger = !!e.target.checked;
+            savePin();
+            renderZones();
+          });
+        }
+
+        const cog = document.getElementById('pinControlTriggerCog');
+        const pop = document.getElementById('pinControlTriggerPopover');
+        const sel = document.getElementById('pinControlTriggerSelect');
+        if (sel) {
+          const v = pin.control_trigger_state;
+          sel.value = (v === null || v === undefined) ? '' : String(v);
+          sel.addEventListener('change', () => {
+            pin.control_trigger_state = sel.value ? sel.value : null;
+            savePin();
+            renderZones();
+          });
+        }
+        if (cog && pop) {
+          cog.addEventListener('click', e => {
+            e.stopPropagation();
+            pop.style.display = (pop.style.display === 'none' || !pop.style.display) ? 'block' : 'none';
+          });
+          document.addEventListener('pointerdown', function _close(e) {
+            if (!pop) return;
+            if (pop.style.display === 'none') return;
+            if (pop.contains(e.target) || cog.contains(e.target)) return;
+            pop.style.display = 'none';
+          }, true);
+        }
+
+        // Linked zones list (alphabetical, search, checked first)
+        const zsInp = document.getElementById('pinZonesSearchInput');
+        const zsList = document.getElementById('pinZonesList');
+        function _zoneLabel(z) { return String((z?.name || z?.id || '')).trim(); }
+        function renderLinkedZonesList() {
+          if (!zsList) return;
+          const q = String(zsInp?.value || '').trim().toLowerCase();
+          const beforeScroll = zsList.scrollTop;
+          const linked = new Set(doorPinZoneIds(pin));
+          const items = [...zones].map(z => ({
+            z,
+            id: z.id,
+            name: _zoneLabel(z),
+            checked: linked.has(z.id),
+          }))
+          .filter(x => !q || x.id.toLowerCase().includes(q) || x.name.toLowerCase().includes(q))
+          .sort((a,b) => {
+            if (a.checked !== b.checked) return a.checked ? -1 : 1;
+            return a.name.localeCompare(b.name);
+          });
+
+          zsList.innerHTML = items.map(x => {
+            const floor = floors.find(f => f.id === x.z.floor_id)?.name || '';
+            const floorTag = floor ? `<span style="font-size:10px;color:#555;margin-left:6px;">${escapeHtml(floor)}</span>` : '';
+            return `<label style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12px;color:${x.checked ? '#ddd' : '#aaa'};">
+              <input type="checkbox" class="pinZoneLinkChk" data-zone-id="${escapeHtml(x.id)}" ${x.checked ? 'checked' : ''} style="accent-color:#0096ff;">
+              <span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;">${escapeHtml(x.name)}</span>${floorTag}
+            </label>`;
+          }).join('') || `<div style="padding:6px 2px;color:#555;font-size:12px;">No matches</div>`;
+
+          zsList.scrollTop = beforeScroll;
+
+          zsList.querySelectorAll('.pinZoneLinkChk').forEach(chk => {
+            chk.addEventListener('change', () => {
+              const zid = chk.dataset.zoneId;
+              const current = new Set(doorPinZoneIds(pin));
+              if (chk.checked) current.add(zid); else current.delete(zid);
+
+              // Keep legacy zone_id stable when possible (compat for any remaining code reading zone_id)
+              const primary = (pin.zone_id && current.has(pin.zone_id)) ? pin.zone_id : (Array.from(current)[0] || null);
+              let rest = Array.from(current).filter(id => id && id !== primary);
+              rest.sort((a,b) => _zoneLabel(zones.find(z=>z.id===a)).localeCompare(_zoneLabel(zones.find(z=>z.id===b))));
+
+              let next = primary ? [primary, ...rest] : rest;
+              if (!next.length) {
+                const fallback = pin.zone_id || zones[0]?.id || null;
+                if (fallback) next = [fallback];
+              }
+
+              pin.zone_ids = next;
+              pin.zone_id  = next[0];
+              savePin();
+              renderZones();
+              renderLinkedZonesList();
+            });
+          });
+        }
+
+        zsInp?.addEventListener('input', () => renderLinkedZonesList());
+        renderLinkedZonesList();
+
+
+        const rotEl  = document.getElementById('pinRotationInput');
+        const rotVal = document.getElementById('pinRotationVal');
+        if (rotEl) {
+          rotEl.addEventListener('input', e => {
+            e.stopPropagation();
+            pin.rotation = Number(e.target.value);
+            if (rotVal) rotVal.textContent = pin.rotation + '°';
+            renderZones();
+          });
+          rotEl.addEventListener('change', () => savePin());
+        }
+
+        // Door type — single / double / sliding
+        document.getElementById('doorTypeSingle')?.addEventListener('click', () => {
+          pin.doorType = 'single'; savePin(); renderZones(); renderZonesEditor();
+        });
+        document.getElementById('doorTypeDouble')?.addEventListener('click', () => {
+          pin.doorType = 'double'; savePin(); renderZones(); renderZonesEditor();
+        });
+        document.getElementById('doorTypeSliding')?.addEventListener('click', () => {
+          pin.doorType = 'sliding'; savePin(); renderZones(); renderZonesEditor();
+        });
+        // Hinge side — left / right
+        document.getElementById('doorHandLeft')?.addEventListener('click', () => {
+          pin.doorHand = 'left'; savePin(); renderZones(); renderZonesEditor();
+        });
+        document.getElementById('doorHandRight')?.addEventListener('click', () => {
+          pin.doorHand = 'right'; savePin(); renderZones(); renderZonesEditor();
+        });
+        // Width slider
+        const sizeWEl = document.getElementById('pinSizeWInput');
+        const sizeWVal = document.getElementById('pinSizeWVal');
+        if (sizeWEl) {
+          sizeWEl.addEventListener('input', e => {
+            e.stopPropagation();
+            pin.sizeW = Number(e.target.value);
+            if (sizeWVal) sizeWVal.textContent = pin.sizeW;
+            renderZones();
+          });
+          sizeWEl.addEventListener('change', () => savePin());
+        }
+        // Depth slider
+        const sizeDEl = document.getElementById('pinSizeDInput');
+        const sizeDVal = document.getElementById('pinSizeDVal');
+        if (sizeDEl) {
+          sizeDEl.addEventListener('input', e => {
+            e.stopPropagation();
+            pin.sizeH = Number(e.target.value);
+            if (sizeDVal) sizeDVal.textContent = pin.sizeH;
+            renderZones();
+          });
+          sizeDEl.addEventListener('change', () => savePin());
+        }
+        const auraEl  = document.getElementById('pinAuraRadInput');
+        const auraVal = document.getElementById('pinAuraRadVal');
+        if (auraEl) {
+          auraEl.addEventListener('input', e => {
+            e.stopPropagation();
+            pin.auraRadius = Number(e.target.value);
+            if (auraVal) auraVal.textContent = pin.auraRadius;
+            renderZones();
+          });
+          auraEl.addEventListener('change', () => savePin());
+        }
+      }
+      document.getElementById('pinEntityInput')?.addEventListener('keydown', e => e.stopPropagation());
+      document.getElementById('pinEntityInput')?.addEventListener('input',   e => e.stopPropagation());
+      document.getElementById('pinEntityInput')?.addEventListener('blur', e => {
+        pin.entity_id = e.target.value.trim(); savePin(); renderZones();
+      });
+
+      // Radius slider — live preview, save on pointerup
+      const radiusEl = document.getElementById('pinRadiusInput');
+      const radiusVal = document.getElementById('pinRadiusVal');
+      if (radiusEl) {
+        radiusEl.addEventListener('input', e => {
+          pin.radius = Number(e.target.value);
+          if (radiusVal) radiusVal.textContent = pin.radius;
+          renderZones(); // live preview
+        });
+        radiusEl.addEventListener('change', () => saveLight(pin));
+      }
+
+      // Direction slider — -1 means no direction (omnidirectional)
+      const dirEl  = document.getElementById('pinDirectionInput');
+      const dirVal = document.getElementById('pinDirVal');
+      if (dirEl) {
+        dirEl.addEventListener('input', e => {
+          const v = Number(e.target.value);
+          pin.direction = v < 0 ? null : v;
+          if (dirVal) dirVal.textContent = v < 0 ? 'none' : v + '°';
+          // Show/hide spread row dynamically
+          const spreadRow = document.getElementById('pinSpreadRow');
+          if (spreadRow) spreadRow.style.display = v < 0 ? 'none' : 'flex';
+          renderZones(); // live preview
+        });
+        dirEl.addEventListener('change', () => savePin());
+      }
+
+      // Spread slider
+      const spreadEl  = document.getElementById('pinSpreadInput');
+      const spreadVal = document.getElementById('pinSpreadVal');
+      if (spreadEl) {
+        spreadEl.addEventListener('input', e => {
+          pin.spread = Number(e.target.value);
+          if (spreadVal) spreadVal.textContent = pin.spread + '°';
+          renderZones();
+        });
+        spreadEl.addEventListener('change', () => savePin());
+      }
+
+      // Tap action buttons (lights only)
+      document.getElementById('pinTapThis')?.addEventListener('click', () => {
+        pin.tapAll = false; pin.tapZone = false; savePin(); renderZonesEditor();
+      });
+      document.getElementById('pinTapAll')?.addEventListener('click', () => {
+        pin.tapAll = true; pin.tapZone = false; savePin(); renderZonesEditor();
+      });
+      // Siren-specific tap actions
+      document.getElementById('pinTapZone')?.addEventListener('click', () => {
+        pin.tapZone = true; pin.tapAll = false; savePin(); renderZonesEditor();
+      });
+      document.getElementById('pinTapAllSirens')?.addEventListener('click', () => {
+        pin.tapAll = true; pin.tapZone = false; savePin(); renderZonesEditor();
+      });
+
+      // Siren radius slider
+      const sirenRadiusEl  = document.getElementById('pinRadiusInput');
+      const sirenRadiusVal = document.getElementById('pinRadiusVal');
+      if (sirenRadiusEl && activePinType === 'siren') {
+        sirenRadiusEl.addEventListener('input', e => {
+          pin.radius = Number(e.target.value);
+          if (sirenRadiusVal) sirenRadiusVal.textContent = pin.radius;
+          renderZones();
+        });
+        sirenRadiusEl.addEventListener('change', () => savePin());
+      }
+
+      document.getElementById('pinDoneBtn')?.addEventListener('click', () => {
+        activePinId = null; activePinType = null;
+        renderZones(); renderZonesEditor();
+      });
+      document.getElementById('pinDeleteBtn')?.addEventListener('click', () => {
+        if (!confirm(`Delete this ${activePinType}?`)) return;
+        if (activePinType === 'light') deleteLight(activePinId);
+        else if (activePinType === 'siren') deleteSiren(activePinId);
+        else if (activePinType === 'door') deleteDoorPin(activePinId);
+        else deleteCameraPin(activePinId);
+        activePinId = null; activePinType = null;
+        renderZones(); renderZonesEditor();
+      });
+    }
+  }
+
+  // ── Zone config wiring ───────────────────────────────────
+  if (selectedZone) {
+    let _zoneOrigName = selectedZone.name || "";
+    document.getElementById("zoneNameInput")?.addEventListener("input", e => {
+      selectedZone.name = e.target.value;
+      saveZone(selectedZone);
+      // Update the name label in the left panel tree immediately without full re-render
+      // (renderZonesEditor early-returns when an input has focus to preserve cursor position)
+      const treeItem = document.querySelector(`.zones-list-item[data-zone-id="${CSS.escape(selectedZone.id)}"]`);
+      if (treeItem) {
+        const nameSpan = treeItem.querySelector('span:first-of-type');
+        if (nameSpan) nameSpan.textContent = e.target.value || '(unnamed)';
+      }
+    });
+    document.getElementById("zoneNameInput")?.addEventListener("blur", e => {
+      const newName = e.target.value.trim();
+      if (newName && newName !== _zoneOrigName) {
+        // Re-push all OW automations so entity IDs reflect the new slug
+        if (window.OW_Automations?.repushAll) {
+          window.OW_Automations.repushAll().then(() =>
+            logEvent("ok", `Automations updated for renamed zone "${newName}".`, "system")
+          );
+        } else {
+          logEvent("warn",
+            `Zone renamed to "${newName}". Re-open Automation Editor and re-save any automations referencing this zone.`,
+            "system");
+        }
+        _zoneOrigName = newName;
+        // Re-sync the new entity state to HA
+        owEntitySet("zone", selectedZone.id, selectedZone.enabled !== false);
+      }
+    });
+
+    document.getElementById("zoneColorInput")?.addEventListener("input", e => {
+      selectedZone.colorHex = e.target.value;
+      selectedZone.color = hexToRgba(e.target.value, 0.25);
+      saveZone(selectedZone); renderZones();
+    });
+
+    document.getElementById("zoneEnabledToggle")?.addEventListener("change", e => {
+      setZoneEnabled(selectedZone.id, e.target.checked); renderZonesEditor();
+    });
+
+    document.getElementById("zoneHiddenToggle")?.addEventListener("click", () => {
+      setZoneHidden(selectedZone.id, !selectedZone.hidden); renderZonesEditor();
+    });
+
+    document.getElementById("zoneFloorSelect")?.addEventListener("change", e => {
+      selectedZone.floor_id = e.target.value;
+      saveZone(selectedZone);
+      renderZones(); renderZonesEditor();
+    });
+
+    document.getElementById("zoneGroupSelect")?.addEventListener("change", e => {
+      setZoneGroup(selectedZone.id, e.target.value || null);
+    });
+
+    // HA Area select — when changed, remove old area's synced entities and sync new area
+    document.getElementById("zoneHAAreaSelect")?.addEventListener("change", async e => {
+      const oldAreaId = selectedZone.ha_area_id;
+      const newAreaId = e.target.value || null;
+
+      // Remove entities that came from the OLD area (not manually added)
+      if (oldAreaId && oldAreaId !== newAreaId) {
+        const oldAreaEntities = new Set(haEntitiesForArea(oldAreaId).map(e => e.entity_id));
+        // Also include door pins from old area
+        const oldDoorPins = doorPins.filter(p => doorPinZoneIds(p).includes(selectedZone.id) && oldAreaEntities.has(p.sensor_entity));
+        for (const pin of oldDoorPins) {
+          doorPins.splice(doorPins.indexOf(pin), 1);
+          await fetch(apiPath('ow/delete-door-pin'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: pin.id }) });
+        }
+        // Remove from entity tabs — only those that came from the old area
+        ['sensors','cameras','lights','sirens'].forEach(tab => {
+          selectedZone[tab] = (selectedZone[tab]||[]).filter(eid => !oldAreaEntities.has(eid));
+        });
+        // Clear excluded entities from old area too
+        selectedZone.ha_excluded_entities = (selectedZone.ha_excluded_entities||[]).filter(eid => !oldAreaEntities.has(eid));
+      }
+
+      selectedZone.ha_area_id = newAreaId;
+      await saveZone(selectedZone);
+
+      // Sync entities from new area if one was selected. Force a registry refresh so
+      // newly-added/removed HA area devices are reconciled immediately.
+      if (newAreaId) await syncZoneFromHAArea(selectedZone, { forceRefresh: true });
+
+      renderZonesEditor(true);
+    });
+
+    // HA Area sync button — authoritative refresh + reconcile from HA area
+    document.getElementById("zoneHAAreaSync")?.addEventListener("click", async () => {
+      await syncZoneFromHAArea(selectedZone, { forceRefresh: true });
+      renderZonesEditor(true);
+    });
+
+    // Device tabs
+    document.getElementById("haDeviceTabs")?.querySelectorAll(".ha-device-tab").forEach(btn => {
+      btn.addEventListener("click", () => {
+        _activeZoneTab = btn.dataset.tab; // persist across re-renders
+        document.querySelectorAll(".ha-device-tab").forEach(b => b.classList.remove("active"));
+        document.querySelectorAll(".ha-tab-panel").forEach(p => { p.style.display = "none"; p.style.flex = ""; });
+        btn.classList.add("active");
+        const panel = document.getElementById("tabPanel_" + btn.dataset.tab);
+        if (panel) { panel.style.display = ""; panel.style.flex = "1"; panel.style.overflowY = "auto"; }
+      });
+    });
+
+    // Entity remove + ghost buttons
+    ["sensors","cameras","lights","sirens"].forEach(devType => {
+      const listId = { sensors:"zoneEntityList", cameras:"zoneCameraList", lights:"zoneLightList", sirens:"zoneSirenList" }[devType];
+      document.getElementById(listId)?.querySelectorAll(".ha-entity-remove").forEach(btn => {
+        btn.onclick = e => {
+          e.stopPropagation();
+          selectedZone[devType] = (selectedZone[devType]||[]).filter(s => s !== btn.dataset.entityId);
+          saveZone(selectedZone);
+          if (devType === "sensors") subscribeHAEntities();
+          renderZonesEditor();
+        };
+      });
+      // Ghost toggle — adds/removes from ha_excluded_entities
+      document.getElementById(listId)?.querySelectorAll(".ha-entity-ghost").forEach(btn => {
+        btn.onclick = e => {
+          e.stopPropagation();
+          const eid = btn.dataset.entityId;
+          if (!selectedZone.ha_excluded_entities) selectedZone.ha_excluded_entities = [];
+          const ex = selectedZone.ha_excluded_entities;
+          if (ex.includes(eid)) {
+            selectedZone.ha_excluded_entities = ex.filter(x => x !== eid); // restore
+          } else {
+            ex.push(eid); // ghost
+          }
+          saveZone(selectedZone);
+          renderZonesEditor();
+        };
+      });
+    });
+
+    bindDeviceSearch(selectedZone, "entitySearchInput", "entitySearchResults", "sensors",  "zoneEntityList");
+    bindDeviceSearch(selectedZone, "cameraSearchInput", "cameraSearchResults", "cameras",  "zoneCameraList");
+    bindDeviceSearch(selectedZone, "lightSearchInput",  "lightSearchResults",  "lights",   "zoneLightList");
+    bindDeviceSearch(selectedZone, "sirenSearchInput",  "sirenSearchResults",  "sirens",   "zoneSirenList");
+
+    // Doors tab — Place, Edit, Delete
+    // Door search — selecting entity pre-fills sensor and enters place mode
+    const doorSearchEl = document.getElementById('doorSearchInput');
+    if (doorSearchEl) {
+      doorSearchEl.addEventListener('keydown', e => e.stopPropagation());
+      const triggerDoorSearch = (e) => {
+        e.stopPropagation();
+        const q = e.target.value.trim().toLowerCase();
+        const resultsEl = document.getElementById('doorSearchResults');
+        if (!resultsEl) return;
+        const DOOR_CLASSES = new Set(['door','window','garage_door','opening','lock','gate','awning','blind','curtain','damper','shutter','shade']);
+        // When no query: show all door/window class entities. When query: also match id/name.
+        const matches = Object.keys(haStates).filter(id => {
+          if (!id.startsWith('binary_sensor.') && !id.startsWith('sensor.')) return false;
+          const attrs = haStates[id]?.attributes || {};
+          const dc = (attrs.device_class || '').toLowerCase();
+          const fn = (attrs.friendly_name || '').toLowerCase();
+          const isDoorType = DOOR_CLASSES.has(dc);
+          if (!q) return isDoorType; // no query → show only door/window class
+          const matchesQuery = id.toLowerCase().includes(q) || fn.includes(q);
+          return matchesQuery; // with query → show any matching sensor
+        }).sort((a, b) => {
+          // Sort door/window class entities to top
+          const da = DOOR_CLASSES.has((haStates[a]?.attributes?.device_class||'').toLowerCase());
+          const db = DOOR_CLASSES.has((haStates[b]?.attributes?.device_class||'').toLowerCase());
+          return (db ? 1 : 0) - (da ? 1 : 0);
+        }).slice(0, 50);
+        resultsEl.innerHTML = (matches.length ? matches : []).map(id => {
+          const attrs = haStates[id]?.attributes || {};
+          const fn = attrs.friendly_name || id.split('.').pop().replace(/_/g,' ');
+          const dc = attrs.device_class || '';
+          return `<div class="entity-search-result" data-entity-id="${escapeHtml(id)}">${escapeHtml(fn)} <span style="color:#555;font-size:10px;">${escapeHtml(id)}${dc ? ' · '+escapeHtml(dc) : ''}</span></div>`;
+        }).join('') || `<div style="padding:6px;color:#555;font-size:12px;">${q ? 'No matches' : 'No door/window sensors found'}</div>`;
+        resultsEl.style.display = 'block';
+        resultsEl.querySelectorAll('.entity-search-result').forEach(row => {
+          row.addEventListener('click', () => {
+            const entityId = row.dataset.entityId;
+            // Create a door pin directly without requiring map placement
+            // Pin is created with no x/y position (won't render on map until placed)
+            const zone = selectedZone;
+            const newPin = {
+              id:             'door_' + Date.now(),
+              name:           entityId.split('.').pop().replace(/_/g, ' '),
+              sensor_entity:  entityId,
+              control_entity: null,
+              zone_id:        zone.id,
+              floor_id:       zone.floor_id || activeFloorId || null,
+              x:              null,
+              y:              null,
+              rotation:       0,
+            };
+            doorPins.push(newPin);
+            saveDoorPin(newPin);
+            doorSearchEl.value = '';
+            resultsEl.innerHTML = '';
+            resultsEl.style.display = 'none';
+            renderZonesEditor();
+            logEvent('info', `Added ${entityId} as door/window sensor. Use "Place on Map" to position it.`, 'system');
+          });
+        });
+      };
+      doorSearchEl.addEventListener('input', triggerDoorSearch);
+      doorSearchEl.addEventListener('focus', triggerDoorSearch);
+      // Close results when clicking outside the search box
+      document.addEventListener('click', function closeDoorSearch(e) {
+        if (!doorSearchEl.isConnected) { document.removeEventListener('click', closeDoorSearch); return; }
+        const wrap = doorSearchEl.closest('.entity-search-wrap');
+        if (wrap && !wrap.contains(e.target)) {
+          const resultsEl = document.getElementById('doorSearchResults');
+          if (resultsEl) { resultsEl.innerHTML = ''; resultsEl.style.display = 'none'; }
+        }
+      });
+    }
+
+    document.getElementById("addDoorPinBtn")?.addEventListener("click", () => {
+      // Enter crosshair mode — user clicks the map to place the door
+      placingPinType  = 'door';
+      placingEntityId = '';
+      placingZoneId   = selectedZone.id;
+      document.querySelectorAll('#zonesSvg, .fp-svg').forEach(s => s.style.cursor = 'crosshair');
+      // Show hint
+      logEvent('info', 'Click the map to place the door icon.', 'system');
+    });
+
+    document.querySelectorAll(".door-pin-place-btn").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const pin = doorPins.find(p => p.id === btn.dataset.id);
+        if (!pin) return;
+        placingPinType  = 'door';
+        placingEntityId = pin.sensor_entity || '';
+        placingZoneId   = pin.zone_id;
+        _placingExistingPinId = pin.id; // flag to update existing pin rather than create new
+        document.querySelectorAll('#zonesSvg, .fp-svg').forEach(s => s.style.cursor = 'crosshair');
+        logEvent('info', `Click the map to place ${pin.name || pin.sensor_entity}`, 'system');
+      });
+    });
+
+    document.querySelectorAll(".door-pin-edit-btn").forEach(btn => {
+      btn.addEventListener("click", () => {
+        selectPin('door', btn.dataset.id);
+        renderZones(); renderZonesEditor();
+      });
+    });
+
+    document.querySelectorAll(".door-pin-links-btn").forEach(btn => {
+      btn.addEventListener("click", e => { e.stopPropagation(); openDoorLinksPopover(btn.dataset.id, btn); });
+    });
+
+    document.querySelectorAll(".door-pin-ghost").forEach(btn => {
+      btn.addEventListener("click", e => {
+        e.stopPropagation();
+        const id = btn.dataset.entityId;
+        selectedZone.ha_excluded_entities = selectedZone.ha_excluded_entities || [];
+        if (selectedZone.ha_excluded_entities.includes(id)) {
+          selectedZone.ha_excluded_entities = selectedZone.ha_excluded_entities.filter(x => x !== id);
+        } else {
+          selectedZone.ha_excluded_entities.push(id);
+        }
+        saveZone(selectedZone);
+        subscribeHAEntities();
+        renderZones(); renderZonesEditor();
+      });
+    });
+
+    document.querySelectorAll(".door-pin-delete-btn").forEach(btn => {
+      btn.addEventListener("click", () => {
+        if (!confirm("Delete this door pin?")) return;
+        deleteDoorPin(btn.dataset.id);
+        renderZones(); renderZonesEditor();
+      });
+    });
+  } // end if (selectedZone && editorMode)
+
+  // ── Undo / Export ────────────────────────────────────────
+  document.getElementById("undoZonesBtn")?.addEventListener("click", undoZones);
+
+  const exportBtn = document.getElementById("exportZonesBtn");
+  if (exportBtn) {
+    exportBtn.onclick = () => {
+      const blob = new Blob([generateZonesYaml()], { type: "text/yaml" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a"); a.href = url; a.download = "zones_export.yaml"; a.click();
+      URL.revokeObjectURL(url);
+    };
+    // Import button
+    if (!document.getElementById("importZonesBtn")) {
+      const importBtn = document.createElement("button");
+      importBtn.id = "importZonesBtn"; importBtn.textContent = "Import YAML";
+      const importInput = document.createElement("input");
+      importInput.id = "importZonesFile"; importInput.type = "file"; importInput.accept = ".yaml,.yml,.txt"; importInput.style.display = "none";
+      exportBtn.insertAdjacentElement("afterend", importBtn);
+      importBtn.insertAdjacentElement("afterend", importInput);
+      importBtn.onclick = () => importInput.click();
+      importInput.onchange = () => {
+        const file = importInput.files[0]; if (!file) return;
+        const reader = new FileReader();
+        reader.onload = e => { try { importZonesFromYaml(e.target.result); } catch {} };
+        reader.readAsText(file);
+      };
+    }
+  }
+
+  // ── Resize handle (bottom-right corner) ──────────────────
+  const resizeHandle = document.getElementById("zedResizeHandle");
+  if (resizeHandle) {
+    let resizing = false, rsx = 0, rsy = 0, rsw = 0, rsh = 0;
+    resizeHandle.addEventListener("pointerdown", e => {
+      resizing = true; rsx = e.clientX; rsy = e.clientY;
+      rsw = editorSize.w; rsh = editorSize.h;
+      resizeHandle.setPointerCapture(e.pointerId);
+      e.stopPropagation(); e.preventDefault();
+    });
+    resizeHandle.addEventListener("pointermove", e => {
+      if (!resizing) return;
+      editorSize.w = Math.max(240, rsw + (e.clientX - rsx));
+      editorSize.h = Math.max(300, rsh + (e.clientY - rsy));
+      const panel = container.querySelector(".zones-editor");
+      if (panel) { panel.style.width = editorSize.w + "px"; panel.style.height = editorSize.h + "px"; }
+    });
+    resizeHandle.addEventListener("pointerup", () => { resizing = false; localStorage.setItem("editorW", editorSize.w); localStorage.setItem("editorH", editorSize.h); });
+  }
+
+  // Restore draggable
+  const titlebar = container.querySelector(".zones-editor-titlebar");
+  if (titlebar && !titlebar._draggableWired) {
+    makeDraggableEditor(container);
+    titlebar._draggableWired = true;
+  }
+}
+
+
+/* ─── DEVICE ROW HELPER ───────────────────────────────────── */
+// Door pin summary row in zone editor Doors tab
+function doorPinRow(pin, zone) {
+  normalizeDoorPin(pin);
+  const sState = haStates[pin.sensor_entity]?.state;
+  const isOpen = ['on','open','opening','detected','unlocked'].includes(String(sState || '').toLowerCase());
+  const excluded = !!(zone && pin.sensor_entity && (zone.ha_excluded_entities || []).includes(pin.sensor_entity));
+  const colour = excluded ? '#777' : sState === undefined ? '#555' : isOpen ? '#ff9500' : '#34c759';
+  const isPlaced = pin.x != null && pin.y != null;
+  const zCount = doorPinZoneIds(pin).length;
+
+  const editBtn = `<button class="door-pin-edit-btn" data-id="${escapeHtml(pin.id)}" style="background:none;border:1px solid rgba(255,255,255,0.15);border-radius:4px;padding:2px 6px;cursor:pointer;font-size:10px;color:#888;flex-shrink:0;">Edit</button>`;
+  const placeBtn = !isPlaced
+    ? `<button class="door-pin-place-btn" data-id="${escapeHtml(pin.id)}" style="background:none;border:1px solid rgba(0,150,255,0.4);border-radius:4px;padding:2px 6px;cursor:pointer;font-size:10px;color:#4db8ff;flex-shrink:0;">📍 Place</button>${editBtn}`
+    : editBtn;
+  const ghostBtn = zone?.ha_area_id && pin.sensor_entity
+    ? `<button class="door-pin-ghost" data-entity-id="${escapeHtml(pin.sensor_entity)}" title="${excluded ? 'Restore entity' : 'Ghost entity — keep visible but ignore in Overwatch'}" style="background:none;border:1px solid ${excluded ? 'rgba(255,149,0,0.5)' : 'rgba(255,255,255,0.12)'};border-radius:4px;padding:2px 6px;cursor:pointer;font-size:10px;color:${excluded ? '#ff9500' : '#555'};flex-shrink:0;">${excluded ? '👻 Hidden' : '👻'}</button>`
+    : '';
+  const linkBtn = zCount > 1
+    ? `<button class="door-pin-links-btn" data-id="${escapeHtml(pin.id)}" title="View linked zones" style="background:none;border:1px solid rgba(255,255,255,0.12);border-radius:4px;padding:2px 6px;cursor:pointer;font-size:10px;color:#666;flex-shrink:0;">🔗 ${zCount}</button>`
+    : '';
+
+  return `<div class="ha-entity-row" data-door-pin-id="${escapeHtml(pin.id)}" style="flex-wrap:wrap;gap:6px;${excluded ? 'opacity:0.45;' : ''}">
+    <div class="ha-entity-state" style="background:${colour};flex-shrink:0;"></div>
+    <span class="ha-entity-id" title="${escapeHtml(pin.sensor_entity||'')}">${escapeHtml(pin.name || pin.sensor_entity?.split('.').pop() || 'Door')}</span>
+    <span class="ha-entity-type" style="font-size:10px;color:#555;">${excluded ? 'GHOSTED' : sState ? (isOpen?'OPEN':'CLOSED') : '—'}</span>
+    ${linkBtn}
+    ${ghostBtn}
+    ${placeBtn}
+    <button class="door-pin-delete-btn" data-id="${escapeHtml(pin.id)}" style="background:none;border:none;color:#ff3b30;cursor:pointer;font-size:12px;flex-shrink:0;">✕</button>
+  </div>`;
+}
+
+
+
+function deviceRow(entityId, devType, zone) {
+  const st = haStates[entityId];
+  const stateStr  = st ? st.state : (haConnected ? "unavailable" : "—");
+  const stateClass = st ? (isEntityTriggered(entityId) ? "on" : "off") : "unavailable";
+  const shortId   = entityId.split(".").pop() || entityId;
+  const fn        = st?.attributes?.friendly_name;
+  const displayName = fn || shortId;
+  const icons = { sensors:"⬡", cameras:"⊡", lights:"⊙", sirens:"⊛" };
+  const icon = icons[devType] || "·";
+
+  // Ghost state — entity is excluded (from HA area sync but user toggled off)
+  const excluded = zone && (zone.ha_excluded_entities || []).includes(entityId);
+  // If zone is linked to HA area, use ghost instead of delete for all entities in this zone
+  const isHALinked = !!zone?.ha_area_id;
+  const ghostBtn = isHALinked
+    ? `<button class="ha-entity-ghost" data-entity-id="${escapeHtml(entityId)}" title="${excluded ? 'Restore entity (currently hidden from automations & search)' : 'Hide entity (ghost — removes from automations & search but keeps the link)'}"
+        style="background:none;border:1px solid ${excluded ? 'rgba(255,149,0,0.5)' : 'rgba(255,255,255,0.12)'};border-radius:4px;padding:2px 6px;cursor:pointer;font-size:10px;color:${excluded ? '#ff9500' : '#555'};flex-shrink:0;"
+        >${excluded ? '👻 Hidden' : '👻'}</button>`
+    : '';
+  // Show ✕ delete button only on non-HA-linked zones (or always for manually-added?)
+  // Design decision: zones with ha_area_id use ghost-only (no delete); zones without use delete-only
+  const showDelete = !isHALinked;
+
+  // For lights and sirens: show pin button — filled if already placed, outline if not
+  let pinBtn = '';
+  if (devType === 'lights' || devType === 'sirens' || devType === 'cameras') {
+    const pinArr = devType === 'lights' ? lights : devType === 'sirens' ? sirens : cameraPins;
+    const pinType = devType === 'lights' ? 'light' : devType === 'sirens' ? 'siren' : 'camera';
+    const alreadyPlaced = pinArr.some(p => p.entity_id === entityId);
+    pinBtn = `<button class="ha-entity-pin" data-entity-id="${escapeHtml(entityId)}" data-pin-type="${pinType}"
+      title="${alreadyPlaced ? 'Reposition on map' : 'Place on map'}"
+      style="background:none;border:1px solid ${alreadyPlaced ? '#64b4ff' : 'rgba(255,255,255,0.2)'};border-radius:4px;padding:2px 5px;cursor:pointer;font-size:10px;color:${alreadyPlaced ? '#64b4ff' : '#666'};flex-shrink:0;">📍</button>`;
+  }
+
+  // Camera: low-res entity sub-row
+  const lowResRow = devType === 'cameras' ? (() => {
+    const lowId = getCamLowRes(entityId);
+    return `<div class="cam-low-res-row" style="display:flex;align-items:center;gap:6px;padding:2px 0 4px 18px;width:100%;">
+      <span style="font-size:10px;color:#555;white-space:nowrap;">Low res:</span>
+      <input class="cam-low-res-input" data-high="${escapeHtml(entityId)}"
+        type="text" value="${escapeHtml(lowId === entityId ? '' : lowId)}"
+        placeholder="camera.entity_low (optional)"
+        style="flex:1;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:4px;padding:2px 6px;font-size:10px;color:#ccc;outline:none;"
+        autocomplete="off">
+    </div>`;
+  })() : '';
+
+  return `
+    <div class="ha-entity-row" data-entity-id="${escapeHtml(entityId)}" data-dev-type="${devType}" style="flex-wrap:wrap;${excluded ? 'opacity:0.4;' : ''}">
+      <span style="font-size:9px;color:#555;flex-shrink:0;">${icon}</span>
+      <div class="ha-entity-state ${stateClass}"></div>
+      <span class="ha-entity-id" title="${escapeHtml(entityId)}">${escapeHtml(displayName)}</span>
+      <span class="ha-entity-type">${escapeHtml(stateStr)}</span>
+      ${ghostBtn}
+      ${pinBtn}
+      ${showDelete ? `<button class="ha-entity-remove" data-entity-id="${escapeHtml(entityId)}" title="Remove">✕</button>` : ''}
+      ${lowResRow}
+    </div>`;
+}
+
+function bindCamLowResLookup(input) {
+  if (!input || input._owLowResLookupBound) return;
+  input._owLowResLookupBound = true;
+  let resultsEl = input.parentElement?.querySelector('.cam-low-res-results');
+  if (!resultsEl) {
+    resultsEl = document.createElement('div');
+    resultsEl.className = 'cam-low-res-results entity-search-results';
+    resultsEl.style.cssText = 'position:absolute;left:18px;right:0;top:100%;z-index:20;background:rgba(12,12,12,0.98);border:1px solid rgba(255,255,255,0.12);border-radius:6px;max-height:180px;overflow-y:auto;display:none;box-shadow:0 8px 24px rgba(0,0,0,0.5);';
+    if (input.parentElement) { input.parentElement.style.position = input.parentElement.style.position || 'relative'; input.parentElement.appendChild(resultsEl); }
+  }
+  function saveValue(value) { const highId = input.dataset.high; const lowVal = String(value || '').trim(); if (lowVal) camLowResMap[highId] = lowVal; else delete camLowResMap[highId]; input.value = lowVal; saveCamLowResMap(); }
+  function renderResults(q) {
+    const query = String(q || '').trim().toLowerCase();
+    if (!query) { resultsEl.style.display = 'none'; resultsEl.innerHTML = ''; return; }
+    const hits = Object.keys(haStates || {}).filter(id => id.startsWith('camera.')).filter(id => { const f = haStates[id]?.attributes?.friendly_name || ''; return id.toLowerCase().includes(query) || f.toLowerCase().includes(query); }).slice(0, 25);
+    resultsEl.innerHTML = hits.length ? hits.map(id => `<div class="entity-search-result" data-entity-id="${escapeHtml(id)}"><span class="entity-search-id">${escapeHtml(id)}</span><span class="entity-search-state">${escapeHtml(haStates[id]?.state || '—')}</span></div>`).join('') : `<div class="entity-search-result" data-entity-id="${escapeHtml(query)}"><span class="entity-search-id">${escapeHtml(query)}</span><span class="entity-search-state">manual</span></div>`;
+    resultsEl.style.display = 'block';
+    resultsEl.querySelectorAll('.entity-search-result').forEach(el => { el.onclick = e => { e.stopPropagation(); saveValue(el.dataset.entityId); resultsEl.style.display = 'none'; }; });
+  }
+  let debounce = null;
+  input.addEventListener('input', () => { clearTimeout(debounce); debounce = setTimeout(() => renderResults(input.value), 80); });
+  input.addEventListener('focus', () => { if (input.value.trim()) renderResults(input.value); });
+  input.addEventListener('blur', () => { setTimeout(() => { resultsEl.style.display = 'none'; }, 150); saveValue(input.value); });
+  input.addEventListener('keydown', e => { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); const first = resultsEl.querySelector('.entity-search-result'); saveValue(first ? first.dataset.entityId : input.value); resultsEl.style.display = 'none'; input.blur(); } if (e.key === 'Escape') resultsEl.style.display = 'none'; });
+}
+
+/* ─── DEVICE SEARCH (replaces bindEntitySearch, handles all device types) ─── */
+function bindDeviceSearch(selectedZone, inputId, resultsId, devType, listId) {
+  const input     = document.getElementById(inputId);
+  const resultsEl = document.getElementById(resultsId);
+  const listEl    = document.getElementById(listId);
+  if (!input || !selectedZone) return;
+
+  function refreshList() {
+    if (!listEl) return;
+    listEl.innerHTML = (selectedZone[devType] || []).map(id => deviceRow(id, devType, selectedZone)).join("");
+    listEl.querySelectorAll(".ha-entity-remove").forEach(btn => {
+      btn.onclick = e => {
+        e.stopPropagation();
+        const id = btn.dataset.entityId;
+        selectedZone[devType] = (selectedZone[devType] || []).filter(s => s !== id);
+        saveZone(selectedZone);
+        if (devType === "sensors") subscribeHAEntities();
+        refreshList();
+      };
+    });
+    listEl.querySelectorAll(".ha-entity-ghost").forEach(btn => {
+      btn.onclick = e => {
+        e.stopPropagation();
+        const id = btn.dataset.entityId;
+        selectedZone.ha_excluded_entities = selectedZone.ha_excluded_entities || [];
+        if (selectedZone.ha_excluded_entities.includes(id)) {
+          selectedZone.ha_excluded_entities = selectedZone.ha_excluded_entities.filter(x => x !== id);
+        } else {
+          selectedZone.ha_excluded_entities.push(id);
+        }
+        saveZone(selectedZone);
+        subscribeHAEntities();
+        renderZones();
+        refreshList();
+      };
+    });
+    // Low-res camera input — dynamic camera.* lookup + save on select/blur/enter
+    listEl.querySelectorAll(".cam-low-res-input").forEach(bindCamLowResLookup);
+    // Pin button — enter placement mode for this entity
+    listEl.querySelectorAll(".ha-entity-pin").forEach(btn => {
+      btn.onclick = e => {
+        e.stopPropagation();
+        const entityId = btn.dataset.entityId;
+        const pinType  = btn.dataset.pinType; // 'light' or 'siren'
+        // If already placed, select it for repositioning
+        const existing = pinType === 'light'
+          ? lights.find(p => p.entity_id === entityId)
+          : pinType === 'siren'
+            ? sirens.find(p => p.entity_id === entityId)
+            : cameraPins.find(p => p.entity_id === entityId);
+        if (existing) {
+          selectPin(pinType, existing.id);
+          renderZones(); renderZonesEditor();
+          return;
+        }
+        // Enter placement mode
+        placingPinType   = pinType;
+        placingEntityId  = entityId;
+        placingZoneId    = selectedZone.id;
+        activePinId      = null; activePinType = null;
+        // Show crosshair on all SVGs
+        document.querySelectorAll('#zonesSvg, .fp-svg').forEach(s => s.style.cursor = 'crosshair');
+        showToast(`Click the map to place ${pinType === 'light' ? '💡' : '🔊'} ${entityId.split('.').pop()}`, 'info');
+      };
+    });
+  }
+
+  function addDevice(entityId) {
+    entityId = entityId.trim();
+    if (!entityId) return;
+    if (!(selectedZone[devType] || []).includes(entityId)) {
+      selectedZone[devType] = [...(selectedZone[devType] || []), entityId];
+      saveZone(selectedZone);
+      if (devType === "sensors") {
+        subscribeHAEntities();
+        // If this entity isn't in haStates yet (brand new / never seen), fetch it
+        // so getZoneState doesn't immediately fault due to !st
+        if (!haStates[entityId] && haConnected) {
+          fetchSingleEntityState(entityId);
+        }
       }
     }
-    document.addEventListener('pointerdown', outside, true);
+    input.value = "";
+    if (resultsEl) { resultsEl.innerHTML = ""; resultsEl.style.display = "none"; }
+    refreshList();
+  }
+
+  function runSearch(q) {
+    if (!resultsEl) return;
+    const query = q.trim().toLowerCase();
+    if (!query) { resultsEl.style.display = "none"; return; }
+    let candidates = [];
+    if (haConnected && Object.keys(haStates).length > 0) {
+      candidates = Object.keys(haStates)
+        .filter(id => {
+          const low = id.toLowerCase();
+          // Exclude Overwatch's own entities from the picker (circular reference prevention)
+          if (low.startsWith("switch.overwatch_") ||
+              low.startsWith("binary_sensor.overwatch_")) return false;
+          return low.includes(query);
+        })
+        .slice(0, 25)
+        .map(id => ({ id, state: haStates[id]?.state || "—", friendly: haStates[id]?.attributes?.friendly_name || "" }));
+    } else {
+      candidates = [{ id: query, state: "add manually", friendly: "Press Enter to add" }];
+    }
+    if (!candidates.length) candidates = [{ id: query, state: "not found", friendly: "Press Enter to add anyway" }];
+    resultsEl.innerHTML = candidates.map(c => `
+      <div class="entity-search-result" data-entity-id="${escapeHtml(c.id)}">
+        <span class="entity-search-id">${escapeHtml(c.id)}</span>
+        <span class="entity-search-state">${escapeHtml(c.state)}</span>
+        ${c.friendly ? `<span class="entity-search-friendly">${escapeHtml(c.friendly)}</span>` : ""}
+      </div>`).join("");
+    resultsEl.style.display = "block";
+    resultsEl.querySelectorAll(".entity-search-result").forEach(el => {
+      el.onclick = () => addDevice(el.dataset.entityId);
+    });
+  }
+
+  let debounce = null;
+  input.oninput = () => { clearTimeout(debounce); debounce = setTimeout(() => runSearch(input.value), 120); };
+  input.onkeydown = e => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      const first = resultsEl?.querySelector(".entity-search-result");
+      addDevice(first ? first.dataset.entityId : input.value);
+    }
+    if (e.key === "Escape") { if (resultsEl) { resultsEl.style.display = "none"; } input.value = ""; }
+  };
+  document.addEventListener("pointerdown", function outside(e) {
+    if (!input.contains(e.target) && !(resultsEl && resultsEl.contains(e.target))) {
+      if (resultsEl) resultsEl.style.display = "none";
+      document.removeEventListener("pointerdown", outside);
+    }
+  });
+  refreshList();
+}
+
+/* ─── ENTITY SEARCH (legacy alias kept so old references don't throw) ──── */
+function bindEntitySearch(zone) { bindDeviceSearch(zone, "entitySearchInput", "entitySearchResults", "sensors", "zoneEntityList"); }
+
+
+/* ─── SVG INTERACTION ─────────────────────────────────────── */
+// Ray-casting point-in-polygon test
+function isPointInPolygon(x, y, pts) {
+  let inside = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const xi = pts[i].x, yi = pts[i].y;
+    const xj = pts[j].x, yj = pts[j].y;
+    if (((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+function closestEdgeInfo(zone, fpX, fpY) {
+  const pts = zone.points || [];
+  if (pts.length < 2) return null;
+  let bestIdx = 0, bestDist = Infinity, bestSnap = null;
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[i];
+    const b = pts[(i + 1) % pts.length];
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const lenSq = dx * dx + dy * dy;
+    if (!lenSq) continue;
+    const t = Math.max(0, Math.min(1, ((fpX - a.x) * dx + (fpY - a.y) * dy) / lenSq));
+    const snapX = a.x + t * dx, snapY = a.y + t * dy;
+    const dist = Math.hypot(fpX - snapX, fpY - snapY);
+    if (dist < bestDist) { bestDist = dist; bestIdx = i; bestSnap = { x: snapX, y: snapY }; }
+  }
+  return { insertAfter: bestIdx, dist: bestDist, snap: bestSnap };
+}
+
+function bindZonesSvgEvents() {
+  const svg = document.getElementById("zonesSvg");
+  if (!svg) return;
+
+  svg.addEventListener("pointerdown", e => {
+    const target = e.target;
+    const sx = e.clientX, sy = e.clientY;
+    const fp = screenToFloorplan(sx, sy);
+
+    // In live mode — only handle zone polygon clicks (open popup)
+    if (!editorMode) {
+      if (target.classList.contains("zone-polygon")) {
+        const zoneId = target.dataset.zoneId;
+        const zone   = zones.find(z => z.id === zoneId);
+        if (zone?.hidden) { e.stopPropagation(); return; }
+        openZonePopup(zoneId, e.clientX, e.clientY);
+        e.stopPropagation();
+      }
+      return;
+    }
+
+    // 0) Place a new light/siren pin
+    if (placingPinType) {
+      placePinAtFloorplanCoord(fp.x, fp.y, activeFloorId);
+      e.stopPropagation(); return;
+    }
+
+    // 1) Dragging a vertex handle — capture and block pan
+    if (target.classList.contains("zone-handle")) {
+      draggingHandle = { zoneId: target.dataset.zoneId, idx: Number(target.dataset.index) };
+      svg.setPointerCapture(e.pointerId);
+      e.stopPropagation();
+      return;
+    }
+
+    // 2) Inserting a point (Edit Points mode)
+    // Click outside zone → insert new point at exact click position on closest edge
+    // Click inside zone → drag the zone (handled in step 3)
+    if (isEditingPoints && selectedZoneId && !isCreatingZone) {
+      const zone = zones.find(z => z.id === selectedZoneId);
+      if (zone && (zone.points || []).length >= 2) {
+        const insideZone = isPointInPolygon(fp.x, fp.y, zone.points);
+        if (!insideZone) {
+          const info = closestEdgeInfo(zone, fp.x, fp.y);
+          if (info) {
+            pushUndo();
+            // Insert at exact clicked position, not snapped to edge midpoint
+            zone.points.splice(info.insertAfter + 1, 0, { x: Math.round(fp.x), y: Math.round(fp.y) });
+            saveZone(zone);
+            renderZones();
+            renderZonesEditor();
+            e.stopPropagation();
+            return;
+          }
+        }
+        // Click inside zone — fall through to polygon handler to start drag
+      }
+    }
+
+    // 3) Clicking a polygon — in live mode open zone popup, in editor mode select it
+    if (target.classList.contains("zone-polygon")) {
+      const zoneId = target.dataset.zoneId;
+      const zone   = zones.find(z => z.id === zoneId);
+      if (zone?.hidden) { e.stopPropagation(); return; }
+
+      // LIVE MODE — show zone detail popup
+      if (!editorMode) {
+        openZonePopup(zoneId, e.clientX, e.clientY);
+        e.stopPropagation(); return;
+      }
+
+      if (isEditingPoints && selectedZoneId && zoneId !== selectedZoneId) {
+        e.stopPropagation(); return;
+      }
+      // Toggle — clicking same zone deselects it
+      if (selectedZoneId === zoneId && !isEditingPoints) {
+        selectedZoneId = null;
+        renderZones(); renderZonesEditor();
+        e.stopPropagation(); return;
+      }
+      selectedZoneId  = zoneId;
+      selectedGroupId = null;
+      activePinId = null; activePinType = null;
+      // In edit points mode: clicking inside zone starts a drag of the whole zone
+      if (isEditingPoints && zone) {
+        draggingZone = { zoneId, startPoints: zone.points.map(p => ({ ...p })) };
+        dragStart = { x: sx, y: sy };
+        svg.setPointerCapture(e.pointerId);
+      }
+      renderZones();
+      renderZonesEditor();
+      e.stopPropagation();
+      return;
+    }
+
+    // 4) Drawing new zone — add point, block pan
+    if (isCreatingZone && currentNewZone) {
+      pushUndo();
+      currentNewZone.points.push({ x: fp.x, y: fp.y });
+      saveZone(currentNewZone);
+      renderZones();
+      const countSpan = document.querySelector(`.zones-list-item[data-zone-id="${currentNewZone.id}"] span:last-child`);
+      if (countSpan) countSpan.textContent = `${currentNewZone.points.length}pts`;
+      e.stopPropagation();
+      return;
+    }
+
+    // 5) Empty canvas click — deselect BUT let the event propagate so bindPan can pan
+    selectedZoneId    = null;
+    selectedGroupId   = null;
+    highlightedZoneId = null; highlightedUntil      = 0;
+    highlightedGroupId = null; highlightedGroupUntil = 0;
+    isEditingPoints = false;
+    activePinId = null; activePinType = null;
+    placingPinType = null;
+    const svgEl = document.getElementById('zonesSvg');
+    if (svgEl) svgEl.style.cursor = '';
+    renderZones();
+    renderZonesEditor();
+    // Do NOT stopPropagation here — outer pan handler will pick it up
+  });
+
+  svg.addEventListener("pointermove", e => {
+    if (!editorMode) return;
+    const sx = e.clientX, sy = e.clientY;
+    if (draggingHandle) {
+      const zone = zones.find(z => z.id === draggingHandle.zoneId);
+      if (!zone) return;
+      zone.points[draggingHandle.idx] = screenToFloorplan(sx, sy);
+      saveZone(zone);
+      renderZones();
+    } else if (draggingZone && dragStart) {
+      const zone = zones.find(z => z.id === draggingZone.zoneId);
+      if (!zone) return;
+      const dxF = (sx - dragStart.x) / zoom.scale;
+      const dyF = (sy - dragStart.y) / zoom.scale;
+      zone.points = draggingZone.startPoints.map(p => ({ x: p.x + dxF, y: p.y + dyF }));
+      saveZone(zone);
+      renderZones();
+    }
+  });
+
+  svg.addEventListener("pointerup", e => {
+    if (draggingHandle || draggingZone) {
+      try { svg.releasePointerCapture(e.pointerId); } catch {}
+    }
+    draggingHandle = null;
+    draggingZone   = null;
+    dragStart      = null;
+  });
+
+  svg.addEventListener("dblclick", e => {
+    if (!editorMode || !isCreatingZone || !currentNewZone) return;
+    if (currentNewZone.points.length < 3) { alert("A zone needs at least 3 points."); return; }
+    isCreatingZone = false;
+    currentNewZone = null;
+    saveZones();
+    renderZonesEditor();
+    scheduleHAReload(); // zone is now complete — create HA entity
+    e.stopPropagation();
+  });
+
+  svg.addEventListener("contextmenu", e => {
+    if (!editorMode) return;
+    e.preventDefault();
+    const target = e.target;
+    if (target.classList.contains("zone-handle") && isEditingPoints) {
+      const zone = zones.find(z => z.id === target.dataset.zoneId);
+      if (!zone || zone.points.length <= 3) return;
+      pushUndo();
+      zone.points.splice(Number(target.dataset.index), 1);
+      saveZone(zone);
+      renderZones();
+      renderZonesEditor();
+    }
+  });
+}
+
+/* ─── CONNECTION LOG & TOAST SYSTEM ─────────────────────── */
+const connLog = [];
+const MAX_LOG = 500;
+
+// category: "system" | "zone" | "entity" | "ha"
+function logEvent(level, message, category = "system", meta = {}) {
+  const entry = { ts: new Date(), level, message, category, meta };
+  connLog.unshift(entry);
+  if (connLog.length > MAX_LOG) connLog.pop();
+
+  console[level === "error" ? "error" : level === "warn" ? "warn" : "log"](
+    `[HA-Overwatch][${category.toUpperCase()}][${level.toUpperCase()}] ${message}`
+  );
+
+  // Toasts ONLY for critical system/HA errors — not zone triggers or entity state changes
+  const isCritical = (category === "system" || category === "ha") && (level === "error" || level === "warn");
+  if (isCritical) showToast(message, level);
+
+  // Badge on log button — only for critical system/HA errors (not zone or entity events)
+  const logBtn = document.getElementById("logBtn");
+  if (logBtn) {
+    let badge = logBtn.querySelector(".log-error-dot");
+    const isCritical = (category === "system" || category === "ha") && (level === "error" || level === "warn");
+    if (isCritical) {
+      if (!badge) {
+        badge = document.createElement("div");
+        badge.className = "log-error-dot";
+        logBtn.appendChild(badge);
+      }
+    } else if (level === "ok" && (category === "system" || category === "ha")) {
+      // Clear badge only when a critical category recovers
+      const hasErrors = connLog.some(e =>
+        (e.level === "error" || e.level === "warn") && (e.category === "system" || e.category === "ha")
+      );
+      if (!hasErrors && badge) badge.remove();
+    }
+  }
+
+  // Live-refresh the log panel if open
+  renderLogPanel(false);
+}
+
+// Debounced save toast — consolidates rapid saves (e.g. typing) into a single "Saved ✓"
+let _saveToastTimer = null;
+function showSaveToast(label) {
+  if (_saveToastTimer) clearTimeout(_saveToastTimer);
+  _saveToastTimer = setTimeout(() => {
+    showToast(`${label || 'Changes'} saved ✓`, 'ok');
+    _saveToastTimer = null;
+  }, 600); // wait 600ms after last save before showing toast
+}
+
+function showToast(message, level = "warn") {
+  let container = document.getElementById("toastContainer");
+  if (!container) {
+    container = document.createElement("div");
+    container.id = "toastContainer";
+    container.style.cssText = `
+      position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%);
+      z-index: 9999; display: flex; flex-direction: column; gap: 8px;
+      align-items: center; pointer-events: none;
+    `;
+    document.body.appendChild(container);
+  }
+
+  const toast = document.createElement("div");
+  const bg = level === "error" ? "rgba(255,59,48,0.92)" :
+             level === "warn"  ? "rgba(255,149,0,0.92)" :
+             level === "ok"    ? "rgba(50,215,75,0.92)" :
+                                 "rgba(40,40,40,0.92)";
+  toast.style.cssText = `
+    background: ${bg}; color: #fff; border-radius: 10px;
+    padding: 9px 16px; font-size: 13px; font-weight: 500;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.4); pointer-events: none;
+    max-width: 380px; text-align: center; line-height: 1.4;
+    animation: toastIn 0.25s ease;
+  `;
+  toast.textContent = message;
+  container.appendChild(toast);
+
+  setTimeout(() => {
+    toast.style.animation = "toastOut 0.3s ease forwards";
+    setTimeout(() => toast.remove(), 320);
+  }, 4000);
+}
+
+// Inject toast keyframes once
+(function injectToastCSS() {
+  const s = document.createElement("style");
+  s.textContent = `
+    @keyframes toastIn { from { opacity:0; transform:translateY(10px); } to { opacity:1; transform:translateY(0); } }
+    @keyframes toastOut { from { opacity:1; transform:translateY(0); } to { opacity:0; transform:translateY(10px); } }
+  `;
+  document.head.appendChild(s);
+})();
+
+let logFilter = "all";
+let logSearch  = "";
+
+function renderLogPanel(toggle = true) {
+  let panel = document.getElementById("logPanel");
+
+  if (toggle) {
+    if (panel) {
+      panel.classList.toggle("open");
+      if (panel.classList.contains("open")) {
+        buildLogBody(panel);
+        // Only wire draggable once — check if already wired
+        const tb = panel.querySelector(".log-titlebar");
+        if (tb && !tb._draggableWired) {
+          makeDraggable(panel, tb, "logPanel");
+          tb._draggableWired = true;
+        }
+      }
+      return;
+    }
+    panel = document.createElement("div");
+    panel.id = "logPanel";
+    panel.className = "log-panel open";
+    document.body.appendChild(panel);
+    buildLogShell(panel);
+    buildLogBody(panel);
+    const tb = panel.querySelector(".log-titlebar");
+    if (tb) {
+      makeDraggable(panel, tb, "logPanel");
+      tb._draggableWired = true;
+    }
+  } else {
+    if (!panel || !panel.classList.contains("open")) return;
+    // Live update: only rebuild body, never touch controls (preserves search focus)
+    buildLogBody(panel);
+  }
+}
+
+function buildLogShell(panel) {
+  const catLabel = { all: "All", system: "System", zone: "Zones", entity: "Entities", ha: "HA" };
+  panel.innerHTML = `
+    <div class="log-titlebar" id="logTitlebar">
+      <span class="log-title">Log</span>
+      <div style="display:flex;gap:6px;align-items:center;">
+        <button class="log-clear-btn" id="logClearBtn">Clear</button>
+        <button class="zones-editor-close" id="logCloseBtn">\u2715</button>
+      </div>
+    </div>
+    <div class="log-controls">
+      <input type="text" class="log-search-input" id="logSearchInput"
+        placeholder="Search log\u2026" value="" autocomplete="off">
+      <div class="log-filter-tabs" id="logFilterTabs">
+        ${["all","system","zone","entity","ha"].map(cat => `
+          <button class="log-filter-tab ${logFilter === cat ? "active" : ""}" data-cat="${cat}">
+            ${catLabel[cat]}
+          </button>`).join("")}
+      </div>
+    </div>
+    <div class="log-body" id="logBody"></div>
+    <div class="log-resize-handle" id="logResizeHandle" title="Drag to resize"></div>
+  `;
+
+  panel.addEventListener("pointerdown", e => e.stopPropagation());
+
+  document.getElementById("logCloseBtn").onclick = () => panel.classList.remove("open");
+
+  document.getElementById("logClearBtn").onclick = () => {
+    connLog.length = 0;
+    logSearch = "";
+    logFilter = "all";
+    const inp = document.getElementById("logSearchInput");
+    if (inp) inp.value = "";
+    panel.querySelectorAll(".log-filter-tab").forEach(b => b.classList.toggle("active", b.dataset.cat === "all"));
+    const logBtn = document.getElementById("logBtn");
+    if (logBtn) { const b = logBtn.querySelector(".log-error-dot"); if (b) b.remove(); }
+    buildLogBody(panel);
+  };
+
+  const searchInput = document.getElementById("logSearchInput");
+  if (searchInput) {
+    searchInput.addEventListener("input", () => { logSearch = searchInput.value; buildLogBody(panel); });
+    searchInput.addEventListener("keydown", e => e.stopPropagation());
+    searchInput.addEventListener("pointerdown", e => e.stopPropagation());
+  }
+
+  panel.querySelectorAll(".log-filter-tab").forEach(btn => {
+    btn.addEventListener("click", () => {
+      logFilter = btn.dataset.cat;
+      panel.querySelectorAll(".log-filter-tab").forEach(b => b.classList.toggle("active", b === btn));
+      buildLogBody(panel);
+    });
+  });
+
+  // Resize handle — bottom-right corner, drag to resize width and height
+  const resizeHandle = panel.querySelector(".log-resize-handle");
+  if (resizeHandle) {
+    let resizing = false, startX = 0, startY = 0, startW = 0, startH = 0;
+
+    resizeHandle.addEventListener("pointerdown", e => {
+      resizing = true;
+      startX = e.clientX;
+      startY = e.clientY;
+      startW = panel.offsetWidth;
+      startH = panel.offsetHeight;
+
+      // If panel is still in its default bottom-anchored position, convert to top/left
+      // so resizing downward doesn't fight the bottom anchor
+      if (!panel.style.top || panel.style.bottom) {
+        const rect = panel.getBoundingClientRect();
+        panel.style.top    = rect.top + "px";
+        panel.style.left   = rect.left + "px";
+        panel.style.bottom = "unset";
+        panel.style.transform = "none";
+      }
+
+      resizeHandle.setPointerCapture(e.pointerId);
+      e.preventDefault();
+      e.stopPropagation();
+    });
+
+    resizeHandle.addEventListener("pointermove", e => {
+      if (!resizing) return;
+      const newW = Math.max(280, Math.min(window.innerWidth  - 20, startW + (e.clientX - startX)));
+      const newH = Math.max(120, Math.min(window.innerHeight - 60, startH + (e.clientY - startY)));
+      panel.style.width  = newW + "px";
+      panel.style.height = newH + "px";
+      localStorage.setItem("logPanelW", newW);
+      localStorage.setItem("logPanelH", newH);
+    });
+
+    resizeHandle.addEventListener("pointerup", () => { resizing = false; });
+
+    // Restore saved dimensions
+    const savedW = localStorage.getItem("logPanelW");
+    const savedH = localStorage.getItem("logPanelH");
+    if (savedW) panel.style.width  = savedW + "px";
+    if (savedH) panel.style.height = savedH + "px";
+  }
+}
+
+function buildLogBody(panel) {
+  const bodyEl = panel.querySelector("#logBody") || panel.querySelector(".log-body");
+  if (!bodyEl) return;
+
+  const levelIcon = { info: "\u2139", warn: "\u26a0", error: "\u2717", ok: "\u2713" };
+  const levelCol  = { info: "#888", warn: "#ff9500", error: "#ff3b30", ok: "#32d74b" };
+
+  const q = logSearch.trim().toLowerCase();
+  const filtered = connLog.filter(e => {
+    if (logFilter !== "all" && e.category !== logFilter) return false;
+    if (q && !e.message.toLowerCase().includes(q) &&
+        !(e.meta?.zoneName || "").toLowerCase().includes(q) &&
+        !(e.meta?.entityId || "").toLowerCase().includes(q)) return false;
+    return true;
+  });
+
+  if (filtered.length === 0) {
+    bodyEl.innerHTML = `<div class="log-empty">${connLog.length === 0 ? "No events yet." : "No matching entries."}</div>`;
+    return;
+  }
+
+  bodyEl.innerHTML = filtered.map(e => {
+    const col  = levelCol[e.level]  || "#888";
+    const icon = levelIcon[e.level] || "\u00b7";
+    const zoneColour   = e.meta?.zoneColour || "#ffcc00";
+    const zoneNameHtml = e.meta?.zoneName
+      ? `<span class="log-zone-name" style="color:${zoneColour}">${escapeHtml(e.meta.zoneName)}</span> `
+      : "";
+    const entityHtml = e.meta?.entityId
+      ? `<span class="log-entity-tag">${escapeHtml(e.meta.entityId)}</span>`
+      : "";
+    return `
+      <div class="log-entry log-${e.level} log-cat-${e.category}">
+        <span class="log-ts">${e.ts.toLocaleTimeString()}</span>
+        <span class="log-icon" style="color:${col}">${icon}</span>
+        <span class="log-msg">${zoneNameHtml}${escapeHtml(e.message)}${entityHtml ? " " : ""}${entityHtml}</span>
+      </div>`;
+  }).join("");
+}
+
+/* ─── SERVER HEALTH CHECK ────────────────────────────────── */
+// Detect access mode:
+// - Ingress: <base href="/api/hassio_ingress/<token>/"> injected by server.js
+// - Direct LAN: <meta name="ow-direct"> injected, no base tag — relative URLs work as-is
+const IS_DIRECT_MODE = !!document.querySelector('meta[name="ow-direct"]');
+const BASE_PATH = (() => {
+  if (IS_DIRECT_MODE) return "";   // direct LAN — all paths are relative to ha-ip:8099
+  const base = document.querySelector("base");
+  if (!base) return "";
+  const href = base.getAttribute("href") || "";
+  return href === "./" || href === "/" ? "" : href.replace(/\/$/, "");
+})();
+
+// Prefix a relative API path with the ingress base path (no-op in direct mode)
+function apiPath(rel) {
+  return BASE_PATH ? `${BASE_PATH}/${rel}` : rel;
+}
+
+let serverWasReachable = true;
+let serverApiAvailable = null;   // null=unknown, true=server.js up, false=local-only
+let serverCheckTimer   = null;
+let isAddonMode        = false;  // true when running as HA add-on
+let _serverBuildId     = null;   // detect server restarts for auto-reload on 8099
+let _lastDataVersion   = null;   // detect data changes from other browsers
+
+async function checkServerHealth() {
+  try {
+    const res  = await fetch(apiPath("ow/health"), { method: "GET", cache: "no-store" });
+    const data = await res.json().catch(() => ({}));
+    const wasDown = serverApiAvailable === false || !serverWasReachable;
+    serverWasReachable = true;
+    serverApiAvailable = true;
+
+    // Auto-reload on 8099 when server restarts (new buildId = new code deployed)
+    if (!IS_DIRECT_MODE && data.buildId) {
+      if (_serverBuildId === null) {
+        _serverBuildId = data.buildId; // first check — store baseline
+      } else if (_serverBuildId !== data.buildId) {
+        logEvent("ok", "Server restarted — reloading page to pick up new code.", "system");
+        setTimeout(() => window.location.reload(), 800);
+        return;
+      }
+    }
+
+    // Live data sync — reload zones/lights when another browser makes changes
+    if (data.dataVersion && _lastDataVersion !== null && data.dataVersion !== _lastDataVersion) {
+      logEvent("ok", "Config changed externally — refreshing zones and lights.", "system");
+      await loadZones();
+      await loadGroups();
+      // Only reload floors if not in edit mode (floor reload resets zoom)
+      if (!editorMode) await loadFloors();
+      await loadLights();
+      await loadSirens();
+      await loadCameraPins();
+      await loadDoorPins();
+      if (haConnected) subscribeHAEntities();
+      renderZones();
+      if (editorMode) renderZonesEditor();
+    }
+    if (data.dataVersion) _lastDataVersion = data.dataVersion;
+
+    // Detect add-on mode from health response
+    if (data.isAddon && !isAddonMode) {
+      isAddonMode = true;
+      logEvent("ok", "Running as HA Add-on — HA connection is automatic.", "system");
+      // connectHA() is called by init() after the first health check completes.
+      // Subsequent health checks don't re-connect — haConnected guard handles that.
+    }
+
+    if (wasDown) logEvent("ok", "server.js is reachable again.", "system");
+  } catch {
+    serverWasReachable = false;
+    try {
+      await fetch(apiPath("config/ui.yaml") + "?v=" + Date.now(), { cache: "no-store" });
+      if (serverApiAvailable !== false) {
+        serverApiAvailable = false;
+        logEvent("warn",
+          "Local-only mode: server.js is NOT running. Zone edits and settings will not be saved to disk. Start server.js to enable persistence.",
+          "system");
+      }
+    } catch {
+      if (serverApiAvailable !== "offline") {
+        serverApiAvailable = "offline";
+        logEvent("error", "Dashboard is completely offline — no server or network reachable.", "system");
+      }
+    }
+  }
+}
+
+function startServerHealthCheck() {
+  // Return a promise that resolves after the FIRST health check completes.
+  // init() awaits this so isAddonMode is known before connectHA() is called.
+  const firstCheck = checkServerHealth();
+  serverCheckTimer = setInterval(checkServerHealth, 20000);
+  return firstCheck;
+}
+
+/* ─── OFFLINE ENTITY CHECK (issue 10) ───────────────────────── */
+function checkOfflineZoneEntities() {
+  const deviceTypes = ["sensors", "cameras", "lights", "sirens"];
+  for (const zone of zones) {
+    for (const devType of deviceTypes) {
+      for (const entityId of (zone[devType] || [])) {
+        const st = haStates[entityId];
+        if (!st) {
+          logEvent("warn", `Entity not found in HA: ${entityId}`, "entity", { zoneName: zone.name || zone.id, entityId });
+        } else if ((st.state || "").toLowerCase() === "unavailable") {
+          logEvent("warn", `Entity unavailable: ${entityId}`, "entity", { zoneName: zone.name || zone.id, entityId });
+        }
+      }
+    }
+  }
+}
+
+/* ─── HOME ASSISTANT WEBSOCKET ────────────────────────────── */
+function setHAStatus(status) {
+  const badge = document.getElementById("haStatusBadge");
+  const text  = document.getElementById("haStatusText");
+  if (!badge) return;
+  badge.classList.remove("connected", "disconnected", "error");
+  badge.classList.add(status);
+  if (text) text.textContent = "HA";
+  // Live-update the connection box in settings panel if open
+  updateSettingsConnectionBox();
+}
+
+function updateSettingsConnectionBox() {
+  const box = document.getElementById("haConnectionStatus");
+  if (!box) return;
+  const connected = haConnected;
+  box.className = `settings-connection-box ${connected ? 'connected' : 'disconnected'}`;
+  const label = box.querySelector(".settings-connection-label");
+  const sub   = box.querySelector(".settings-connection-sub");
+  if (label) label.textContent = connected ? '✓ Connected to Home Assistant' : '✗ Not connected';
+  if (sub)   sub.textContent   = !IS_DIRECT_MODE
+    ? (connected ? 'Running as HA Add-on.' : 'Attempting to connect via add-on proxy…')
+    : (connected ? 'Connected via WebSocket.' : 'Connecting via add-on proxy…');
+}
+
+function connectHA() {
+  if (haSocket && (haSocket.readyState === WebSocket.OPEN || haSocket.readyState === WebSocket.CONNECTING)) return;
+  if (haReconnectTimer) clearTimeout(haReconnectTimer);
+
+  let wsUrl;
+  const pageIsHttps = window.location.protocol === "https:";
+
+  if (isAddonMode) {
+    // Add-on / direct LAN mode: connect to our own server's WebSocket proxy.
+    // The proxy handles auth server-side.
+    const proto = pageIsHttps ? "wss:" : "ws:";
+    const host  = window.location.host;
+    // Direct mode has no BASE_PATH — just use the host directly
+    wsUrl = `${proto}//${host}${BASE_PATH}/ws/api/websocket`;
+    logEvent("info", IS_DIRECT_MODE
+      ? "Connecting to HA via direct WebSocket proxy…"
+      : "Connecting to HA via add-on WebSocket proxy…", "ha");
+  } else {
+    // Standalone mode: connect directly to HA WebSocket
+    if (!uiConfig.ha_url) return;
+    if (!uiConfig.ha_token) {
+      logEvent("warn", "HA token required in standalone mode. Enter it in Settings.", "ha");
+      return;
+    }
+    let haUrl = uiConfig.ha_url.replace(/\/$/, "");
+    if (pageIsHttps && haUrl.startsWith("http://")) {
+      haUrl = haUrl.replace("http://", "https://");
+    }
+    wsUrl = haUrl.replace(/^http/, "ws") + "/api/websocket";
+    logEvent("info", `Connecting to HA at ${haUrl}…`, "ha");
+  }
+
+  try {
+    haSocket = new WebSocket(wsUrl);
+  } catch (e) {
+    logEvent("error", "WebSocket creation failed: " + e.message, "ha");
+    setHAStatus("error");
+    scheduleReconnect();
+    return;
+  }
+
+  haSocket.onopen = () => {
+    logEvent("info", "WebSocket opened, awaiting HA auth…", "ha");
+  };
+
+  haSocket.onmessage = e => {
+    let msg;
+    try { msg = JSON.parse(e.data); } catch { return; }
+
+    if (msg.type === "auth_required") {
+      if (isAddonMode) {
+        // Proxy will intercept this and replace with the real stored token server-side.
+        // We send a placeholder so the browser participates in the auth flow normally.
+        haSocket.send(JSON.stringify({ type: "auth", access_token: "addon-proxy" }));
+      } else {
+        haSocket.send(JSON.stringify({ type: "auth", access_token: uiConfig.ha_token }));
+      }
+    }
+
+    if (msg.type === "auth_ok") {
+      haConnected = true;
+      haEverConnected = true;
+      haReconnectDelay = 1000;     // reset exponential backoff
+      showReconnectBanner(false);
+      setHAStatus("connected");
+      logEvent("ok", "Connected to Home Assistant (" + (msg.ha_version || "?") + ")", "ha");
+      fetchAllStates();
+      subscribeHAEntities();
+      // Clear camera failure state on reconnect so cameras auto-recover
+      if (window.camResetHidden) window.camResetHidden();
+      // Re-render panels now that haConnected=true so zone states are visible
+      if (getNumPanels() > 1) renderAllPanelZones(); else renderZones();
+    }
+
+    if (msg.type === "auth_invalid") {
+      haConnected = false;
+      setHAStatus("error");
+      // Only show error toast if we've connected before — suppresses noise on first load
+      if (haEverConnected) {
+        logEvent("error", "HA authentication failed. Check your Long-Lived Access Token.", "ha");
+      }
+      haSocket.close();
+    }
+
+    if (msg.type === "result" && msg.success && Array.isArray(msg.result)) {
+      for (const st of msg.result) {
+        haStates[st.entity_id] = st;
+      }
+      haStatesLoaded = true; // mark states as fully loaded — safe to show fault state now
+      logEvent("info", `Fetched ${msg.result.length} entity states from HA.`, "ha");
+
+      // Re-run subscribeHAEntities now that haStates is populated —
+      // the first call (at auth_ok) had an empty haStates so auto-detection was blind
+      subscribeHAEntities();
+
+      // Apply alarm entity state immediately
+      const alarmEntity = uiConfig.alarm_entity;
+      if (alarmEntity && haStates[alarmEntity]) {
+        updateStatusFromAlarm(alarmEntity, haStates[alarmEntity]);
+      } else {
+        const autoAlarm = Object.keys(haStates).find(id => id.startsWith("alarm_control_panel."));
+        if (autoAlarm) updateStatusFromAlarm(autoAlarm, haStates[autoAlarm]);
+      }
+      checkOfflineZoneEntities();
+      checkZoneStateChanges();   // log any zones already triggered at connect time
+      renderZones();
+        if (editorMode && !document.activeElement?.closest('.zed-right')) renderZonesEditor();
+      // Notify camera page if loaded
+      if (window.OW && window.camUpdate) window.camUpdate();
+    }
+
+    if (msg.type === "result" && !msg.success) {
+      logEvent("warn", `HA command failed (id=${msg.id}): ${msg.error?.message || "unknown error"}`, "ha");
+    }
+
+    if (msg.type === "event" && msg.event?.event_type === "state_changed") {
+      const data = msg.event.data;
+      if (data?.new_state) {
+        const prev = haStates[data.entity_id];
+        haStates[data.entity_id] = data.new_state;
+
+        // Sync masterEnabled when the HA master switch changes
+        if (data.entity_id === "switch.overwatch_zone_master") {
+          const newMaster = (data.new_state.state || "").toLowerCase() !== "off";
+          if (masterEnabled !== newMaster) {
+            masterEnabled = newMaster;
+            localStorage.setItem("masterEnabled", masterEnabled);
+          }
+          // Cascade master to all zones and groups
+          const on = newMaster;
+          for (const g of groups) owCallSwitch(`switch.overwatch_zone_group_${groupSlug(g)}`, on);
+          for (const z of zones)  owCallSwitch(`switch.overwatch_zone_${zoneSlug(z)}`, on);
+        }
+
+        // When a ZONE group switch changes in HA, cascade to member zones
+        if (data.entity_id.startsWith("switch.overwatch_zone_group_")) {
+          const groupSwitchId = data.entity_id; // e.g. switch.overwatch_zone_group_house
+          const on = (data.new_state.state || "").toLowerCase() !== "off";
+          // Find which group this is
+          const matchGroup = groups.find(g =>
+            `switch.overwatch_zone_group_${groupSlug(g)}` === groupSwitchId);
+          if (matchGroup) {
+            (matchGroup.zone_ids || []).forEach(zid => {
+              const z = zones.find(z => z.id === zid);
+              if (z) owCallSwitch(`switch.overwatch_zone_${zoneSlug(z)}`, on);
+            });
+          }
+        }
+
+        // When a CAMERA group switch changes in HA, cascade to member zones and cameras
+        if (data.entity_id.startsWith("switch.overwatch_camera_group_")) {
+          const on = (data.new_state.state || "").toLowerCase() !== "off";
+          const matchGroup = groups.find(g =>
+            `switch.overwatch_camera_group_${groupSlug(g)}` === data.entity_id);
+          if (matchGroup) {
+            (matchGroup.zone_ids || []).forEach(zid => {
+              const z = zones.find(z => z.id === zid);
+              if (z && (z.cameras || []).length > 0) {
+                owCallSwitch(`switch.overwatch_camera_zone_${nameSlug(z.name) || z.id}`, on);
+                (z.cameras || []).forEach(camId => {
+                  const safe = camId.replace(/^camera\./, '').replace(/[^a-z0-9]+/g, '_');
+                  owCallSwitch(`switch.overwatch_camera_${safe}`, on);
+                });
+              }
+            });
+          }
+        }
+
+        // When a CAMERA zone switch changes in HA, cascade to member cameras
+        if (data.entity_id.startsWith("switch.overwatch_camera_zone_")) {
+          const on = (data.new_state.state || "").toLowerCase() !== "off";
+          const slug = data.entity_id.replace("switch.overwatch_camera_zone_", "");
+          const matchZone = zones.find(z => (nameSlug(z.name) || z.id) === slug);
+          if (matchZone) {
+            (matchZone.cameras || []).forEach(camId => {
+              const safe = camId.replace(/^camera\./, '').replace(/[^a-z0-9]+/g, '_');
+              owCallSwitch(`switch.overwatch_camera_${safe}`, on);
+            });
+          }
+        }
+
+        // When a ZONE floor switch changes, cascade to all zones on that floor
+        if (data.entity_id.startsWith("switch.overwatch_zone_floor_")) {
+          const on = (data.new_state.state || "").toLowerCase() !== "off";
+          const fid = data.entity_id.replace("switch.overwatch_zone_floor_", "");
+          const isFirstFloor1 = floors.length === 0 || floors[0].id === fid;
+          zones.filter(z => z.floor_id === fid || (!z.floor_id && isFirstFloor1)).forEach(z => {
+            owCallSwitch(`switch.overwatch_zone_${zoneSlug(z)}`, on);
+          });
+        }
+
+        // When a CAMERA floor switch changes, cascade to zones + cameras on that floor
+        if (data.entity_id.startsWith("switch.overwatch_camera_floor_")) {
+          const on = (data.new_state.state || "").toLowerCase() !== "off";
+          const fid = data.entity_id.replace("switch.overwatch_camera_floor_", "");
+          const isFirstFloor2 = floors.length === 0 || floors[0].id === fid;
+          zones.filter(z => (z.floor_id === fid || (!z.floor_id && isFirstFloor2)) && (z.cameras || []).length > 0).forEach(z => {
+            owCallSwitch(`switch.overwatch_camera_zone_${nameSlug(z.name) || z.id}`, on);
+            (z.cameras || []).forEach(camId => {
+              const safe = camId.replace(/^camera\./, '').replace(/[^a-z0-9]+/g, '_');
+              owCallSwitch(`switch.overwatch_camera_${safe}`, on);
+            });
+          });
+        }
+
+        // When camera_all changes in HA, cascade to all zones and cameras
+        if (data.entity_id === "switch.overwatch_camera_all") {
+          const on = (data.new_state.state || "").toLowerCase() !== "off";
+          zones.forEach(z => {
+            if ((z.cameras || []).length > 0) {
+              owCallSwitch(`switch.overwatch_camera_zone_${nameSlug(z.name) || z.id}`, on);
+              (z.cameras || []).forEach(camId => {
+                const safe = camId.replace(/^camera\./, '').replace(/[^a-z0-9]+/g, '_');
+                owCallSwitch(`switch.overwatch_camera_${safe}`, on);
+              });
+            }
+          });
+        }
+
+        // Re-render when any overwatch switch changes
+        if (data.entity_id.startsWith("switch.overwatch_")) {
+          updateStatusDropdownInPlace();
+          renderZones();
+          // Re-render camera status bar when a camera switch changes
+          if (window.renderCameraStatusBar &&
+              data.entity_id.startsWith("switch.overwatch_camera_")) {
+            window.renderCameraStatusBar();
+          }
+        }
+
+        // Always update status bar for the configured alarm entity or any alarm_control_panel
+        // This runs regardless of haSubscribedEntities to prevent missed status updates
+        const alarmEntity = uiConfig.alarm_entity || "";
+        const isAlarmEnt  = alarmEntity
+          ? data.entity_id === alarmEntity
+          : data.entity_id.startsWith("alarm_control_panel.");
+        if (isAlarmEnt) {
+          updateStatusFromAlarm(data.entity_id, data.new_state);
+          renderStatusDropdown();
+        }
+
+        // Log zone entity online/offline transitions
+        const isZoneEntity = haSubscribedEntities.has(data.entity_id) &&
+                             !data.entity_id.startsWith("alarm_control_panel.");
+        if (isZoneEntity) {
+          const newSt  = (data.new_state.state || "").toLowerCase();
+          const prevSt = (prev?.state || "").toLowerCase();
+          if (newSt === "unavailable" && prevSt !== "unavailable") {
+            logEvent("warn", `Entity offline: ${data.entity_id}`, "entity", { entityId: data.entity_id });
+          } else if (prevSt === "unavailable" && newSt !== "unavailable") {
+            logEvent("ok", `Entity back online: ${data.entity_id} (${data.new_state.state})`, "entity", { entityId: data.entity_id });
+          }
+        }
+
+        // Keep an open zone popup live for all HA state changes. This covers lights/sensors/doors
+        // even if the entity was not in haSubscribedEntities when the popup was opened.
+        refreshZonePopupIfOpen();
+
+        // Render zones + check for zone state transitions when a subscribed entity changes
+        if (haSubscribedEntities.has(data.entity_id)) {
+          checkZoneStateChanges();
+          renderZones();
+          if (editorMode) renderZonesEditor();
+          if (window.camUpdate) window.camUpdate();
+        }
+
+        // Start pin animation loop when a light or siren entity changes state
+        const isPinEntity = [...lights, ...sirens].some(p => p.entity_id === data.entity_id)
+          || doorPins.some(p => p.sensor_entity === data.entity_id || p.control_entity === data.entity_id);
+        if (isPinEntity) { startPinAnimLoop(); renderZones(); }
+      }
+    }
+  };
+
+  haSocket.onclose = (ev) => {
+    haConnected = false;
+    haStatesLoaded = false; // reset so fault check pauses until states reload
+    setHAStatus("disconnected");
+    showReconnectBanner(true);
+    const reason = ev.reason ? ` (${ev.reason})` : "";
+    if (haEverConnected) {
+      logEvent("warn", `HA WebSocket disconnected (code ${ev.code})${reason}. Retrying in ${Math.round(haReconnectDelay/1000)}s…`, "ha");
+    }
+    // Code 1006 = abnormal closure (HA restarting/not ready).
+    // Use a longer delay to avoid hammering HA with failed auth attempts
+    // which generate "Login attempt failed" notifications.
+    if (ev.code === 1006 && haReconnectDelay < 5000) {
+      haReconnectDelay = 5000;
+    }
+    scheduleReconnect();
+  };
+
+  haSocket.onerror = () => {
+    setHAStatus("error");
+    if (haEverConnected) {
+      logEvent("error", "HA WebSocket error. Is the HA URL correct and reachable?", "ha");
+    }
+  };
+}
+
+function scheduleReconnect() {
+  if (IS_DIRECT_MODE) return; // Direct Mode uses poller, not WebSocket reconnect
+  if (haReconnectTimer) clearTimeout(haReconnectTimer);
+  haReconnectTimer = setTimeout(() => {
+    connectHA();
+    // Exponential backoff: double delay up to 30s
+    haReconnectDelay = Math.min(haReconnectDelay * 2, 30000);
+  }, haReconnectDelay);
+}
+
+// Direct Mode state poller — replaces WebSocket in Direct Mode.
+// Polls /ow/states every 1s, populates haStates identically to the WS path.
+let directModePollTimer = null;
+function startDirectModePoller() {
+  if (!IS_DIRECT_MODE) return;
+  async function poll() {
+    let nextPoll = 1000;
+    try {
+      const res = await fetch("ow/states", { cache: "no-store" });
+      if (res.ok) {
+        const states = await res.json();
+        const entityCount = Object.keys(states).length;
+
+        if (entityCount === 0) {
+          // Cache not ready yet — retry quickly
+          nextPoll = 500;
+        } else {
+          Object.values(states).forEach(st => {
+            if (st.entity_id) haStates[st.entity_id] = st;
+          });
+
+          if (!haConnected) {
+            haConnected = true;
+            haEverConnected = true;
+            setHAStatus("connected");
+            logEvent("ok", `Direct Mode: ${entityCount} entity states loaded from backend.`, "ha");
+            subscribeHAEntities(); // builds the entity set (no WS send in direct mode)
+            // Re-render panels now that haConnected=true
+            if (getNumPanels() > 1) renderAllPanelZones(); else renderZones();
+          }
+
+          // Always re-render on each poll so zone colours and alarm state stay live
+          checkZoneStateChanges();
+          renderZones();
+          // Sync masterEnabled from haStates so master toggle reflects HA state
+          const masterSwitch = haStates["switch.overwatch_zone_master"];
+          if (masterSwitch) masterEnabled = masterSwitch.state !== "off";
+          // Re-render zone status dropdown so toggles reflect latest haStates
+          updateStatusDropdownInPlace();
+          // Keep the open zone popup live in Direct Mode (/ow/states polling).
+          refreshZonePopupIfOpen();
+          // Re-render camera status bar and grid so toggle states reflect latest haStates
+          if (window.renderCameraStatusBar) { window.renderCameraStatusBar(); applyStatusVisibility(); }
+          if (window.camUpdate) window.camUpdate();
+          // Refresh floor flyout dots if open
+          if (document.getElementById("floorFlyout")) renderFloorFlyout();
+          const alarmEntity = uiConfig.alarm_entity ||
+            Object.keys(haStates).find(id => id.startsWith("alarm_control_panel."));
+          if (alarmEntity && haStates[alarmEntity]) {
+            updateStatusFromAlarm(alarmEntity, haStates[alarmEntity]);
+          }
+        }
+      }
+    } catch (e) {
+      if (haConnected) {
+        haConnected = false;
+        setHAStatus("error");
+        logEvent("warn", "Direct Mode: lost contact with backend.", "ha");
+      }
+    }
+    directModePollTimer = setTimeout(poll, nextPoll);
+  }
+  poll();
+}
+
+function showReconnectBanner(show) {
+  let banner = document.getElementById("owReconnectBanner");
+  if (show) {
+    if (!banner) {
+      banner = document.createElement("div");
+      banner.id = "owReconnectBanner";
+      banner.style.cssText = "position:fixed;top:0;left:0;right:0;z-index:9999;background:rgba(255,149,0,0.92);color:#000;font-size:12px;font-weight:600;text-align:center;padding:4px 8px;pointer-events:none;";
+      banner.textContent = "⚡ Reconnecting to Home Assistant…";
+      document.body.appendChild(banner);
+    }
+  } else {
+    if (banner) banner.remove();
+  }
+}
+
+function sendHA(payload) {
+  if (!haSocket || haSocket.readyState !== WebSocket.OPEN) return;
+  payload.id = haMsgId++;
+  haSocket.send(JSON.stringify(payload));
+}
+
+function fetchAllStates() {
+  sendHA({ type: "get_states" });
+}
+
+// Fetch a single entity's current state from HA and insert into haStates.
+// Used when a new entity is added to a zone that wasn't in the initial get_states response.
+function fetchSingleEntityState(entityId) {
+  sendHA({
+    type: "get_states",
+    id: undefined, // sendHA assigns the id
+  });
+  // Simpler: use the REST API via our proxy
+  fetch(apiPath("ow/states") + "?v=" + Date.now())
+    .then(r => r.ok ? r.json() : null)
+    .then(states => {
+      if (!states) return;
+      // states is an object: entity_id -> state_obj
+      if (states[entityId]) {
+        haStates[entityId] = states[entityId];
+      } else {
+        // Entity genuinely doesn't exist in HA — insert a placeholder so !st doesn't fault
+        haStates[entityId] = { entity_id: entityId, state: "unknown", attributes: {} };
+      }
+      renderZones();
+    })
+    .catch(() => {
+      // On failure insert placeholder so !st doesn't permanently fault
+      if (!haStates[entityId]) {
+        haStates[entityId] = { entity_id: entityId, state: "unknown", attributes: {} };
+      }
+    });
+}
+
+function subscribeHAEntities() {
+  if (!haConnected) return;
+
+  // Subscribe to ALL state_changed events once — one sub covers everything
+  if (!haSubscribedEntities.has("__subscribed__")) {
+    haSubscribedEntities.add("__subscribed__");
+    sendHA({ type: "subscribe_events", event_type: "state_changed" });
+  }
+
+  // Rebuild the set of entities we care about (does NOT cancel the subscription above)
+  // We keep "__subscribed__" so the guard above still works on future calls
+  haSubscribedEntities.clear();
+  haSubscribedEntities.add("__subscribed__");
+
+  // Alarm panel entity (any domain — could be input_boolean, switch, etc.)
+  if (uiConfig.alarm_entity) haSubscribedEntities.add(uiConfig.alarm_entity);
+
+  // Auto-detect alarm_control_panel entities
+  Object.keys(haStates).forEach(id => {
+    if (id.startsWith("alarm_control_panel.")) haSubscribedEntities.add(id);
+  });
+
+  // All zone device entities
+  for (const zone of zones) {
+    for (const s of (zone.sensors || []))  haSubscribedEntities.add(s);
+    for (const s of (zone.cameras || []))  haSubscribedEntities.add(s);
+    for (const s of (zone.lights  || []))  haSubscribedEntities.add(s);
+    for (const s of (zone.sirens  || []))  haSubscribedEntities.add(s);
+    // Zone arm switch — so armed/disarmed changes from HA/dashboard update the editor and suppress logic
+    const zSwitchId = `switch.overwatch_zone_${zoneSlug(zone)}`;
+    haSubscribedEntities.add(zSwitchId);
+  }
+  // Master arm switch
+  haSubscribedEntities.add('switch.overwatch_zone_master');
+
+  // Door pin sensor entities
+  for (const pin of doorPins) {
+    if (pin.sensor_entity)  haSubscribedEntities.add(pin.sensor_entity);
+    if (pin.control_entity) haSubscribedEntities.add(pin.control_entity);
+  }
+
+  // Map pin entities (lights and sirens placed on map)
+  for (const pin of lights) if (pin.entity_id) haSubscribedEntities.add(pin.entity_id);
+  for (const pin of sirens) if (pin.entity_id) haSubscribedEntities.add(pin.entity_id);
+}
+
+/* Track last logged alarm state to avoid duplicate entries on reconnect */
+let lastLoggedAlarmState = null;
+
+function updateStatusFromAlarm(entityId, newState) {
+  const alarmEntity = uiConfig.alarm_entity || "";
+  const isAlarm = alarmEntity
+    ? entityId === alarmEntity
+    : entityId.startsWith("alarm_control_panel.");
+  if (!isAlarm) return;
+
+  const rawState = (newState?.state || "").toLowerCase();
+  const inverted  = !!uiConfig.alarm_entity_inverted;
+
+  // For generic on/off entities, apply inversion to get effective state
+  let effectiveArmed;
+  if (rawState === "on")  effectiveArmed = !inverted;
+  else if (rawState === "off") effectiveArmed = inverted;
+  else effectiveArmed = isAlarmArmed();
+
+  const statusEl = document.getElementById("statusText");
+  const dotEl    = document.getElementById("statusDot");
+
+  // Human-readable label for this state
+  const labelArmed    = uiConfig.alarm_label_armed    || "Armed";
+  const labelDisarmed = uiConfig.alarm_label_disarmed || "Disarmed";
+
+  const labels = {
+    disarmed:    labelDisarmed,
+    armed_home:  `${labelArmed} Home`,
+    armed_away:  `${labelArmed} Away`,
+    armed_night: `${labelArmed} Night`,
+    triggered:   "⚠ TRIGGERED",
+    pending:     "Pending…",
+    arming:      "Arming…",
+    unavailable: "Unavailable",
+  };
+  let label = labels[rawState];
+  if (!label) {
+    if (rawState === "on")       label = inverted ? labelDisarmed : labelArmed;
+    else if (rawState === "off") label = inverted ? labelArmed    : labelDisarmed;
+    else                         label = rawState || uiConfig.status;
+  }
+
+  if (statusEl) statusEl.textContent = label;
+
+  if (dotEl) {
+    dotEl.className = "status-dot";
+    // Only pulse when a zone is actually triggered — not just because system is armed
+    const anyZoneTriggered = haConnected && zones.some(z => getZoneState(z) === "triggered");
+    if (rawState === "triggered" || anyZoneTriggered) {
+      dotEl.classList.add("triggered");         // red + pulse
+    } else if (rawState === "armed_away") {
+      dotEl.classList.add("armed-away");         // solid colour, no pulse
+    } else if (rawState === "armed_home" || rawState === "armed_night") {
+      dotEl.classList.add("armed-home");
+    } else if (rawState === "pending" || rawState === "arming") {
+      dotEl.classList.add("pending");
+    } else if (effectiveArmed) {
+      dotEl.classList.add("armed-away");         // generic armed — solid, no pulse
+    }
+  }
+
+  // Issue 27: log alarm state changes — only when state actually changes
+  if (rawState !== lastLoggedAlarmState) {
+    lastLoggedAlarmState = rawState;
+
+    // Pick log level: triggered = error, everything else = info
+    let level = "info";
+    if (rawState === "triggered") level = "error";
+    else if (rawState === "disarmed" || rawState === "off") level = "ok";
+
+    logEvent(level, `Alarm: ${label} (${entityId})`, "ha");
+  }
+}
+
+/* ─── SETTINGS PANEL ──────────────────────────────────────── */
+function openSettings(tab) {
+  // Remove existing panel and re-render, then activate the requested tab
+  const existing = document.getElementById("settingsPanel");
+  if (existing) existing.remove();
+  renderSettingsPanel();
+  if (tab) {
+    const panel = document.getElementById("settingsPanel");
+    if (!panel) return;
+    // Use classList to match how tab switching works internally
+    panel.querySelectorAll(".settings-tab").forEach(t => t.classList.toggle("active", t.dataset.tab === tab));
+    panel.querySelectorAll(".settings-tab-panel").forEach(p => {
+      p.classList.toggle("active", p.dataset.panel === tab);
+    });
+  }
+}
+
+function renderSettingsPanel() {
+  const existingEl = document.getElementById("settingsPanel");
+  if (existingEl) { existingEl.classList.toggle("open"); return; }
+
+  const panel = document.createElement("div");
+  panel.className = "settings-panel open";
+  panel.id = "settingsPanel";
+
+  // isAdmin = came through HA ingress (authenticated), not direct LAN port
+  // IS_DIRECT_MODE = accessed via http://ha-ip:8099 directly (no HA auth = browser/public user)
+  const isAdmin = !IS_DIRECT_MODE;
+
+  // Effective value: localStorage first, then ui.yaml default, then hard default
+  const eff = (lsKey, cfgKey, def) =>
+    localStorage.getItem(lsKey) ?? (uiConfig[cfgKey] != null ? String(uiConfig[cfgKey]) : def);
+
+  const curDir   = localStorage.getItem('ow_split_dir') || 'h';
+  const curMode  = getViewMode();
+  const isSplitH = curMode === 'split' && curDir === 'h';
+  const isSplitV = curMode === 'split' && curDir === 'v';
+
+  const adminBox = `
+    <div class="settings-admin-notice">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" style="flex-shrink:0;margin-top:1px;">
+        <circle cx="12" cy="12" r="10" stroke="#ff9500" stroke-width="1.8"/>
+        <path d="M12 8v4m0 4h.01" stroke="#ff9500" stroke-width="2" stroke-linecap="round"/>
+      </svg>
+      <span>Admin only — managed via the HA Add-on panel.</span>
+    </div>`;
+
+  const perDeviceBadge = `<span class="settings-browser-badge">Per device</span>`;
+  const adminBadge     = `<span class="settings-admin-badge">Admin default</span>`;
+
+  panel.innerHTML = `
+    <div class="settings-titlebar">
+      <span class="settings-title">Settings</span>
+      <button class="zones-editor-close" id="settingsCloseBtn">✕</button>
+    </div>
+    <div class="settings-tabs">
+      <button class="settings-tab active" data-tab="ha">HA</button>
+      <button class="settings-tab" data-tab="general">General</button>
+      <button class="settings-tab" data-tab="alarm">Alarm</button>
+      <button class="settings-tab" data-tab="zones">Zones</button>
+      <button class="settings-tab" data-tab="cameras">Cameras</button>
+    </div>
+    <div class="settings-body">
+
+      <!-- ══ HA TAB ══════════════════════════════════════════════ -->
+      <div class="settings-tab-panel active" data-panel="ha">
+
+        ${!isAdmin ? `
+        <div class="settings-section-title">HOME ASSISTANT <span class="settings-admin-badge">ADMIN ONLY</span></div>
+        ${adminBox}
+        <div class="settings-section" style="margin-top:10px;">
+          <div class="settings-section-title">This Device</div>
+          <div class="settings-field">
+            <label>IP Address</label>
+            <div style="display:flex;align-items:center;gap:8px;">
+              <code style="background:rgba(0,150,255,0.12);border:1px solid rgba(0,150,255,0.3);border-radius:6px;padding:4px 10px;color:#4db8ff;font-size:13px;letter-spacing:0.05em;">${CLIENT_IP || '(unknown)'}</code>
+              <button onclick="navigator.clipboard?.writeText('${CLIENT_IP || ''}')" style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);color:#888;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:11px;">Copy</button>
+            </div>
+            <div style="font-size:11px;color:#555;margin-top:4px;">Share with your admin to get arm/disarm access.</div>
+          </div>
+        </div>` : ''}
+
+        <div id="haConnectionStatus" class="settings-connection-box ${haConnected ? 'connected' : 'disconnected'}">
+          <div class="settings-connection-label">${haConnected ? '✓ Connected to Home Assistant' : '✗ Not connected'}</div>
+          <div class="settings-connection-sub">${!IS_DIRECT_MODE ? 'Running as HA Add-on. Enter token once to connect.' : 'Connection managed by admin via Add-on.'}</div>
+        </div>
+
+        <div class="settings-section" ${!isAdmin ? 'style="opacity:0.45;pointer-events:none;"' : ''}>
+          <div class="settings-field">
+            <label>HA URL</label>
+            ${isAdmin
+              ? `<input type="text" id="cfgHaUrl" value="${escapeHtml(uiConfig.ha_url || '')}" placeholder="http://homeassistant.local:8123">`
+              : `<div class="settings-readonly">${escapeHtml(uiConfig.ha_url || 'Auto (add-on mode)')}</div>`}
+          </div>
+          <div class="settings-field">
+            <label>Long-Lived Access Token</label>
+            ${isAdmin
+              ? `<input type="password" id="cfgHaToken" placeholder="${uiConfig.ha_token ? '●●●●●●●● (saved)' : 'eyJ…'}">`
+              : `<div class="settings-readonly">●●●●●●●● ${uiConfig.ha_token ? '(saved)' : '(not set)'}</div>`}
+          </div>
+          ${isAdmin ? `
+          <button class="settings-btn" id="settingsSaveHaBtn" style="${haConnected ? 'opacity:0.6;' : ''}">
+            ${haConnected ? '✓ Connected — click to reconnect' : 'Connect to Home Assistant'}
+          </button>
+          <div id="haConnectStatus" style="font-size:11px;color:#888;margin-top:5px;min-height:14px;text-align:center;"></div>` : `
+          <div class="settings-readonly" style="text-align:center;color:#555;font-size:11px;">To manage HA connection: open Overwatch in the HA Add-on panel as an admin.</div>`}
+        </div>
+
+        ${isAdmin ? `
+        <div class="settings-section">
+          <div class="settings-section-title">Zone Arm/Disarm Access</div>
+          <div class="settings-field">
+            <label>Allowed IP addresses</label>
+            <textarea id="cfgArmAllowedIps" rows="3" placeholder="192.168.1.10&#10;192.168.1.11&#10;10.0.0.5"
+              style="width:100%;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:6px 8px;color:#e0e0e0;font-size:12px;resize:vertical;font-family:monospace;"
+            >${escapeHtml(_armAllowedIps.join('\n'))}</textarea>
+            <div style="font-size:11px;color:#555;margin-top:3px;">One IP per line. Only these devices can arm/disarm zones. Leave empty to disable arm/disarm for all devices.</div>
+            <div style="font-size:11px;color:#888;margin-top:4px;">Your current IP: <strong style="color:#0096ff;">${CLIENT_IP || '(unknown)'}</strong></div>
+          </div>
+          <button class="settings-btn" id="saveArmIpsBtn" style="margin-top:4px;">Save allowed IPs</button>
+        </div>` : ''}
+      </div>
+
+      <!-- ══ GENERAL TAB ═════════════════════════════════════════ -->
+      <div class="settings-tab-panel" data-panel="general">
+
+        <div class="settings-section">
+          <div class="settings-section-title">Default View ${perDeviceBadge}</div>
+          <div class="settings-field">
+
+            <!-- Level 1: Main view -->
+            <div style="font-size:11px;color:#666;margin-bottom:4px;">Main view</div>
+            <div class="settings-toggle-row" id="mainViewRow">
+              <button class="settings-toggle ${curMode === 'map' ? 'active' : ''}" data-view="map">Floorplan</button>
+              <button class="settings-toggle ${isSplitH ? 'active' : ''}" data-view="split-h">Split ↔</button>
+              <button class="settings-toggle ${isSplitV ? 'active' : ''}" data-view="split-v">Split ↕</button>
+              <button class="settings-toggle ${curMode === 'cameras' ? 'active' : ''}" data-view="cameras">Cameras</button>
+            </div>
+
+            <!-- Level 2: Floor panels (shown when map or split is active) -->
+            ${(curMode === 'map' || curMode === 'split') && floors.length > 1 ? (()=>{
+              const numPanels = parseInt(localStorage.getItem('ow_map_panels')||'1');
+              const panelsDir = localStorage.getItem('ow_panels_dir')||'h';
+              return '<div style="margin-top:10px;">'
+                + '<div style="font-size:11px;color:#666;margin-bottom:4px;">Floor panels</div>'
+                + '<div class="settings-toggle-row" id="floorPanelRow">'
+                + '<button class="settings-toggle' + (numPanels===1?' active':'') + '" data-panels="1">1 Panel</button>'
+                + '<button class="settings-toggle' + (numPanels===2&&panelsDir==='h'?' active':'') + '" data-panels="2" data-panels-dir="h">2 ↔</button>'
+                + '<button class="settings-toggle' + (numPanels===2&&panelsDir==='v'?' active':'') + '" data-panels="2" data-panels-dir="v">2 ↕</button>'
+                + '</div>'
+                + (numPanels >= 2 ? (()=>{
+                    const p0 = localStorage.getItem('ow_panel_0_floor') || (floors[0]?.id||'');
+                    const p1 = localStorage.getItem('ow_panel_1_floor') || (floors[1]?.id||floors[0]?.id||'');
+                    const floorOpts = floors.map(f=>'<option value="'+f.id+'">'+ f.name +'</option>').join('');
+                    return '<div style="margin-top:8px;display:flex;flex-direction:column;gap:6px;">'
+                      + '<div style="display:flex;align-items:center;gap:8px;">'
+                      + '<span style="font-size:11px;color:#888;width:52px;">Panel 1</span>'
+                      + '<select id="panel0FloorSel" style="flex:1;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:4px 8px;color:#fff;font-size:12px;">'
+                      + floors.map(f=>'<option value="'+f.id+'"'+(f.id===p0?' selected':'')+'>'+f.name+'</option>').join('')
+                      + '</select></div>'
+                      + '<div style="display:flex;align-items:center;gap:8px;">'
+                      + '<span style="font-size:11px;color:#888;width:52px;">Panel 2</span>'
+                      + '<select id="panel1FloorSel" style="flex:1;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:4px 8px;color:#fff;font-size:12px;">'
+                      + floors.map(f=>'<option value="'+f.id+'"'+(f.id===p1?' selected':'')+'>'+f.name+'</option>').join('')
+                      + '</select></div>'
+                      + '</div>';
+                  })() : '')
+                + '</div>';
+            })() : ''}
+
+            <div style="font-size:11px;color:#777;margin-top:6px;">Saved per device.</div>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-section-title">Sidebar ${perDeviceBadge}</div>
+          <div class="settings-field">
+            <label>Position</label>
+            <div class="settings-toggle-row">
+              <button class="settings-toggle ${uiConfig.sidebar_position !== 'left' ? 'active' : ''}" id="sidebarRight">Right</button>
+              <button class="settings-toggle ${uiConfig.sidebar_position === 'left' ? 'active' : ''}" id="sidebarLeft">Left</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-section-title">Floor Settings ${perDeviceBadge}</div>
+          ${floors.length <= 1
+            ? '<div style="font-size:11px;color:#666;">Add multiple floors in the Zones tab to enable floor settings.</div>'
+            : (() => {
+                const multiPanel = getNumPanels() > 1;
+                const disStyle   = multiPanel ? 'opacity:0.35;pointer-events:none;' : '';
+                const mpNote     = multiPanel ? '<div style="font-size:10px;color:#666;padding-bottom:6px;">Multi-panel active — auto-switch and camera floor filter are unavailable.</div>' : '';
+                const autoOn     = localStorage.getItem('ow_auto_floor') === 'true';
+                const subStyle   = autoOn ? '' : 'opacity:0.4;pointer-events:none;';
+                return mpNote
+                  + '<div style="display:flex;flex-direction:column;gap:8px;">'
+                  + '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;">'
+                  + '<input type="checkbox" id="hideFloorLabelChk" ' + (localStorage.getItem('ow_hide_floor_label')==='true' ? 'checked' : '') + '>'
+                  + '<span>Hide floor name label on panels</span></label>'
+                  + '<div style="' + disStyle + 'display:flex;flex-direction:column;gap:8px;">'
+                  + '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;">'
+                  + '<input type="checkbox" id="camFloorOnlyChk" ' + (localStorage.getItem('ow_cam_floor_only')==='true' ? 'checked' : '') + (multiPanel ? ' disabled' : '') + '>'
+                  + '<span>Show cameras for current floor only</span></label>'
+                  + '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;">'
+                  + '<input type="checkbox" id="autoFloorChk" ' + (autoOn ? 'checked' : '') + (multiPanel ? ' disabled' : '') + '>'
+                  + '<span>Auto-switch floor on motion</span></label>'
+                  + '<div style="padding-left:24px;display:flex;flex-direction:column;gap:6px;' + subStyle + '">'
+                  + '<div style="display:flex;align-items:center;gap:8px;">'
+                  + '<label style="flex:1;font-size:12px;">Default floor</label>'
+                  + '<select id="defaultFloorSel" style="background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:4px 8px;color:#fff;font-size:12px;">'
+                  + floors.map(f => '<option value="' + f.id + '"' + (localStorage.getItem('ow_default_floor')===f.id?' selected':'') + '>' + escapeHtml(f.name) + '</option>').join('')
+                  + '</select></div>'
+                  + '<div style="display:flex;align-items:center;gap:8px;">'
+                  + '<label style="flex:1;font-size:12px;">Stay on triggered floor (s)</label>'
+                  + '<input type="number" id="floorStayChk" min="5" max="600" value="' + (localStorage.getItem('ow_floor_stay_secs')||'30') + '" style="width:60px;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:4px 8px;color:#fff;font-size:12px;"></div>'
+                  + '<div style="display:flex;align-items:center;gap:8px;">'
+                  + '<label style="flex:1;font-size:12px;">Return-to-default cooldown (s)</label>'
+                  + '<input type="number" id="floorReturnChk" min="5" max="600" value="' + (localStorage.getItem('ow_floor_return_secs')||'60') + '" style="width:60px;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:4px 8px;color:#fff;font-size:12px;"></div>'
+                  + '</div></div></div>';
+              })()
+          }
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-section-title">Status Panels ${perDeviceBadge}</div>
+          <div class="settings-field">
+            <label class="settings-checkbox-row">
+              <input type="checkbox" id="hideZoneStatusChk" ${localStorage.getItem('ow_hide_zone_status') === 'true' ? 'checked' : ''}>
+              Hide Zone Status <span style="font-size:11px;color:#777;margin-left:4px;">Per device info panel</span>
+            </label>
+            <label class="settings-checkbox-row" style="margin-top:8px;display:flex;align-items:center;gap:8px;cursor:pointer;">
+              <input type="checkbox" id="hideCamStatusChk" ${localStorage.getItem('ow_hide_camera_status') === 'true' ? 'checked' : ''}>
+              Hide Camera Status <span style="font-size:11px;color:#777;margin-left:4px;">Per device info panel</span>
+            </label>
+          </div>
+        </div>
+
+        ${isAdmin ? `
+        <div class="settings-section">
+          <div class="settings-section-title">HA Integration <span class="settings-admin-badge">Admin</span></div>
+          <div style="font-size:11px;color:#666;line-height:1.6;">
+            The HA Overwatch custom component is written to
+            <code style="background:rgba(255,255,255,0.05);padding:1px 4px;border-radius:3px;font-size:10px;">/config/custom_components/ha_overwatch/</code>
+            automatically on add-on start.<br><br>
+            To activate:
+            <ol style="margin:6px 0 0 16px;padding:0;">
+              <li>Restart Home Assistant</li>
+              <li>Go to <b>Settings → Devices &amp; Services → Add Integration</b></li>
+              <li>Search for <b>HA Overwatch</b> and follow the steps</li>
+            </ol>
+            <br>
+            Entities created: <code style="font-size:10px;">switch.overwatch_*</code> and <code style="font-size:10px;">binary_sensor.overwatch_*</code>
+          </div>
+        </div>` : ''}
+
+      </div>
+
+      <!-- ══ ALARM TAB ════════════════════════════════════════════ -->
+      <div class="settings-tab-panel" data-panel="alarm">
+        <div class="settings-section-title">ALARM CONFIGURATION <span class="settings-admin-badge">ADMIN ONLY</span></div>
+        ${adminBox}
+        <div class="settings-section" ${!isAdmin ? 'style="opacity:0.45;pointer-events:none;"' : ''}>
+          <div class="settings-field">
+            <label>Alarm Panel Entity</label>
+            ${isAdmin ? `
+            <div class="entity-search-wrap" style="position:relative;">
+              <input type="text" id="cfgAlarmEntity" value="${escapeHtml(uiConfig.alarm_entity || '')}"
+                placeholder="alarm_control_panel.home_alarm" autocomplete="off">
+              <div class="entity-search-results" id="alarmEntityResults" style="display:none;"></div>
+            </div>
+            <div style="font-size:11px;color:#777;margin-top:3px;">Supports alarm_control_panel, input_boolean, switch, etc.</div>
+            ` : `<div class="settings-readonly">${escapeHtml(uiConfig.alarm_entity || '—')}${
+              uiConfig.alarm_entity && haStates[uiConfig.alarm_entity]?.attributes?.friendly_name
+                ? `<span style="color:#666;font-size:11px;display:block;margin-top:2px;">${escapeHtml(haStates[uiConfig.alarm_entity].attributes.friendly_name)}</span>`
+                : ''
+            }</div>`}
+          </div>
+          <div class="settings-field">
+            <label style="display:flex;align-items:center;gap:8px;">
+              <input type="checkbox" id="cfgAlarmInverted" ${uiConfig.alarm_entity_inverted ? 'checked' : ''}
+                ${!isAdmin ? 'disabled' : ''} style="width:16px;height:16px;accent-color:#ffcc00;">
+              <span>Invert alarm entity (OFF = Armed)</span>
+            </label>
+          </div>
+          <div class="settings-field">
+            <label>Label when armed</label>
+            ${isAdmin
+              ? `<input type="text" id="cfgLabelArmed" value="${escapeHtml(uiConfig.alarm_label_armed || 'Armed')}" style="max-width:160px;">`
+              : `<div class="settings-readonly">${escapeHtml(uiConfig.alarm_label_armed || 'Armed')}</div>`}
+          </div>
+          <div class="settings-field">
+            <label>Label when disarmed</label>
+            ${isAdmin
+              ? `<input type="text" id="cfgLabelDisarmed" value="${escapeHtml(uiConfig.alarm_label_disarmed || 'Disarmed')}" style="max-width:160px;">`
+              : `<div class="settings-readonly">${escapeHtml(uiConfig.alarm_label_disarmed || 'Disarmed')}</div>`}
+          </div>
+          ${isAdmin ? `
+          <button class="settings-btn" id="settingsSaveAlarmBtn">Save Alarm Settings</button>
+          <div id="alarmSaveStatus" style="font-size:11px;color:#888;margin-top:6px;text-align:center;"></div>` : ''}
+        </div>
+      </div>
+
+      <!-- ══ ZONES TAB ════════════════════════════════════════════ -->
+      <div class="settings-tab-panel" data-panel="zones">
+
+        <div class="settings-section">
+          <div class="settings-section-title">Zone Toggle Source ${perDeviceBadge}</div>
+          <div class="settings-toggle-row">
+            <button class="settings-toggle ${localStorage.getItem('ow_zone_source') !== 'device' ? 'active' : ''}" data-zonesource="server">HA defaults (server)</button>
+            <button class="settings-toggle ${localStorage.getItem('ow_zone_source') === 'device' ? 'active' : ''}" data-zonesource="device">Per device (this browser)</button>
+          </div>
+          <div style="font-size:11px;color:#777;margin-top:4px;"><b>HA defaults:</b> zone toggles reflect HA switch state. Locked on remote browsers (no WebSocket).<br><b>Per device:</b> each browser stores its own zone on/off state independently of HA.</div>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-section-title">Floorplan Behaviour ${perDeviceBadge}</div>
+          <div style="font-size:11px;color:#666;margin-bottom:4px;">Saved per device. Admin sets the default via ui.yaml; browser overrides locally.</div>
+          <div class="settings-field">
+            <label>Zone fade-out (seconds)</label>
+            <input type="number" id="cfgFadeDuration" value="${eff('ow_fade_duration','zone_fade_duration','3')}"
+              min="0" max="30" step="0.5" style="width:80px;background:#0a0a0a;border:1px solid #2a2a2a;border-radius:8px;color:#fff;padding:6px 8px;font-size:13px;outline:none;">
+            <div style="font-size:11px;color:#777;margin-top:3px;">How long a zone fades out after trigger clears. 0 = instant.</div>
+          </div>
+          <div class="settings-field">
+            <label>Flash behaviour when triggered</label>
+            <div class="settings-toggle-row">
+              <button class="settings-toggle ${eff('ow_flash_mode','zone_flash_mode','zone') === 'zone'  ? 'active' : ''}" data-flash="zone">Zone only</button>
+              <button class="settings-toggle ${eff('ow_flash_mode','zone_flash_mode','zone') === 'group' ? 'active' : ''}" data-flash="group">Whole group</button>
+            </div>
+            <div style="font-size:11px;color:#777;margin-top:4px;"><b>Zone only:</b> just the triggered zone flashes.<br><b>Whole group:</b> all zones in the group flash.</div>
+          </div>
+          <div class="settings-field" style="margin-top:10px;">
+            <label>Disarmed zone behaviour</label>
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:6px;">
+              <input type="checkbox" id="hideDisarmedFlashChk" ${localStorage.getItem('ow_hide_disarmed_flash') === 'true' ? 'checked' : ''}>
+              Hide flashing on disarmed zones with active sensors
+            </label>
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:6px;">
+              <input type="checkbox" id="smokeCoAlwaysArmedChk" ${localStorage.getItem('ow_smoke_co_always_armed') === 'true' ? 'checked' : ''}>
+              Treat Smoke &amp; CO as always armed
+              <span style="font-size:11px;color:#777;margin-left:2px;">(use armed colours even when disarmed)</span>
+            </label>
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:6px;">
+              <input type="checkbox" id="hideDoorAlertDisarmedChk" ${localStorage.getItem('ow_hide_door_alert_disarmed') === 'true' ? 'checked' : ''}>
+              Suppress open door/window alerts for disarmed zones
+              <span style="font-size:11px;color:#777;margin-left:2px;">(no animation when zone is disarmed)</span>
+            </label>
+          </div>
+          <div class="settings-field">
+            <label>Map icons</label>
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:6px;">
+              <input type="checkbox" id="hideLightsChk" ${localStorage.getItem('ow_hide_lights') === 'true' ? 'checked' : ''}>
+              Hide light icons on map
+            </label>
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:4px;">
+              <input type="checkbox" id="hideSirensChk" ${localStorage.getItem('ow_hide_sirens') === 'true' ? 'checked' : ''}>
+              Hide siren icons on map
+            </label>
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:4px;">
+              <input type="checkbox" id="hideCamPinsChk" ${localStorage.getItem('ow_hide_cam_pins') === 'true' ? 'checked' : ''}>
+              Hide camera icons on map
+            </label>
+            <div style="margin-top:10px;border-top:1px solid rgba(255,255,255,0.06);padding-top:8px;">
+              <label style="font-size:12px;color:#aaa;display:block;margin-bottom:4px;">Zone detail popup</label>
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                <input type="checkbox" id="zonePopupThumbsChk" ${localStorage.getItem('ow_zone_popup_thumbs') === 'true' ? 'checked' : ''}>
+                Show camera thumbnails in zone panel
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-section-title" id="zoneColourToggle"
+            style="cursor:pointer;user-select:none;display:flex;align-items:center;justify-content:space-between;">
+            <span>Zone Colours ${perDeviceBadge}</span>
+            <span id="zoneColourChevron" style="font-size:10px;color:#666;transition:transform 0.2s;">▼</span>
+          </div>
+          <div id="zoneColourBody" style="display:none;">
+          <div style="font-size:11px;color:#666;margin-bottom:6px;">Admin sets server defaults. Browser saves locally and overrides them per device.</div>
+          <div class="settings-section-title" style="font-size:10px;margin-top:4px;">Armed</div>
+          <div class="settings-color-grid">
+            <div class="settings-color-item"><label>Person</label><input type="color" id="cfgColOnPerson" value="${eff('ow_color_on_person','color_on_person','#ff3b30')}"></div>
+            <div class="settings-color-item"><label>Motion</label><input type="color" id="cfgColOnMotion" value="${eff('ow_color_on_motion','color_on_motion','#ff9500')}"></div>
+            <div class="settings-color-item"><label>Door</label><input type="color" id="cfgColOnDoor" value="${eff('ow_color_on_door','color_on_door','#ff6b35')}"></div>
+            <div class="settings-color-item"><label>Window</label><input type="color" id="cfgColOnWindow" value="${eff('ow_color_on_window','color_on_window','#ff9f0a')}"></div>
+            <div class="settings-color-item"><label>Animal</label><input type="color" id="cfgColOnAnimal" value="${eff('ow_color_on_animal','color_on_animal','#ff6b00')}"></div>
+            <div class="settings-color-item"><label>Vehicle</label><input type="color" id="cfgColOnVehicle" value="${eff('ow_color_on_vehicle','color_on_vehicle','#ff3b80')}"></div>
+            <div class="settings-color-item"><label>Smoke</label><input type="color" id="cfgColOnSmoke" value="${eff('ow_color_on_smoke','color_on_smoke','#ff2d55')}"></div>
+            <div class="settings-color-item"><label>CO/Gas</label><input type="color" id="cfgColOnCo" value="${eff('ow_color_on_co','color_on_co','#bf5af2')}"></div>
+          </div>
+          <div class="settings-section-title" style="font-size:10px;margin-top:10px;">Disarmed</div>
+          <div class="settings-color-grid">
+            <div class="settings-color-item"><label>Person</label><input type="color" id="cfgColOffPerson" value="${eff('ow_color_off_person','color_off_person','#4cd964')}"></div>
+            <div class="settings-color-item"><label>Motion</label><input type="color" id="cfgColOffMotion" value="${eff('ow_color_off_motion','color_off_motion','#5ac8fa')}"></div>
+            <div class="settings-color-item"><label>Door</label><input type="color" id="cfgColOffDoor" value="${eff('ow_color_off_door','color_off_door','#ffcc00')}"></div>
+            <div class="settings-color-item"><label>Window</label><input type="color" id="cfgColOffWindow" value="${eff('ow_color_off_window','color_off_window','#ffcc00')}"></div>
+            <div class="settings-color-item"><label>Animal</label><input type="color" id="cfgColOffAnimal" value="${eff('ow_color_off_animal','color_off_animal','#aad400')}"></div>
+            <div class="settings-color-item"><label>Vehicle</label><input type="color" id="cfgColOffVehicle" value="${eff('ow_color_off_vehicle','color_off_vehicle','#00c7be')}"></div>
+            <div class="settings-color-item"><label>Smoke</label><input type="color" id="cfgColOffSmoke" value="${eff('ow_color_off_smoke','color_off_smoke','#ff6b6b')}"></div>
+            <div class="settings-color-item"><label>CO/Gas</label><input type="color" id="cfgColOffCo" value="${eff('ow_color_off_co','color_off_co','#cc73f8')}"></div>
+          </div>
+          ${isAdmin ? `<div style="font-size:10px;color:#444;margin-top:4px;">Admin: <a href="#" id="settingsSaveColoursYamlLink" style="color:#666;">Save as server default</a></div>` : `
+          <div style="margin-top:8px;">
+            <button id="resetColoursBtn" style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.12);color:#888;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:11px;">Reset to server defaults</button>
+            <span id="resetColoursStatus" style="font-size:10px;color:#555;margin-left:6px;"></span>
+          </div>`}
+          </div><!-- /zoneColourBody -->
+        </div>
+      </div>
+
+      <!-- ══ CAMERAS TAB ══════════════════════════════════════════ -->
+      <div class="settings-tab-panel" data-panel="cameras">
+
+        <div class="settings-section">
+          <div class="settings-section-title">Camera Toggle Source ${perDeviceBadge}</div>
+          <div class="settings-field">
+            <label>Camera visibility controlled by</label>
+            <div class="settings-toggle-row">
+              <button class="settings-toggle ${localStorage.getItem('ow_cam_source') !== 'device' ? 'active' : ''}" data-camsource="server">Server defaults (HA entities)</button>
+              <button class="settings-toggle ${localStorage.getItem('ow_cam_source') === 'device' ? 'active' : ''}" data-camsource="device">Per device (this browser)</button>
+            </div>
+            <div style="font-size:11px;color:#777;margin-top:4px;">
+              <b>Server defaults:</b> camera visibility follows HA entity states — consistent across all browsers and controllable via HA automations.<br>
+              <b>Per device:</b> this browser uses its own camera toggle settings, ignoring HA entity state.
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-section-title">Display ${perDeviceBadge}</div>
+          <div class="settings-field">
+            <label>Camera mode</label>
+            <div class="settings-toggle-row">
+              <button class="settings-toggle ${eff('ow_cam_mode_v4','cam_default_mode','live') !== 'live' ? 'active' : ''}" data-cammode="snapshot">Snapshot</button>
+              <button class="settings-toggle ${eff('ow_cam_mode_v4','cam_default_mode','live') === 'live' ? 'active' : ''}" data-cammode="live">Live</button>
+            </div>
+            <div style="font-size:11px;color:#777;margin-top:4px;"><b>Snapshot:</b> lower bandwidth, periodic refresh.<br><b>Live:</b> MJPEG stream, instant but more resources.</div>
+          </div>
+          <div class="settings-field" id="hideCamLabelsField" style="margin-top:6px;">
+            <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
+              <input type="checkbox" id="cfgHideCamLabels" ${eff('ow_hide_cam_labels','cam_hide_labels','false') === 'true' ? 'checked' : ''}
+                style="width:16px;height:16px;accent-color:#0096ff;cursor:pointer;">
+              <span>Hide camera name labels on tiles</span>
+            </label>
+          </div>
+          <div class="settings-field" style="margin-top:6px;">
+            <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
+              <input type="checkbox" id="cfgAlwaysHighRes" ${localStorage.getItem('ow_cam_always_high_res') === 'true' ? 'checked' : ''}
+                style="width:16px;height:16px;accent-color:#0096ff;cursor:pointer;">
+              <span>Always use high resolution (ignore low-res assignments)</span>
+            </label>
+          </div>
+          <div class="settings-field" style="margin-top:6px;">
+            <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
+              <input type="checkbox" id="cfgHideDisarmedCams" ${localStorage.getItem('ow_hide_disarmed_cams') === 'true' ? 'checked' : ''}
+                style="width:16px;height:16px;accent-color:#0096ff;cursor:pointer;">
+              <span>Hide cameras from disarmed zones in camera panel</span>
+            </label>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-section-title">Performance ${perDeviceBadge}</div>
+          <div style="font-size:11px;color:#666;margin-bottom:6px;">Admin sets the default. Browser overrides locally without changing server config.</div>
+          <div class="settings-field">
+            <label>Snapshot refresh interval (seconds)</label>
+            <input type="number" id="cfgSnapInterval" value="${eff('ow_snap_interval','cam_snapshot_interval','2')}"
+              min="1" max="30" style="width:70px;background:#0a0a0a;border:1px solid #2a2a2a;border-radius:8px;color:#fff;padding:6px 8px;font-size:13px;outline:none;">
+          </div>
+          <div class="settings-field">
+            <label>Camera cooldown after zone clears (seconds)</label>
+            <input type="number" id="cfgCamCooldown" value="${eff('ow_cam_cooldown','cam_cooldown','30')}"
+              min="0" max="300" style="width:70px;background:#0a0a0a;border:1px solid #2a2a2a;border-radius:8px;color:#fff;padding:6px 8px;font-size:13px;outline:none;">
+          </div>
+          ${isAdmin ? `
+          <div style="font-size:10px;color:#444;margin-top:6px;">Admin: <a href="#" id="settingsSavePerfYamlLink" style="color:#666;">Save as server default</a></div>` : ''}
+        </div>
+
+      </div>
+
+    </div>
+  `;
+
+  document.body.appendChild(panel);
+  makeDraggable(panel, panel.querySelector(".settings-titlebar"), "settingsPanel");
+  document.getElementById("settingsCloseBtn").onclick = () => panel.classList.remove("open");
+  panel.addEventListener("pointerdown", e => e.stopPropagation());
+
+  // Live-update HA connection status every 2s while settings is open
+  const connPollTimer = setInterval(() => {
+    if (!panel.classList.contains("open")) { clearInterval(connPollTimer); return; }
+    updateSettingsConnectionBox();
+  }, 2000);
+
+  // ── Tab switching ────────────────────────────────────────────
+  panel.querySelectorAll(".settings-tab").forEach(tab => {
+    tab.onclick = () => {
+      panel.querySelectorAll(".settings-tab").forEach(t => t.classList.remove("active"));
+      panel.querySelectorAll(".settings-tab-panel").forEach(p => p.classList.remove("active"));
+      tab.classList.add("active");
+      panel.querySelector(`.settings-tab-panel[data-panel="${tab.dataset.tab}"]`)?.classList.add("active");
+    };
+  });
+
+  // ── View mode ────────────────────────────────────────────────
+  panel.querySelectorAll(".settings-toggle[data-view]").forEach(btn => {
+    btn.onclick = () => {
+      panel.querySelectorAll(".settings-toggle[data-view]").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      const v = btn.dataset.view;
+      if (v === 'split-h') {
+        localStorage.setItem('ow_split_dir', 'h');
+        document.body.setAttribute('data-split-dir', 'h');
+        setViewMode('split');
+      } else if (v === 'split-v') {
+        localStorage.setItem('ow_split_dir', 'v');
+        document.body.setAttribute('data-split-dir', 'v');
+        setViewMode('split');
+      } else {
+        setViewMode(v);
+      }
+      // Re-render settings to show/hide floor panel options
+      openSettings("general");
+    };
+  });
+
+  // ── Floor panels ─────────────────────────────────────────────
+  panel.querySelectorAll(".settings-toggle[data-panels]").forEach(btn => {
+    btn.onclick = () => {
+      panel.querySelectorAll(".settings-toggle[data-panels]").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      const n   = parseInt(btn.dataset.panels);
+      const dir = btn.dataset.panelsDir || 'h';
+      localStorage.setItem('ow_map_panels', n);
+      if (n >= 2) localStorage.setItem('ow_panels_dir', dir);
+      applyFloorPanels();
+      openSettings("general"); // re-render to show/hide selectors
+    };
+  });
+
+  const p0sel = document.getElementById("panel0FloorSel");
+  const p1sel = document.getElementById("panel1FloorSel");
+  if (p0sel) p0sel.onchange = () => {
+    localStorage.setItem('ow_panel_0_floor', p0sel.value);
+    applyFloorPanels();
+  };
+  if (p1sel) p1sel.onchange = () => {
+    localStorage.setItem('ow_panel_1_floor', p1sel.value);
+    applyFloorPanels();
+  };
+
+  // ── Flash mode ───────────────────────────────────────────────
+  panel.querySelectorAll(".settings-toggle[data-flash]").forEach(btn => {
+    btn.onclick = () => {
+      panel.querySelectorAll(".settings-toggle[data-flash]").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      localStorage.setItem('ow_flash_mode', btn.dataset.flash);
+    };
+  });
+
+  // ── Camera source toggle (server/device) ────────────────────
+  panel.querySelectorAll(".settings-toggle[data-camsource]").forEach(btn => {
+    btn.onclick = async () => {
+      panel.querySelectorAll(".settings-toggle[data-camsource]").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      localStorage.setItem('ow_cam_source', btn.dataset.camsource);
+      // If switching to server mode, fetch latest state immediately
+      if (btn.dataset.camsource !== 'device' && window._camRefreshServerState) {
+        await window._camRefreshServerState();
+      }
+      // Re-render both the status bar (dropdown locked state + dots) and grid
+      if (window.renderCameraStatusBar) { window.renderCameraStatusBar(); applyStatusVisibility(); }
+      if (window.camUpdate) window.camUpdate();
+    };
+  });
+
+  // ── Zone source toggle (server/device) ──────────────────────
+  panel.querySelectorAll(".settings-toggle[data-zonesource]").forEach(btn => {
+    btn.onclick = () => {
+      panel.querySelectorAll(".settings-toggle[data-zonesource]").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      localStorage.setItem(ZONE_MODE_KEY, btn.dataset.zonesource);
+      renderStatusDropdown();
+      renderZones();
+    };
+  });
+
+  // ── Zone behaviour — auto-save to localStorage on change ─────
+  document.getElementById("cfgFadeDuration")?.addEventListener("change", function() {
+    localStorage.setItem('ow_fade_duration', this.value);
+  });
+
+  // ── Camera display — auto-save to localStorage on change ─────
+  panel.querySelectorAll(".settings-toggle[data-cammode]").forEach(btn => {
+    btn.onclick = () => {
+      panel.querySelectorAll(".settings-toggle[data-cammode]").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      localStorage.setItem('ow_cam_mode_v4', 'snapshot');
+      if (window._camSetMode) window._camSetMode('snapshot');
+    };
+  });
+
+  // ── Camera performance — auto-save to localStorage on change ──
+  document.getElementById("cfgSnapInterval")?.addEventListener("change", function() {
+    localStorage.setItem('ow_snap_interval', this.value);
+  });
+  document.getElementById("cfgCamCooldown")?.addEventListener("change", function() {
+    localStorage.setItem('ow_cam_cooldown', this.value);
+  });
+  panel.querySelectorAll(".settings-toggle[data-cammode]").forEach(btn => {
+    btn.onclick = () => {
+      panel.querySelectorAll(".settings-toggle[data-cammode]").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      localStorage.setItem('ow_cam_mode_v4', 'snapshot');
+      if (window._camSetMode) window._camSetMode('snapshot');
+    };
+  });
+
+  // ── Camera labels ────────────────────────────────────────────
+  document.getElementById("cfgHideCamLabels")?.addEventListener("change", function() {
+    localStorage.setItem('ow_hide_cam_labels', this.checked ? 'true' : 'false');
+    document.querySelectorAll('.cam-tile-label').forEach(el => {
+      el.style.display = this.checked ? 'none' : '';
+    });
+  });
+
+  document.getElementById("cfgAlwaysHighRes")?.addEventListener("change", function() {
+    localStorage.setItem('ow_cam_always_high_res', this.checked ? 'true' : 'false');
+    if (window.renderCameraStatusBar) { window.renderCameraStatusBar(); applyStatusVisibility(); }
+  });
+  document.getElementById("cfgHideDisarmedCams")?.addEventListener("change", function() {
+    localStorage.setItem('ow_hide_disarmed_cams', this.checked ? 'true' : 'false');
+    if (window.renderCameraStatusBar) { window.renderCameraStatusBar(); applyStatusVisibility(); }
+  });
+
+  // ── Sidebar position ─────────────────────────────────────────
+  const sbRight = document.getElementById("sidebarRight");
+  const sbLeft  = document.getElementById("sidebarLeft");
+  if (sbRight) sbRight.onclick = () => {
+    uiConfig.sidebar_position = "right"; applyConfig(); updateExpandBtn(uiConfig.sidebar_collapsed);
+    sbRight.classList.add("active"); sbLeft?.classList.remove("active");
+  };
+  if (sbLeft) sbLeft.onclick = () => {
+    uiConfig.sidebar_position = "left"; applyConfig(); updateExpandBtn(uiConfig.sidebar_collapsed);
+    sbLeft.classList.add("active"); sbRight?.classList.remove("active");
+  };
+
+  // ── Status panel visibility ───────────────────────────────────
+  const hideZoneChk = document.getElementById("hideZoneStatusChk");
+  const hideCamChk  = document.getElementById("hideCamStatusChk");
+  if (hideZoneChk) hideZoneChk.onchange = () => {
+    localStorage.setItem("ow_hide_zone_status", hideZoneChk.checked);
+    applyStatusVisibility();
+  };
+  if (hideCamChk) hideCamChk.onchange = () => {
+    localStorage.setItem("ow_hide_camera_status", hideCamChk.checked);
+    applyStatusVisibility();
+  };
+
+  // ── Map icon visibility ───────────────────────────────────────
+  document.getElementById("hideDisarmedFlashChk")?.addEventListener("change", function() {
+    localStorage.setItem('ow_hide_disarmed_flash', this.checked ? 'true' : 'false');
+    renderZones();
+  });
+
+  document.getElementById("smokeCoAlwaysArmedChk")?.addEventListener("change", function() {
+    localStorage.setItem('ow_smoke_co_always_armed', this.checked ? 'true' : 'false');
+    renderZones();
+  });
+
+  document.getElementById("hideDoorAlertDisarmedChk")?.addEventListener("change", function() {
+    localStorage.setItem('ow_hide_door_alert_disarmed', this.checked ? 'true' : 'false');
+    renderZones();
+  });
+
+  const hideLightsChk  = document.getElementById('hideLightsChk');
+  const hideSirensChk  = document.getElementById('hideSirensChk');
+  const hideCamPinsChk = document.getElementById('hideCamPinsChk');
+  if (hideLightsChk) hideLightsChk.onchange = () => {
+    localStorage.setItem('ow_hide_lights', hideLightsChk.checked ? 'true' : 'false');
+    renderZones();
+  };
+  if (hideSirensChk) hideSirensChk.onchange = () => {
+    localStorage.setItem('ow_hide_sirens', hideSirensChk.checked ? 'true' : 'false');
+    renderZones();
+  };
+  if (hideCamPinsChk) hideCamPinsChk.onchange = () => {
+    localStorage.setItem('ow_hide_cam_pins', hideCamPinsChk.checked ? 'true' : 'false');
+    renderZones();
+  };
+  const zonePopupThumbsChk = document.getElementById('zonePopupThumbsChk');
+  if (zonePopupThumbsChk) zonePopupThumbsChk.onchange = () => {
+    localStorage.setItem('ow_zone_popup_thumbs', zonePopupThumbsChk.checked ? 'true' : 'false');
+    refreshZonePopupIfOpen();
+  };
+
+  // ── Floor settings ────────────────────────────────────────────
+  const hideFloorLabelChk = document.getElementById("hideFloorLabelChk");
+  if (hideFloorLabelChk) hideFloorLabelChk.onchange = () => {
+    localStorage.setItem('ow_hide_floor_label', hideFloorLabelChk.checked);
+    applyFloorPanels(); // rebuild panels to show/hide labels
+  };
+
+  const camFloorOnlyChk = document.getElementById("camFloorOnlyChk");
+  const autoFloorChk    = document.getElementById("autoFloorChk");
+  const defaultFloorSel = document.getElementById("defaultFloorSel");
+  const floorStayInput  = document.getElementById("floorStayChk");
+  const floorReturnInput = document.getElementById("floorReturnChk");
+  const floorSubSettings = autoFloorChk?.closest(".settings-field")?.nextElementSibling;
+
+  if (camFloorOnlyChk) camFloorOnlyChk.onchange = () => {
+    localStorage.setItem("ow_cam_floor_only", camFloorOnlyChk.checked);
+    if (window.renderCameraStatusBar) { window.renderCameraStatusBar(); applyStatusVisibility(); }
+    if (window.camUpdate) window.camUpdate();
+  };
+  if (autoFloorChk) autoFloorChk.onchange = () => {
+    localStorage.setItem("ow_auto_floor", autoFloorChk.checked);
+    // Toggle sub-settings opacity
+    const sub = document.querySelector("#autoFloorChk")?.closest("label")?.nextElementSibling;
+    if (sub) sub.style.cssText = `padding-left:24px;display:flex;flex-direction:column;gap:6px;${!autoFloorChk.checked ? 'opacity:0.4;pointer-events:none;' : ''}`;
+  };
+  if (defaultFloorSel) defaultFloorSel.onchange = () => {
+    localStorage.setItem("ow_default_floor", defaultFloorSel.value);
+  };
+  if (floorStayInput) floorStayInput.onchange = () => {
+    localStorage.setItem("ow_floor_stay_secs", floorStayInput.value);
+  };
+  if (floorReturnInput) floorReturnInput.onchange = () => {
+    localStorage.setItem("ow_floor_return_secs", floorReturnInput.value);
+  };
+
+  // ── Save zone behaviour to localStorage ──────────────────────
+  // ── Colours — auto-save to localStorage on change ────────────
+  const colourMap = {
+    cfgColOnPerson: 'ow_color_on_person',  cfgColOnMotion:  'ow_color_on_motion',
+    cfgColOnDoor:   'ow_color_on_door',    cfgColOnWindow:  'ow_color_on_window',
+    cfgColOnAnimal: 'ow_color_on_animal',  cfgColOnVehicle: 'ow_color_on_vehicle',
+    cfgColOnSmoke:  'ow_color_on_smoke',   cfgColOnCo:      'ow_color_on_co',
+    cfgColOffPerson:'ow_color_off_person', cfgColOffMotion: 'ow_color_off_motion',
+    cfgColOffDoor:  'ow_color_off_door',   cfgColOffWindow: 'ow_color_off_window',
+    cfgColOffAnimal:'ow_color_off_animal', cfgColOffVehicle:'ow_color_off_vehicle',
+    cfgColOffSmoke: 'ow_color_off_smoke',  cfgColOffCo:     'ow_color_off_co',
+  };
+  Object.entries(colourMap).forEach(([id, lsKey]) => {
+    document.getElementById(id)?.addEventListener("input", function() {
+      localStorage.setItem(lsKey, this.value);
+      applyConfig();   // update CSS variables immediately
+      renderZones();   // re-render floorplan with new colours
+    });
+  });
+
+  if (!isAdmin) {
+    // Non-admin: still wire the reset button
+    document.getElementById("resetColoursBtn")?.addEventListener("click", () => {
+      const colourLsKeys = [
+        'ow_color_on_person','ow_color_on_motion','ow_color_on_door','ow_color_on_window',
+        'ow_color_on_animal','ow_color_on_vehicle','ow_color_on_smoke','ow_color_on_co','ow_color_on_default',
+        'ow_color_off_person','ow_color_off_motion','ow_color_off_door','ow_color_off_window',
+        'ow_color_off_animal','ow_color_off_vehicle','ow_color_off_smoke','ow_color_off_co','ow_color_off_default',
+        'ow_color_zone_triggered','ow_color_zone_fault','ow_color_zone_bypassed','ow_color_zone_armed','ow_color_zone_normal'
+      ];
+      colourLsKeys.forEach(k => localStorage.removeItem(k));
+      applyConfig();
+      renderZones();
+      openSettings('zones');
+      const st = document.getElementById('resetColoursStatus');
+      if (st) { st.textContent = '✓ Reset'; setTimeout(() => st.textContent = '', 2000); }
+    });
+    return;  // ══ Admin-only bindings below ══════════
+  }
+
+  // ── Alarm entity live search ─────────────────────────────────
+  const alarmInput   = document.getElementById("cfgAlarmEntity");
+  const alarmResults = document.getElementById("alarmEntityResults");
+  if (alarmInput && alarmResults) {
+    alarmInput.oninput = () => {
+      const q = alarmInput.value.trim().toLowerCase();
+      if (!q || !haConnected) { alarmResults.style.display = "none"; return; }
+      const hits = Object.keys(haStates).filter(id => id.toLowerCase().includes(q)).slice(0, 20)
+        .map(id => ({ id, state: haStates[id]?.state || "—", friendly: haStates[id]?.attributes?.friendly_name || "" }));
+      if (!hits.length) { alarmResults.style.display = "none"; return; }
+      alarmResults.innerHTML = hits.map(h => `
+        <div class="entity-search-result" data-entity-id="${escapeHtml(h.id)}">
+          <span class="entity-search-id">${escapeHtml(h.id)}</span>
+          <span class="entity-search-state">${escapeHtml(h.state)}</span>
+          ${h.friendly ? `<span class="entity-search-friendly">${escapeHtml(h.friendly)}</span>` : ""}
+        </div>`).join("");
+      alarmResults.style.display = "block";
+      alarmResults.querySelectorAll(".entity-search-result").forEach(el => {
+        el.onclick = () => { alarmInput.value = el.dataset.entityId; alarmResults.style.display = "none"; };
+      });
+    };
+    document.addEventListener("pointerdown", function hideAlarm(e) {
+      if (!alarmInput.contains(e.target) && !alarmResults.contains(e.target)) {
+        alarmResults.style.display = "none";
+        document.removeEventListener("pointerdown", hideAlarm);
+      }
+    });
+  }
+
+  // ── Floors settings ────────────────────────────────────────────
+  // Helper: upload a floorplan image and return the path
+  async function uploadFloorplanFile(file, statusEl) {
+    if (statusEl) statusEl.textContent = "Uploading…";
+    const form = new FormData(); form.append("file", file);
+    const res = await fetch(apiPath("ow/upload-floorplan"), { method: "POST", body: form });
+    if (!res.ok) throw new Error("Upload failed (" + res.status + ")");
+    const data = await res.json().catch(() => ({}));
+    const imgPath = data.path || ("img/" + file.name);
+    if (statusEl) { statusEl.textContent = "✓ " + imgPath; statusEl.style.color = "#32d74b"; }
+    return imgPath;
+  }
+
+  // ── Build ui.yaml ────────────────────────────────────────────
+  function buildYamlContent() {
+    const g = id => document.getElementById(id)?.value || "";
+    return (
+      `ui:\n` +
+      `  ha_url: "${uiConfig.ha_url || ""}"\n` +
+      `  ha_token: "${g("cfgHaToken") || uiConfig.ha_token || ""}"\n` +
+      `  alarm_entity: "${g("cfgAlarmEntity") || uiConfig.alarm_entity || ""}"\n` +
+      `  alarm_entity_inverted: ${document.getElementById("cfgAlarmInverted")?.checked ?? false}\n` +
+      `  alarm_label_armed: "${g("cfgLabelArmed") || uiConfig.alarm_label_armed || "Armed"}"\n` +
+      `  alarm_label_disarmed: "${g("cfgLabelDisarmed") || uiConfig.alarm_label_disarmed || "Disarmed"}"\n` +
+      `  sidebar_position: "${uiConfig.sidebar_position}"\n` +
+      `  floorplan: "${activeFloor()?.floorplan || uiConfig.floorplan || "img/floorplan.png"}"\n` +
+      `  zone_fade_duration: ${g("cfgFadeDuration") || uiConfig.zone_fade_duration || 3}\n` +
+      `  color_on_person: "${g("cfgColOnPerson") || uiConfig.color_on_person}"\n` +
+      `  color_on_motion: "${g("cfgColOnMotion") || uiConfig.color_on_motion}"\n` +
+      `  color_on_door: "${g("cfgColOnDoor") || uiConfig.color_on_door}"\n` +
+      `  color_on_window: "${g("cfgColOnWindow") || uiConfig.color_on_window}"\n` +
+      `  color_on_animal: "${g("cfgColOnAnimal") || uiConfig.color_on_animal}"\n` +
+      `  color_on_vehicle: "${g("cfgColOnVehicle") || uiConfig.color_on_vehicle}"\n` +
+      `  color_on_smoke: "${g("cfgColOnSmoke") || uiConfig.color_on_smoke}"\n` +
+      `  color_on_co: "${g("cfgColOnCo") || uiConfig.color_on_co}"\n` +
+      `  color_off_person: "${g("cfgColOffPerson") || uiConfig.color_off_person}"\n` +
+      `  color_off_motion: "${g("cfgColOffMotion") || uiConfig.color_off_motion}"\n` +
+      `  color_off_door: "${g("cfgColOffDoor") || uiConfig.color_off_door}"\n` +
+      `  color_off_window: "${g("cfgColOffWindow") || uiConfig.color_off_window}"\n` +
+      `  color_off_animal: "${g("cfgColOffAnimal") || uiConfig.color_off_animal}"\n` +
+      `  color_off_vehicle: "${g("cfgColOffVehicle") || uiConfig.color_off_vehicle}"\n` +
+      `  color_off_smoke: "${g("cfgColOffSmoke") || uiConfig.color_off_smoke}"\n` +
+      `  color_off_co: "${g("cfgColOffCo") || uiConfig.color_off_co}"\n` +
+      `  cam_default_mode: "${uiConfig.cam_default_mode || "snapshot"}"\n` +
+      `  cam_snapshot_interval: ${uiConfig.cam_snapshot_interval || 2}\n` +
+      `  cam_cooldown: ${uiConfig.cam_cooldown || 30}\n` +
+      `  cam_max_visible: ${uiConfig.cam_max_visible || 0}\n` +
+      `  cam_sort_order: "${uiConfig.cam_sort_order || "recent_first"}"\n` +
+      `  cam_fail_hide_seconds: ${uiConfig.cam_fail_hide_seconds || 5}\n` +
+      `  cam_low_res_map: '${uiConfig.cam_low_res_map || "{}"}'\n` +
+      `  cam_pinned: '${uiConfig.cam_pinned || "[]"}'\n`
+    );
+  }
+
+  async function saveYaml(statusId) {
+    const el = document.getElementById(statusId);
+    if (el) { el.textContent = "Saving…"; el.style.color = "#888"; }
+    try {
+      const res = await fetch(apiPath("ow/save-config"), {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename: "config/ui.yaml", content: buildYamlContent() })
+      });
+      if (res.ok) {
+        if (el) { el.textContent = "✓ Saved"; el.style.color = "#32d74b"; }
+        await loadConfig();
+      } else if (el) { el.textContent = "✗ Save failed"; el.style.color = "#ff3b30"; }
+    } catch (e) { if (el) { el.textContent = "✗ " + e.message; el.style.color = "#ff3b30"; } }
+  }
+
+  // ── HA connect ───────────────────────────────────────────────
+  const connectBtn    = document.getElementById("settingsSaveHaBtn");
+  const tokenField    = document.getElementById("cfgHaToken");
+  const connectStatus = document.getElementById("haConnectStatus");
+
+  // Arm/Disarm IP allow list
+  document.getElementById("saveArmIpsBtn")?.addEventListener("click", async () => {
+    const raw = document.getElementById("cfgArmAllowedIps")?.value || "";
+    const ips = raw.split("\n").map(s => s.trim()).filter(Boolean);
+    await saveArmAllowedIps(ips);
+    const btn = document.getElementById("saveArmIpsBtn");
+    if (btn) { btn.textContent = "✓ Saved"; setTimeout(() => btn.textContent = "Save allowed IPs", 1500); }
+  });
+  if (tokenField && connectBtn) {
+    tokenField.addEventListener("input", () => {
+      connectBtn.style.opacity = "1";
+      connectBtn.textContent = "Connect to Home Assistant";
+    });
+  }
+  if (connectBtn) {
+    connectBtn.onclick = async () => {
+      const newToken = tokenField?.value.trim() || "";
+      if (!newToken && !uiConfig.ha_token) {
+        if (connectStatus) { connectStatus.textContent = "✗ Enter a token first."; connectStatus.style.color = "#ff3b30"; }
+        return;
+      }
+      if (newToken) {
+        uiConfig.ha_token = newToken;
+        try {
+          await fetch(apiPath("ow/save-config"), {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ filename: "config/ui.yaml", content: buildYamlContent() })
+          });
+        } catch { /* non-fatal */ }
+      }
+      if (haSocket) { haSocket.onclose = null; haSocket.close(); haSocket = null; haConnected = false; }
+      if (!IS_DIRECT_MODE) connectHA();
+      if (connectStatus) { connectStatus.textContent = "Connecting…"; connectStatus.style.color = "#888"; }
+    };
+  }
+
+  document.getElementById("settingsSaveAlarmBtn")?.addEventListener("click",   () => saveYaml("alarmSaveStatus"));
+
+  // ── Zone Colours collapsible ─────────────────────────────────
+  // Use document-level delegation so it works regardless of tab state
+  if (!window._zoneColourDelegationBound) {
+    window._zoneColourDelegationBound = true;
+    document.addEventListener('click', e => {
+      const toggle = e.target.closest('#zoneColourToggle');
+      if (!toggle) return;
+      const body    = document.getElementById('zoneColourBody');
+      const chevron = document.getElementById('zoneColourChevron');
+      if (!body) return;
+      const open = body.style.display === 'none' || body.style.display === '';
+      body.style.display    = open ? 'block' : 'none';
+      if (chevron) chevron.style.transform = open ? 'rotate(180deg)' : '';
+      localStorage.setItem('ow_zone_colour_open', String(open));
+    });
+  }
+  // Set initial open state
+  const _zcb = document.getElementById('zoneColourBody');
+  const _zcc = document.getElementById('zoneColourChevron');
+  const _zcOpen = localStorage.getItem('ow_zone_colour_open') !== 'false';
+  if (_zcb) _zcb.style.display = _zcOpen ? 'block' : 'none';
+  if (_zcc) _zcc.style.transform = _zcOpen ? 'rotate(180deg)' : '';
+
+  document.getElementById("settingsSaveColoursYamlLink")?.addEventListener("click", e => {
+    e.preventDefault();
+    saveYaml("coloursSaveStatus");
+  });
+
+  document.getElementById("resetColoursBtn")?.addEventListener("click", () => {
+    // Clear all localStorage colour overrides — revert to server uiConfig values
+    const colourLsKeys = [
+      'ow_color_on_person','ow_color_on_motion','ow_color_on_door','ow_color_on_window',
+      'ow_color_on_smoke','ow_color_on_co','ow_color_on_default',
+      'ow_color_off_person','ow_color_off_motion','ow_color_off_door','ow_color_off_window',
+      'ow_color_off_smoke','ow_color_off_co','ow_color_off_default',
+      'ow_color_triggered_door','ow_color_zone_triggered','ow_color_zone_fault',
+      'ow_color_zone_bypassed','ow_color_zone_armed','ow_color_zone_normal'
+    ];
+    colourLsKeys.forEach(k => localStorage.removeItem(k));
+    applyConfig();
+    renderZones();
+    openSettings('zones');
+    const st = document.getElementById('resetColoursStatus');
+    if (st) { st.textContent = '✓ Reset'; setTimeout(() => st.textContent = '', 2000); }
+  });
+  document.getElementById("settingsSavePerfYamlLink")?.addEventListener("click", e => {
+    e.preventDefault();
+    // Update uiConfig with current localStorage overrides before saving to yaml
+    const interval = localStorage.getItem('ow_snap_interval');
+    const cooldown = localStorage.getItem('ow_cam_cooldown');
+    if (interval) uiConfig.cam_snapshot_interval = parseFloat(interval);
+    if (cooldown) uiConfig.cam_cooldown = parseFloat(cooldown);
+    saveYaml("perfSaveStatus");
+  });
+}
+
+function makeDraggable(panel, titlebar, storageKey) {
+  if (!panel || !titlebar) return () => {};
+
+  let drag = { active: false, ox: 0, oy: 0 };
+  let pos  = { x: null, y: null };
+
+  function applyPos(x, y) {
+    // Clamp to viewport
+    x = Math.max(0, Math.min(window.innerWidth  - 60, x));
+    y = Math.max(0, Math.min(window.innerHeight - 60, y));
+    pos.x = x; pos.y = y;
+    panel.style.position = "fixed";
+    panel.style.left     = x + "px";
+    panel.style.top      = y + "px";
+    panel.style.right    = "unset";
+    panel.style.bottom   = "unset";
+    if (storageKey) {
+      localStorage.setItem(storageKey + "_x", x);
+      localStorage.setItem(storageKey + "_y", y);
+    }
+  }
+
+  function restorePos() {
+    if (!storageKey) return;
+    const sx = localStorage.getItem(storageKey + "_x");
+    const sy = localStorage.getItem(storageKey + "_y");
+    if (sx !== null && sy !== null) applyPos(Number(sx), Number(sy));
+  }
+
+  titlebar.style.cursor = "grab";
+
+  titlebar.addEventListener("pointerdown", e => {
+    if (e.target.closest("button, input, select, textarea")) return;
+    drag.active = true;
+    const rect = panel.getBoundingClientRect();
+    drag.ox = e.clientX - rect.left;
+    drag.oy = e.clientY - rect.top;
+    titlebar.setPointerCapture(e.pointerId);
+    titlebar.style.cursor = "grabbing";
+    e.preventDefault();
+  });
+
+  titlebar.addEventListener("pointermove", e => {
+    if (!drag.active) return;
+    applyPos(e.clientX - drag.ox, e.clientY - drag.oy);
+  });
+
+  titlebar.addEventListener("pointerup", () => {
+    drag.active = false;
+    titlebar.style.cursor = "grab";
+  });
+
+  restorePos();
+  return restorePos;
+}
+
+/* ─── SEARCH ──────────────────────────────────────────────── */
+function setSearchOpen(open) {
+  searchOpen = open;
+  const panel = document.getElementById("searchPanel");
+  if (!panel) return;
+  if (open) {
+    panel.classList.add("open");
+    panel.setAttribute("aria-hidden", "false");
+    const input = document.getElementById("searchInput");
+    if (input) setTimeout(() => input.focus(), 0);
+    runSearch(document.getElementById("searchInput")?.value || "");
+  } else {
+    panel.classList.remove("open");
+    panel.setAttribute("aria-hidden", "true");
+  }
+}
+
+/* ─── escapeHtml moved to modules/ow-utils.js ───────────────────────── */
+function runSearch(q) {
+  const resultsEl = document.getElementById("searchResults");
+  if (!resultsEl) return;
+  const query = (q || "").trim().toLowerCase();
+  if (!query) { resultsEl.innerHTML = ""; return; }
+
+  const hits = [];
+  for (const z of zones) {
+    const zid   = (z.id || "").toLowerCase();
+    const zname = (z.name || "").toLowerCase();
+    if (zid.includes(query) || zname.includes(query)) {
+      hits.push({ type: "zone", zoneId: z.id, title: z.name || z.id, sub: `Zone` });
+    }
+    for (const s of (z.sensors || [])) {
+      if (isEntityGhosted(s)) continue; // skip ghosted
+      if (String(s).toLowerCase().includes(query)) {
+        hits.push({ type: "entity", zoneId: z.id, title: s, sub: `Sensor in ${z.name || z.id}` });
+      }
+    }
+    for (const c of (z.cameras || [])) {
+      if (isEntityGhosted(c)) continue; // skip ghosted
+      const friendly = haStates[c]?.attributes?.friendly_name || c;
+      if (String(c).toLowerCase().includes(query) || friendly.toLowerCase().includes(query)) {
+        hits.push({ type: "camera", zoneId: z.id, title: friendly, sub: `Camera in ${z.name || z.id}` });
+      }
+    }
+  }
+
+  const seen = new Set();
+  const uniq = hits.filter(h => {
+    const key = `${h.type}|${h.zoneId}|${h.title}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).sort((a, b) => {
+    const order = { zone: 0, camera: 1, entity: 2 };
+    if (a.type !== b.type) return (order[a.type] ?? 9) - (order[b.type] ?? 9);
+    return a.title.localeCompare(b.title);
+  });
+
+  resultsEl.innerHTML = uniq.slice(0, 60).map(h => `
+    <div class="search-result" data-zone-id="${escapeHtml(h.zoneId)}">
+      <div class="search-result-title">${escapeHtml(h.title)}</div>
+      <div class="search-result-sub">${escapeHtml(h.sub)}</div>
+    </div>
+  `).join("");
+
+  resultsEl.querySelectorAll(".search-result").forEach(el => {
+    el.onclick = () => focusZone(el.getAttribute("data-zone-id"));
+  });
+
+  // Append automation results from automations.js if registered
+  if (window.OW?.automationSearch) {
+    const autoHits = window.OW.automationSearch(query);
+    if (autoHits.length) {
+      const autoFrag = document.createDocumentFragment();
+      const sep = document.createElement('div');
+      sep.style.cssText = 'font-size:10px;text-transform:uppercase;letter-spacing:0.1em;color:#444;padding:6px 10px 2px;';
+      sep.textContent = 'Automations';
+      autoFrag.appendChild(sep);
+      autoHits.slice(0, 10).forEach(h => {
+        const el = document.createElement('div');
+        el.className = 'search-result';
+        el.innerHTML = `<div class="search-result-title">${escapeHtml(h.label)}</div><div class="search-result-sub">${escapeHtml(h.sublabel||'')}</div>`;
+        el.onclick = () => { setSearchOpen(false); h.action?.(); };
+        autoFrag.appendChild(el);
+      });
+      resultsEl.appendChild(autoFrag);
+    }
+  }
+}
+
+function focusZone(zoneId) {
+  const z = zones.find(zz => zz.id === zoneId);
+  if (!z || !(z.points || []).length) return;
+
+  // Issue 2: highlight only — do NOT move/zoom the map
+  highlightedZoneId = zoneId;
+  highlightedUntil  = Date.now() + 15000;
+  renderZones();
+  setTimeout(() => renderZones(), 15100);
+
+  selectedZoneId = zoneId;
+  activePinId = null; activePinType = null;
+  if (editorMode) { renderZonesEditor(); renderZones(); }
+  setSearchOpen(false);
+}
+
+function setHighlightFromDropdown(zoneId) {
+  highlightedZoneId    = zoneId;
+  highlightedUntil     = Date.now() + 15000;
+  highlightedGroupId   = null;
+  highlightedGroupUntil = 0;
+  renderZones();
+  setTimeout(() => renderZones(), 15100);
+}
+
+function setGroupHighlightFromDropdown(groupId) {
+  highlightedGroupId    = groupId;
+  highlightedGroupUntil = Date.now() + 15000;
+  highlightedZoneId     = null;
+  highlightedUntil      = 0;
+  renderZones();
+  setTimeout(() => renderZones(), 15100);
+}
+
+function clearDropdownHighlight() {
+  highlightedZoneId     = null;
+  highlightedUntil      = 0;
+  highlightedGroupId    = null;
+  highlightedGroupUntil = 0;
+  renderZones();
+}
+
+function animateZoomTo(scale, x, y, durationMs) {
+  const start = performance.now();
+  const s0 = zoom.scale, x0 = zoom.x, y0 = zoom.y;
+  const ease = t => t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+
+  function step(now) {
+    const t = Math.min(1, (now - start) / durationMs);
+    const e = ease(t);
+    zoom.scale = s0 + (scale - s0) * e;
+    zoom.x = x0 + (x - x0) * e;
+    zoom.y = y0 + (y - y0) * e;
+    applyTransform();
+    if (t < 1) requestAnimationFrame(step);
+    else saveZoom();
+  }
+
+  requestAnimationFrame(step);
+}
+
+/* ─── STATUS BAR DROPDOWN (issue 20) ─────────────────────── */
+/* ─── IN-PLACE STATUS DROPDOWN UPDATE ────────────────────────
+ * Updates dots, toggles, eye buttons, and state labels without
+ * rebuilding the list — preserves scroll position.
+ * Falls back to full re-render if dropdown isn't open.
+ * ─────────────────────────────────────────────────────────── */
+function updateStatusDropdownInPlace() {
+  const dd = document.getElementById("statusDropdown");
+  if (!dd || dd.style.display === "none") return;
+  const body = document.getElementById("statusDropdownBody");
+  if (!body) return;
+
+  const eyeOpen   = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M1 12C1 12 5 5 12 5s11 7 11 7-4 7-11 7S1 12 1 12z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2"/></svg>`;
+  const eyeClosed = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M1 12C1 12 5 5 12 5s11 7 11 7-4 7-11 7S1 12 1 12z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M3 3l18 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>`;
+
+  // Master toggle
+  const masterChk = body.querySelector("#masterToggleChk");
+  if (masterChk) {
+    masterChk.checked  = masterEnabled;
+    const mLocked = !canArmDisarm();
+    masterChk.disabled = mLocked;
+    if (masterChk.closest('label')) masterChk.closest('label').style.opacity = mLocked ? '0.4' : '';
+  }
+
+  // Per-zone: toggle, eye, dot, state label
+  body.querySelectorAll(".zone-enabled-chk[data-zone-id]").forEach(chk => {
+    const zone = zones.find(z => z.id === chk.dataset.zoneId);
+    if (!zone) return;
+    const _zst  = getZoneState(zone);
+    const zLocked = !canArmDisarm();
+    chk.checked  = _zst !== "disabled";
+    chk.disabled = zLocked;
+    if (chk.closest('label')) chk.closest('label').style.opacity = zLocked ? '0.4' : '';
+
+    const row = chk.closest(".status-dd-zone");
+    if (!row) return;
+    const isOff = _zst === "disabled";
+    const st    = getZoneState(zone);
+    const isTriggeredZone = st === "triggered";
+    const activeEntity = haConnected ? zoneActiveTriggerEntity(zone) : '';
+    const anyActive = !!activeEntity;
+    const isDisarmedActive = isOff && anyActive;
+
+    const dotColour = isTriggeredZone ? "#ff3b30"
+      : isDisarmedActive ? resolveColour(entityTypeColourOff(detectEntityType(activeEntity || "door")))
+      : st === "fault" ? "#ff9500"
+      : isOff ? (zone.colorHex || "#0096ff")
+      :          "#ff3b30";
+    const dotOpacity = (isOff && !isDisarmedActive) ? 0.3 : 1;
+    const stateLabel = isTriggeredZone ? "triggered" : st === "fault" ? "fault" : isOff ? "disarmed" : "armed";
+
+    const dot = row.querySelector(`.zone-list-dot[data-zone-id="${zone.id}"]`);
+    if (dot) { dot.style.background = dotColour; dot.style.opacity = String(dotOpacity); }
+
+    const stateEl = row.querySelector(".status-dd-state");
+    if (stateEl) { stateEl.textContent = stateLabel; stateEl.style.color = dotColour; stateEl.style.opacity = (isOff && !isDisarmedActive) ? "0.4" : "0.8"; }
+
+    const nameEl = row.querySelector(".status-dd-zname");
+    if (nameEl) nameEl.style.opacity = zone.hidden ? "0.35" : isOff && !isDisarmedActive ? "0.5" : "1";
+
+    const eyeBtn = row.querySelector(`.zone-eye-btn[data-zone-id="${zone.id}"]`);
+    if (eyeBtn) {
+      eyeBtn.innerHTML = zone.hidden ? eyeClosed : eyeOpen;
+      eyeBtn.style.color = zone.hidden ? "rgba(255,255,255,0.25)" : "rgba(255,255,255,0.65)";
+    }
+  });
+
+  // Per-group: toggle, eye, dot
+  body.querySelectorAll(".group-armed-chk[data-group-id]").forEach(chk => {
+    const group = groups.find(g => g.id === chk.dataset.groupId);
+    if (!group) return;
+    const members = (group.zone_ids || []).map(id => zones.find(z => z.id === id)).filter(Boolean);
+    const allArmed = members.length > 0 && members.every(z => getZoneState(z) !== 'disabled');
+    const gLocked = !canArmDisarm();
+    chk.checked  = allArmed;
+    chk.disabled = gLocked;
+    if (chk.closest('label')) chk.closest('label').style.opacity = gLocked ? '0.4' : '';
+
+    const hdr = chk.closest(".status-dd-group-header");
+    if (!hdr) return;
+    const allDisarmed  = members.every(z => getZoneState(z) === "disabled");
+    const someArmed    = !allArmed && !allDisarmed;
+    const anyTriggered = members.some(z => getZoneState(z) === "triggered");
+    const gHex  = group.colorHex || "#ff3b30";
+    const colour = allDisarmed ? gHex : someArmed ? "#ff9500" : "#ff3b30";
+    const opacity = allDisarmed ? 0.35 : 1;
+
+    const dot = hdr.querySelector(`.zone-list-dot[data-group-dot="${group.id}"]`);
+    if (dot) { dot.style.background = colour; dot.style.opacity = String(opacity); dot.classList.toggle("flashing", anyTriggered && !allDisarmed); }
+
+    const allMembHidden = members.length > 0 && members.every(z => z.hidden);
+    const eyeBtn = hdr.querySelector(".group-eye-btn");
+    if (eyeBtn) { eyeBtn.innerHTML = allMembHidden ? eyeClosed : eyeOpen; eyeBtn.style.color = allMembHidden ? "rgba(255,255,255,0.25)" : "rgba(255,255,255,0.65)"; }
+  });
+
+  // Ungrouped toggle + dot
+  const ungroupedChk = body.querySelector(".ungrouped-armed-chk");
+  if (ungroupedChk) {
+    const groupedIds = new Set(groups.flatMap(g => g.zone_ids || []));
+    const ung = zones.filter(z => !groupedIds.has(z.id));
+    const allArmed   = ung.length > 0 && ung.every(z => getZoneState(z) !== 'disabled');
+    const allDisarmed = ung.every(z => getZoneState(z) === "disabled");
+    const someArmed  = !allArmed && !allDisarmed;
+    const anyTriggered = ung.some(z => getZoneState(z) === "triggered");
+    ungroupedChk.checked = allArmed;
+    const hdr = ungroupedChk.closest(".status-dd-group-header");
+    if (hdr) {
+      const colour  = allDisarmed ? "#888" : someArmed ? "#ff9500" : "#ff3b30";
+      const opacity = allDisarmed ? 0.35 : 1;
+      const dot = hdr.querySelector(".zone-list-dot[data-group-dot='__ungrouped']");
+      if (dot) { dot.style.background = colour; dot.style.opacity = String(opacity); dot.classList.toggle("flashing", anyTriggered && !allDisarmed); }
+      const allHidn = ung.length > 0 && ung.every(z => z.hidden);
+      const eyeBtn  = hdr.querySelector(".ungrouped-eye-btn");
+      if (eyeBtn) { eyeBtn.innerHTML = allHidn ? eyeClosed : eyeOpen; eyeBtn.style.color = allHidn ? "rgba(255,255,255,0.25)" : "rgba(255,255,255,0.65)"; }
+    }
+  }
+
+  // Master eye
+  const allHidden = zones.length > 0 && zones.every(z => z.hidden);
+  const masterEye = body.querySelector("#masterEyeBtn");
+  if (masterEye) { masterEye.innerHTML = allHidden ? eyeClosed : eyeOpen; masterEye.style.color = allHidden ? "rgba(255,255,255,0.25)" : "rgba(255,255,255,0.65)"; }
+}
+
+function renderStatusDropdown() {
+  const body = document.getElementById("statusDropdownBody");
+  if (!body) return;
+
+  const eyeOpen   = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M1 12C1 12 5 5 12 5s11 7 11 7-4 7-11 7S1 12 1 12z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2"/></svg>`;
+  const eyeClosed = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M1 12C1 12 5 5 12 5s11 7 11 7-4 7-11 7S1 12 1 12z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M3 3l18 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>`;
+
+  const allHidden = zones.length > 0 && zones.every(z => z.hidden);
+
+  // Build zone row HTML (shared by group members and ungrouped)
+  function zoneRow(z, indented = false) {
+    const state = getZoneState(z);
+    const isOff = getZoneState(z) === 'disabled';
+    const isTriggeredZone = state === "triggered";
+    const activeEntity = haConnected ? zoneActiveTriggerEntity(z) : '';
+    const anyActive = !!activeEntity;
+    const isDisarmedActive = isOff && anyActive;
+    // Locked = server mode on a Direct Mode browser (no WS to call HA switches)
+    const zoneLocked = !canArmDisarm();
+    const dotColour = isTriggeredZone ? "#ff3b30"
+      : isDisarmedActive ? resolveColour(entityTypeColourOff(detectEntityType(activeEntity || "door")))
+      : state === "fault" ? "#ff9500"
+      : isOff ? (z.colorHex || "#0096ff")  // disarmed + clear → zone colour (dimmed by opacity)
+      :          "#ff3b30";                  // armed + clear → red
+    const dotFlashing = isTriggeredZone || isDisarmedActive;
+    const dotOpacity  = (isOff && !isDisarmedActive) ? 0.3 : 1;
+    const stateLabel  = isTriggeredZone ? "triggered" : state === "fault" ? "fault" : isOff ? "disarmed" : "armed";
+    return `
+      <div class="status-dd-zone status-dd-zone-indented">
+        <div class="zone-list-dot${dotFlashing ? ' flashing' : ''}" data-zone-id="${z.id}" style="background:${dotColour};flex-shrink:0;opacity:${dotOpacity};"></div>
+        <span class="status-dd-zname" style="opacity:${z.hidden ? 0.35 : isOff && !isDisarmedActive ? 0.5 : 1}">${escapeHtml(z.name || z.id)}</span>
+        <span class="status-dd-state" style="color:${dotColour};opacity:${isOff && !isDisarmedActive ? 0.4 : 0.8}">${stateLabel}</span>
+        <button class="zone-eye-btn" data-zone-id="${z.id}"
+          style="background:none;border:none;padding:0 2px;cursor:pointer;color:${z.hidden ? 'rgba(255,255,255,0.25)' : 'rgba(255,255,255,0.65)'};line-height:0;flex-shrink:0;"
+        >${z.hidden ? eyeClosed : eyeOpen}</button>
+        <label class="zone-toggle-switch" style="flex-shrink:0;${zoneLocked ? 'opacity:0.4;' : ''}">
+          <input type="checkbox" class="zone-enabled-chk" data-zone-id="${z.id}" ${getZoneState(z) !== "disabled" ? "checked" : ""} ${zoneLocked ? "disabled" : ""}>
+          <span class="zone-toggle-track"></span>
+        </label>
+      </div>`;
+  }
+
+  // Build group section
+  function groupSection(g) {
+    const members = (g.zone_ids || [])
+      .map(id => zones.find(z => z.id === id))
+      .filter(Boolean)
+      .sort((a, b) => (a.name||a.id).localeCompare(b.name||b.id));
+    const allArmed    = members.length > 0 && members.every(z => getZoneState(z) !== 'disabled');
+    const allDisarmed = members.length === 0 || members.every(z => getZoneState(z) === 'disabled');
+    const anyTriggered = members.some(z => getZoneState(z) === "triggered");
+    const allMembHidden = members.length > 0 && members.every(z => z.hidden);
+    const gHex        = g.colorHex || "#ff3b30";
+    const anyArmed    = !allDisarmed;
+    const someArmed   = anyArmed && !allArmed;   // mixed
+    const gDotColour  = allDisarmed ? gHex
+                      : someArmed   ? "#ff9500"   // orange = mixed
+                      :               "#ff3b30";  // red = all armed
+    const gDotOpacity = allDisarmed ? 0.35 : 1;
+    const gDotFlash   = anyTriggered && !allDisarmed;
+    const storageKey  = `ddGroup_${g.id}`;
+    const collapsed   = localStorage.getItem(storageKey) !== "expanded";
+    return `
+      <div class="status-dd-group-header" data-group-id="${g.id}" data-storage-key="${storageKey}">
+        <span class="status-dd-chevron" style="font-size:9px;color:#555;width:10px;flex-shrink:0;transition:transform 0.2s;display:inline-block;transform:rotate(${collapsed ? '-90' : '0'}deg);">▾</span>
+        <div class="zone-list-dot${gDotFlash ? ' flashing' : ''}" data-group-dot="${g.id}"
+          style="background:${gDotColour};opacity:${gDotOpacity};flex-shrink:0;width:8px;height:8px;border-radius:50%;"></div>
+        <span style="flex:1;font-size:11px;font-weight:600;color:#999;letter-spacing:0.04em;">${escapeHtml(g.name || g.id)}</span>
+        <span class="status-dd-state" style="opacity:0;user-select:none;">——</span>
+        <button class="zone-eye-btn group-eye-btn" data-group-id="${g.id}"
+          style="background:none;border:none;padding:0 2px;cursor:pointer;color:${allMembHidden ? 'rgba(255,255,255,0.25)' : 'rgba(255,255,255,0.65)'};line-height:0;flex-shrink:0;"
+        >${allMembHidden ? eyeClosed : eyeOpen}</button>
+        <label class="zone-toggle-switch" style="flex-shrink:0;${!canArmDisarm() ? 'opacity:0.4;pointer-events:none;' : ''}">
+          <input type="checkbox" class="group-armed-chk" data-group-id="${g.id}" ${allArmed ? "checked" : ""} ${!canArmDisarm() ? "disabled" : ""}>
+          <span class="zone-toggle-track"></span>
+        </label>
+      </div>
+      <div class="status-dd-group-members" data-group-id="${g.id}" style="${collapsed ? 'display:none;' : ''}">
+        ${members.map(z => zoneRow(z, true)).join("") || `<div style="padding:4px 14px 4px 32px;font-size:11px;color:#444;">No members</div>`}
+      </div>`;
+  }
+
+  function ungroupedSection(ungroupedZones) {
+    const storageKey  = "ddGroup___ungrouped";
+    const collapsed   = localStorage.getItem(storageKey) !== "expanded";
+    const allArmed    = ungroupedZones.length > 0 && ungroupedZones.every(z => getZoneState(z) !== 'disabled');
+    const allDisarmed = ungroupedZones.every(z => z.enabled === false || !masterEnabled);
+    const anyTriggered = ungroupedZones.some(z => getZoneState(z) === "triggered");
+    const someArmed   = !allArmed && !allDisarmed;
+    const allHidn     = ungroupedZones.length > 0 && ungroupedZones.every(z => z.hidden);
+    const dotColour   = allDisarmed ? "#888"
+                      : someArmed   ? "#ff9500"
+                      :               "#ff3b30";
+    const dotOpacity  = allDisarmed ? 0.35 : 1;
+    const dotFlash    = anyTriggered && !allDisarmed;
+    return `
+      <div class="status-dd-group-header ungrouped-header" data-group-id="__ungrouped" data-storage-key="${storageKey}">
+        <span class="status-dd-chevron" style="font-size:9px;color:#555;width:10px;flex-shrink:0;transition:transform 0.2s;display:inline-block;transform:rotate(${collapsed ? '-90' : '0'}deg);">▾</span>
+        <div class="zone-list-dot${dotFlash ? ' flashing' : ''}" data-group-dot="__ungrouped"
+          style="background:${dotColour};opacity:${dotOpacity};flex-shrink:0;width:8px;height:8px;border-radius:50%;"></div>
+        <span style="flex:1;font-size:11px;font-weight:600;color:#666;letter-spacing:0.04em;">Ungrouped</span>
+        <span class="status-dd-state" style="opacity:0;user-select:none;">——</span>
+        <button class="zone-eye-btn ungrouped-eye-btn"
+          style="background:none;border:none;padding:0 2px;cursor:pointer;color:${allHidn ? 'rgba(255,255,255,0.25)' : 'rgba(255,255,255,0.65)'};line-height:0;flex-shrink:0;"
+        >${allHidn ? eyeClosed : eyeOpen}</button>
+        <label class="zone-toggle-switch" style="flex-shrink:0;${!canArmDisarm() ? 'opacity:0.4;pointer-events:none;' : ''}">
+          <input type="checkbox" class="ungrouped-armed-chk" ${allArmed ? "checked" : ""} ${!canArmDisarm() ? "disabled" : ""}>
+          <span class="zone-toggle-track"></span>
+        </label>
+      </div>
+      <div class="status-dd-group-members" data-group-id="__ungrouped" style="${collapsed ? 'display:none;' : ''}">
+        ${ungroupedZones.map(z => zoneRow(z, true)).join("")}
+      </div>`;
+  }
+
+  const groupedZoneIds = new Set(groups.flatMap(g => g.zone_ids || []));
+  const ungroupedZones = zones
+    .filter(z => !groupedZoneIds.has(z.id))
+    .sort((a, b) => (a.name||a.id).localeCompare(b.name||b.id));
+  const sortedGroups = [...groups].sort((a, b) => (a.name||"").localeCompare(b.name||""));
+
+  body.innerHTML = `
+    <div class="status-dd-zones">
+      <div class="status-dd-master">
+        <span style="width:10px;flex-shrink:0;"></span>
+        <div style="width:8px;height:8px;flex-shrink:0;"></div>
+        <span style="flex:1;font-size:11px;font-weight:600;color:#aaa;">Master</span>
+        <span class="status-dd-state" style="opacity:0;user-select:none;">——</span>
+        <button class="zone-eye-btn" id="masterEyeBtn"
+          style="background:none;border:none;padding:0 2px;cursor:pointer;color:${allHidden ? 'rgba(255,255,255,0.25)' : 'rgba(255,255,255,0.65)'};line-height:0;flex-shrink:0;"
+        >${allHidden ? eyeClosed : eyeOpen}</button>
+        <label class="zone-toggle-switch" style="flex-shrink:0;${!canArmDisarm() ? 'opacity:0.4;pointer-events:none;' : ''}">
+          <input type="checkbox" id="masterToggleChk" ${masterEnabled ? "checked" : ""} ${!canArmDisarm() ? "disabled" : ""}>
+          <span class="zone-toggle-track"></span>
+        </label>
+      </div>
+      <div style="height:1px;background:rgba(255,255,255,0.06);margin:0 14px 4px;"></div>
+      ${sortedGroups.map(g => groupSection(g)).join("")}
+      ${ungroupedZones.length > 0 ? ungroupedSection(ungroupedZones) : ""}
+      ${zones.length === 0 ? `<div class="status-dd-empty">No zones configured</div>` : ""}
+    </div>
+  `;
+
+  // Master toggle
+  document.getElementById("masterToggleChk")?.addEventListener("change", e => { if (canArmDisarm()) setMasterEnabled(e.target.checked); });
+
+  // Master eye
+  document.getElementById("masterEyeBtn")?.addEventListener("click", e => {
+    e.stopPropagation();
+    const anyVisible = zones.some(z => !z.hidden);
+    zones.forEach(z => setZoneHidden(z.id, anyVisible));
+  });
+
+  // Group header collapse toggle + highlight on expand
+  body.querySelectorAll(".status-dd-group-header").forEach(hdr => {
+    hdr.addEventListener("click", e => {
+      if (e.target.closest("button,input,label")) return;
+      const gid = hdr.dataset.groupId;
+      const key = hdr.dataset.storageKey;
+      const membersEl = body.querySelector(`.status-dd-group-members[data-group-id="${gid}"]`);
+      const chevron = hdr.querySelector(".status-dd-chevron");
+      if (!membersEl) return;
+      const wasCollapsed = membersEl.style.display === "none";
+      membersEl.style.display = wasCollapsed ? "" : "none";
+      if (chevron) chevron.style.transform = `rotate(${wasCollapsed ? "0" : "-90"}deg)`;
+      localStorage.setItem(key, wasCollapsed ? "expanded" : "collapsed");
+      // Highlight group on map when expanding (not collapsing), skip __ungrouped
+      if (wasCollapsed && gid && gid !== "__ungrouped") {
+        setGroupHighlightFromDropdown(gid);
+      } else if (!wasCollapsed) {
+        clearDropdownHighlight();
+      }
+    });
+  });
+
+  // Zone row click → highlight zone on map
+  body.querySelectorAll(".status-dd-zone").forEach(row => {
+    row.addEventListener("click", e => {
+      if (e.target.closest("button,input,label")) return;
+      const dot = row.querySelector(".zone-list-dot[data-zone-id]");
+      if (!dot) return;
+      const zid = dot.dataset.zoneId;
+      if (zid) setHighlightFromDropdown(zid);
+    });
+  });
+
+  // Group eye buttons
+  body.querySelectorAll(".group-eye-btn").forEach(btn => {
+    btn.addEventListener("click", e => {
+      e.stopPropagation();
+      const gid = btn.dataset.groupId;
+      const group = groups.find(g => g.id === gid);
+      if (!group) return;
+      const members = (group.zone_ids || []).map(id => zones.find(z => z.id === id)).filter(Boolean);
+      const anyVisible = members.some(z => !z.hidden);
+      members.forEach(z => setZoneHidden(z.id, anyVisible));
+    });
+  });
+
+  // Group arm toggles
+  body.querySelectorAll(".group-armed-chk").forEach(chk => {
+    chk.addEventListener("change", e => { if (canArmDisarm()) setGroupArmed(e.target.dataset.groupId, e.target.checked); });
+  });
+
+  // Ungrouped eye toggle
+  body.querySelector(".ungrouped-eye-btn")?.addEventListener("click", e => {
+    e.stopPropagation();
+    const groupedIds = new Set(groups.flatMap(g => g.zone_ids || []));
+    const ung = zones.filter(z => !groupedIds.has(z.id));
+    const anyVisible = ung.some(z => !z.hidden);
+    ung.forEach(z => setZoneHidden(z.id, anyVisible));
+  });
+
+  // Ungrouped arm toggle
+  body.querySelector(".ungrouped-armed-chk")?.addEventListener("change", e => {
+    if (!canArmDisarm()) return;
+    const groupedIds = new Set(groups.flatMap(g => g.zone_ids || []));
+    const ung = zones.filter(z => !groupedIds.has(z.id));
+    ung.forEach(z => setZoneEnabled(z.id, e.target.checked));
+  });
+
+  // Zone eye buttons
+  body.querySelectorAll(".zone-eye-btn[data-zone-id]").forEach(btn => {
+    btn.addEventListener("click", e => {
+      e.stopPropagation();
+      const zone = zones.find(z => z.id === btn.dataset.zoneId);
+      if (zone) setZoneHidden(btn.dataset.zoneId, !zone.hidden);
+    });
+  });
+
+  // Zone arm toggles
+  body.querySelectorAll(".zone-enabled-chk").forEach(chk => {
+    chk.addEventListener("change", e => { if (canArmDisarm()) setZoneEnabled(e.target.dataset.zoneId, e.target.checked); });
+  });
+}
+
+function bindStatusBar() {
+  const bar      = document.getElementById("statusBar");
+  const dropdown = document.getElementById("statusDropdown");
+  if (!bar || !dropdown) return;
+
+  bar.style.cursor = "pointer";
+  bar.addEventListener("click", e => {
+    e.stopPropagation();
+    const isOpen = dropdown.style.display !== "none";
+    dropdown.style.display = isOpen ? "none" : "block";
+    if (!isOpen) renderStatusDropdown();
+  });
+
+  document.addEventListener("pointerdown", e => {
+    if (!bar.contains(e.target) && !dropdown.contains(e.target)) {
+      dropdown.style.display = "none";
+    }
+  });
+}
+
+/* ─── SEARCH UI BINDINGS ──────────────────────────────────── */
+function bindCommonSidebarButtons() {
+  const settingsBtn = document.getElementById("settingsBtn");
+  const logBtn      = document.getElementById("logBtn");
+  if (settingsBtn) settingsBtn.onclick = () => renderSettingsPanel();
+  if (logBtn)      logBtn.onclick      = () => renderLogPanel(true);
+}
+
+// ── Floor switcher flyout ────────────────────────────────────
+function bindFloorSwitcher() {
+  const btn = document.getElementById("floorsBtn");
+  if (!btn) return;
+
+  // Show/hide button based on floor count
+  function updateFloorBtn() {
+    btn.style.display = floors.length > 1 ? "" : "none";
+    // Update active state
+    btn.classList.toggle("active", document.getElementById("floorFlyout") !== null);
+  }
+  updateFloorBtn();
+  // Re-check when floors change
+  window._updateFloorBtn = updateFloorBtn;
+
+  btn.onclick = (e) => {
+    e.stopPropagation();
+    const existing = document.getElementById("floorFlyout");
+    if (existing) { existing.remove(); btn.classList.remove("active"); return; }
+    btn.classList.add("active");
+    renderFloorFlyout();
+  };
+}
+
+function openFloorConfigPanel(floorId) {
+  const floor = floors.find(f => f.id === floorId);
+  if (!floor) return;
+
+  document.getElementById('owFloorConfigPanel')?.remove();
+
+  const panel = document.createElement('div');
+  panel.id = 'owFloorConfigPanel';
+  panel.style.cssText = `
+    position:fixed; top:120px; left:50%; transform:translateX(-50%);
+    background:rgba(18,18,18,0.98); border:1px solid rgba(255,255,255,0.12);
+    border-radius:14px; z-index:600; width:420px; max-width:94vw;
+    box-shadow:0 16px 48px rgba(0,0,0,0.7); backdrop-filter:blur(16px);
+    max-height:85vh; display:flex; flex-direction:column;
+  `;
+
+  // Make draggable
+  let dragging = false, ox = 0, oy = 0;
+  const titlebar = document.createElement('div');
+  titlebar.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:14px 16px 10px;cursor:grab;border-bottom:1px solid rgba(255,255,255,0.07);flex-shrink:0;user-select:none;';
+  titlebar.onmousedown = e => {
+    if (e.target.tagName === 'BUTTON' || e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+    dragging = true; ox = e.clientX - panel.offsetLeft; oy = e.clientY - panel.offsetTop;
+    titlebar.style.cursor = 'grabbing';
+  };
+  document.addEventListener('mousemove', e => { if (!dragging) return; panel.style.left = (e.clientX - ox) + 'px'; panel.style.top = (e.clientY - oy) + 'px'; panel.style.transform = 'none'; });
+  document.addEventListener('mouseup', () => { dragging = false; titlebar.style.cursor = 'grab'; });
+
+  const body = document.createElement('div');
+  body.style.cssText = 'padding:14px 16px;overflow-y:auto;flex:1;';
+
+  function render() {
+    const haFloors = _haRegistry.floors || [];
+    const haAreas  = _haRegistry.areas  || [];
+    const linkedHAFloor = haFloors.find(hf => hf.floor_id === floor.ha_floor_id);
+    const floorAreas = floor.ha_floor_id ? haAreas.filter(a => a.floor_id === floor.ha_floor_id) : [];
+    const linkedAreaIds = floor.ha_linked_area_ids || [];
+    const autoAdd = floor.ha_auto_add_areas !== false;
+    const floorZones = zones.filter(z => z.floor_id === floor.id);
+
+    // Titlebar content
+    titlebar.innerHTML = `
+      <div>
+        <div style="font-size:13px;font-weight:700;color:#fff;">Floor Configuration</div>
+        <div style="font-size:11px;color:#666;margin-top:1px;" id="owFloorConfigFloorName">${escapeHtml(floor.name)}</div>
+      </div>
+      <button id="owFloorConfigClose" style="background:none;border:none;color:#555;cursor:pointer;font-size:18px;padding:0 4px;line-height:1;">✕</button>
+    `;
+    titlebar.querySelector('#owFloorConfigClose').onclick = () => panel.remove();
+
+    // Body content
+    body.innerHTML = `
+      <div style="margin-bottom:12px;">
+        <label style="font-size:11px;color:#888;display:block;margin-bottom:4px;text-transform:uppercase;letter-spacing:0.05em;">Floor Name</label>
+        <input id="owFloorNameInput" type="text" value="${escapeHtml(floor.name)}" style="width:100%;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);color:#fff;border-radius:8px;padding:7px 10px;font-size:13px;outline:none;box-sizing:border-box;">
+      </div>
+
+      <div style="margin-bottom:12px;">
+        <label style="font-size:11px;color:#888;display:block;margin-bottom:4px;text-transform:uppercase;letter-spacing:0.05em;">Floorplan Image</label>
+        <div style="display:flex;gap:6px;align-items:center;">
+          <input id="owFloorFpInput" type="text" value="${escapeHtml(floor.floorplan||'')}" placeholder="img/floorplan.png"
+            style="flex:1;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);color:#ccc;border-radius:8px;padding:7px 10px;font-size:12px;outline:none;">
+          <label style="background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.15);border-radius:8px;padding:7px 10px;cursor:pointer;font-size:12px;color:#aaa;flex-shrink:0;">↑ Upload<input type="file" id="owFloorFpFile" accept="image/*" style="display:none;"></label>
+        </div>
+        ${floor.floorplan ? `<div style="font-size:10px;color:#555;margin-top:3px;">${floorZones.length} zone${floorZones.length!==1?'s':''} on this floor</div>` : ''}
+      </div>
+
+      <div style="height:1px;background:rgba(255,255,255,0.07);margin:14px 0;"></div>
+
+      <div style="margin-bottom:10px;">
+        <label style="font-size:11px;color:#888;display:block;margin-bottom:4px;text-transform:uppercase;letter-spacing:0.05em;">HA Floor Link <span style="color:#555;font-weight:400;text-transform:none;">(optional)</span></label>
+        <select id="owFloorHASelect" style="width:100%;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);color:#ccc;border-radius:8px;padding:7px 10px;font-size:13px;outline:none;">
+          <option value="">— Not linked —</option>
+          ${haFloors.map(hf => `<option value="${escapeHtml(hf.floor_id)}" ${floor.ha_floor_id === hf.floor_id ? 'selected' : ''}>${escapeHtml(hf.name)}</option>`).join('')}
+        </select>
+        ${!_haRegistry.loaded ? '<div style="font-size:11px;color:#f90;margin-top:4px;">⚠ HA registry not loaded — open in HA add-on mode</div>' : ''}
+      </div>
+
+      ${floor.ha_floor_id ? `
+        <div style="margin-bottom:12px;">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+            <label style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.05em;">HA Areas → OW Zones</label>
+            <label style="display:flex;align-items:center;gap:5px;font-size:11px;color:#666;cursor:pointer;">
+              <input type="checkbox" id="owFloorAutoAdd" ${autoAdd?'checked':''} style="accent-color:#0064d2;">
+              Auto-add new areas
+            </label>
+          </div>
+          <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.07);border-radius:8px;overflow:hidden;">
+            ${floorAreas.length ? floorAreas.map(area => {
+              const isLinked = linkedAreaIds.includes(area.area_id);
+              const existingZone = zones.find(z => z.ha_area_id === area.area_id);
+              return `<label style="display:flex;align-items:center;gap:8px;padding:8px 12px;cursor:pointer;border-bottom:1px solid rgba(255,255,255,0.04);">
+                <input type="checkbox" class="ow-area-chk" data-area-id="${escapeHtml(area.area_id)}" data-area-name="${escapeHtml(area.name)}" ${isLinked?'checked':''} style="accent-color:#0064d2;flex-shrink:0;">
+                <span style="flex:1;font-size:12px;color:#ccc;">${escapeHtml(area.name)}</span>
+                ${existingZone ? `<span style="font-size:10px;color:#4db8ff;background:rgba(0,100,255,0.1);padding:2px 6px;border-radius:4px;">${escapeHtml(existingZone.name)}</span>` : '<span style="font-size:10px;color:#444;">no zone yet</span>'}
+              </label>`;
+            }).join('') : '<div style="padding:12px;color:#555;font-size:12px;text-align:center;">No areas on this HA floor</div>'}
+          </div>
+        </div>
+      ` : ''}
+
+      <div style="display:flex;gap:8px;margin-top:14px;">
+        <button id="owFloorRegistryRefresh" style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);color:#666;border-radius:8px;padding:7px 12px;cursor:pointer;font-size:12px;">↻ Refresh HA</button>
+        <button id="owFloorDeleteBtn" style="background:rgba(255,59,48,0.1);border:1px solid rgba(255,59,48,0.25);color:#ff3b30;border-radius:8px;padding:7px 12px;cursor:pointer;font-size:12px;">Delete Floor</button>
+        <button id="owFloorSaveBtn" style="margin-left:auto;background:rgba(0,100,210,0.2);border:1px solid rgba(0,100,210,0.4);color:#4db8ff;border-radius:8px;padding:7px 16px;cursor:pointer;font-size:12px;font-weight:600;">Save</button>
+      </div>
+    `;
+
+    // Wire name input
+    body.querySelector('#owFloorNameInput').oninput = e => {
+      floor.name = e.target.value;
+      titlebar.querySelector('#owFloorConfigFloorName').textContent = e.target.value;
+    };
+
+    // Wire floorplan path input
+    body.querySelector('#owFloorFpInput').oninput = e => { floor.floorplan = e.target.value.trim() || null; };
+
+    // Wire floorplan file upload
+    body.querySelector('#owFloorFpFile').onchange = async e => {
+      const file = e.target.files?.[0]; if (!file) return;
+      const fd = new FormData(); fd.append('file', file);
+      const r = await fetch(apiPath('ow/upload-floorplan'), { method: 'POST', body: fd });
+      if (r.ok) { const d = await r.json(); if (d.path) { floor.floorplan = d.path; body.querySelector('#owFloorFpInput').value = d.path; } }
+    };
+
+    // Wire HA floor select
+    body.querySelector('#owFloorHASelect').onchange = async e => {
+      floor.ha_floor_id = e.target.value || null;
+      floor.ha_linked_area_ids = [];
+      await saveFloor(floor);
+      render();
+    };
+
+    // Wire auto-add checkbox
+    body.querySelector('#owFloorAutoAdd')?.addEventListener('change', e => { floor.ha_auto_add_areas = e.target.checked; });
+
+    // Wire area checkboxes
+    body.querySelectorAll('.ow-area-chk').forEach(chk => {
+      chk.addEventListener('change', async () => {
+        const areaId = chk.dataset.areaId;
+        const areaName = chk.dataset.areaName;
+        if (!floor.ha_linked_area_ids) floor.ha_linked_area_ids = [];
+        if (chk.checked) {
+          if (!floor.ha_linked_area_ids.includes(areaId)) floor.ha_linked_area_ids.push(areaId);
+          const existing = zones.find(z => z.ha_area_id === areaId);
+          if (!existing) await createZoneFromHAArea(areaId, areaName, floor.id);
+        } else {
+          floor.ha_linked_area_ids = floor.ha_linked_area_ids.filter(id => id !== areaId);
+        }
+        await saveFloor(floor);
+        render();
+        renderZonesEditor();
+      });
+    });
+
+    // Wire refresh
+    body.querySelector('#owFloorRegistryRefresh').onclick = async () => {
+      await fetch(apiPath('ow/ha-registry/refresh'), { method: 'POST' });
+      await loadHARegistry();
+      render();
+    };
+
+    // Wire delete
+    body.querySelector('#owFloorDeleteBtn').onclick = async () => {
+      if (!confirm(`Delete floor "${floor.name}"? Zones on this floor will become ungrouped.`)) return;
+      await deleteFloor(floor.id);
+      panel.remove();
+      renderZonesEditor(); renderZones();
+    };
+
+    // Wire save
+    body.querySelector('#owFloorSaveBtn').onclick = async () => {
+      await saveFloor(floor);
+      renderZonesEditor(); renderZones();
+      showToast('Floor saved ✓', 'ok');
+    };
+  }
+
+  render();
+  panel.appendChild(titlebar);
+  panel.appendChild(body);
+  document.body.appendChild(panel);
+
+  // Dismiss on outside click
+  setTimeout(() => {
+    document.addEventListener('pointerdown', function dismiss(e) {
+      if (!panel.contains(e.target)) { panel.remove(); document.removeEventListener('pointerdown', dismiss); }
+    });
+  }, 100);
+}
+
+// Sync a zone's entity tabs from its linked HA area.
+// This is authoritative for HA-linked zones: adds current HA area entities and removes stale ones.
+async function syncZoneFromHAArea(zone, opts = {}) {
+  if (!zone?.ha_area_id) { showToast('No HA area mapped to this zone', 'warn'); return; }
+  if (opts.forceRefresh || !_haRegistry.loaded) await loadHARegistry(!!opts.forceRefresh);
+  if (!_haRegistry.loaded) { showToast('HA registry not loaded', 'warn'); return; }
+  const areaEntities = haEntitiesForArea(zone.ha_area_id);
+  const byType = {
+    sensors: new Set(areaEntities.filter(e => HA_AREA_FILTERS.sensors(e)).map(e => e.entity_id)),
+    cameras: new Set(areaEntities.filter(e => HA_AREA_FILTERS.cameras(e)).map(e => e.entity_id)),
+    lights:  new Set(areaEntities.filter(e => HA_AREA_FILTERS.lights(e)).map(e => e.entity_id)),
+    sirens:  new Set(areaEntities.filter(e => HA_AREA_FILTERS.sirens(e)).map(e => e.entity_id)),
+    doors:   new Set(areaEntities.filter(e => HA_AREA_FILTERS.doors(e)).map(e => e.entity_id)),
+  };
+  const allAreaEntityIds = new Set(areaEntities.map(e => e.entity_id));
+  let added = 0, removed = 0;
+  function reconcileArray(type) { const before = zone[type] || []; const wanted = byType[type] || new Set(); const next = before.filter(eid => wanted.has(eid)); removed += before.length - next.length; wanted.forEach(eid => { if (!next.includes(eid)) { next.push(eid); added++; } }); zone[type] = next; }
+  ['sensors', 'cameras', 'lights', 'sirens'].forEach(reconcileArray);
+  const beforeGhosts = zone.ha_excluded_entities || [];
+  zone.ha_excluded_entities = beforeGhosts.filter(eid => allAreaEntityIds.has(eid));
+  removed += beforeGhosts.length - zone.ha_excluded_entities.length;
+  const staleDoorPins = doorPins.filter(p => doorPinZoneIds(p).includes(zone.id) && p.sensor_entity && !byType.doors.has(p.sensor_entity));
+  for (const p of staleDoorPins) { doorPins = doorPins.filter(dp => dp.id !== p.id); await fetch(apiPath('ow/delete-door-pin'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: p.id }) }).catch(() => null); removed++; }
+  for (const e of areaEntities.filter(e => byType.doors.has(e.entity_id))) if (!doorPins.some(p => p.sensor_entity === e.entity_id && doorPinZoneIds(p).includes(zone.id))) { const newPin = { id: 'door_' + Date.now() + '_' + Math.random().toString(36).slice(2,6), name: haStates[e.entity_id]?.attributes?.friendly_name || e.name || e.entity_id.split('.').pop().replace(/_/g,' '), sensor_entity: e.entity_id, control_entity: null, zone_id: zone.id, floor_id: zone.floor_id || null, x: null, y: null, rotation: 0 }; doorPins.push(newPin); await saveDoorPin(newPin); added++; }
+  await saveZone(zone); subscribeHAEntities(); renderZones(); if (window.renderCameraStatusBar) window.renderCameraStatusBar(); if (window.camUpdate) window.camUpdate();
+  showToast(`Synced HA area: ${added} added, ${removed} removed ✓`, (added || removed) ? 'ok' : 'info');
+}
+
+// Create an OW zone linked to a HA area with no map points
+async function createZoneFromHAArea(areaId, areaName, floorId) {
+  const id = 'zone_' + areaId.replace(/[^a-z0-9]/gi, '_') + '_' + Date.now();
+  const zone = {
+    id, name: areaName, colorHex: '#0096ff', color: hexToRgba('#0096ff', 0.25),
+    enabled: true, hidden: false,
+    floor_id: floorId, ha_area_id: areaId,
+    points: [], sensors: [], cameras: [], lights: [], sirens: [], ha_excluded_entities: [],
+  };
+  zones.push(zone);
+  // Add to zone index
+  const idxRes = await fetch(ZONES_DIR + 'index.json?v=' + Date.now());
+  let index = idxRes.ok ? await idxRes.json() : [];
+  const filename = zoneFilename(id);
+  if (!index.includes(filename)) index.push(filename);
+  await fetch(apiPath('ow/save-zone'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ filename: 'index.json', content: JSON.stringify(index, null, 2) }) });
+  await saveZone(zone);
+  showToast(`Zone "${areaName}" created from HA area ✓`, 'ok');
+  renderZonesEditor();
+  return zone;
+}
+
+function renderFloorFlyout() {
+  const existing = document.getElementById("floorFlyout");
+  if (existing) existing.remove();
+
+  const btn     = document.getElementById("floorsBtn");
+  const sidebar = document.getElementById("sidebarEl");
+  if (!btn || !sidebar) return;
+
+  const flyout = document.createElement("div");
+  flyout.id = "floorFlyout";
+  flyout.style.cssText = `
+    position:fixed;
+    background:rgba(14,14,14,0.97);
+    border:1px solid rgba(255,255,255,0.12);
+    border-radius:12px;
+    padding:8px;
+    z-index:500;
+    min-width:180px;
+    box-shadow:0 8px 32px rgba(0,0,0,0.6);
+    backdrop-filter:blur(10px);
+  `;
+
+  // Position next to the button
+  const btnRect     = btn.getBoundingClientRect();
+  const isLeft      = sidebar.classList.contains("left");
+  flyout.style.top  = Math.round(btnRect.top) + "px";
+  if (isLeft) {
+    flyout.style.left = Math.round(btnRect.right + 8) + "px";
+  } else {
+    flyout.style.right = Math.round(window.innerWidth - btnRect.left + 8) + "px";
+  }
+
+  // Build floor items
+  floors.forEach((f, fi) => {
+    const floorZones  = zones.filter(z => z.floor_id === f.id || (!z.floor_id && fi === 0));
+    const hasTriggered = floorZones.some(z => getZoneState(z) === "triggered");
+    const allDisabled  = floorZones.length > 0 && floorZones.every(z => getZoneState(z) === "disabled");
+    const hasFault     = floorZones.some(z => getZoneState(z) === "fault");
+    const dotColour    = hasTriggered ? "#ff3b30" : hasFault ? "#ff9500" : allDisabled ? "#555" : "#32d74b";
+
+    const row = document.createElement("button");
+    const isActive = f.id === activeFloorId;
+    row.style.cssText = `
+      display:flex;align-items:center;gap:10px;width:100%;
+      background:${isActive ? "rgba(0,150,255,0.15)" : "transparent"};
+      border:1px solid ${isActive ? "rgba(0,150,255,0.35)" : "transparent"};
+      border-radius:8px;padding:8px 10px;cursor:pointer;
+      color:${isActive ? "#fff" : "rgba(255,255,255,0.7)"};
+      font-size:13px;font-weight:${isActive ? "600" : "400"};
+      text-align:left;transition:background 0.15s;
+    `;
+    row.onmouseover = () => { if (!isActive) row.style.background = "rgba(255,255,255,0.06)"; };
+    row.onmouseout  = () => { if (!isActive) row.style.background = "transparent"; };
+
+    row.innerHTML = `
+      <span style="width:8px;height:8px;border-radius:50%;background:${dotColour};flex-shrink:0;display:inline-block;${hasTriggered ? "animation:pulse-dot 0.8s infinite;" : ""}"></span>
+      <span style="flex:1;">${escapeHtml(f.name)}</span>
+      <span style="font-size:10px;color:#555;">${floorZones.length} zone${floorZones.length !== 1 ? "s" : ""}</span>
+    `;
+
+    row.onclick = () => {
+      setActiveFloor(f.id);
+      if (editorMode) renderZonesEditor();
+      flyout.remove();
+      document.getElementById("floorsBtn")?.classList.remove("active");
+    };
+
+    flyout.appendChild(row);
+  });
+
+  document.body.appendChild(flyout);
+
+  // Dismiss on outside click
+  setTimeout(() => {
+    document.addEventListener("pointerdown", function dismiss(e) {
+      if (!flyout.contains(e.target) && e.target.id !== "floorsBtn") {
+        flyout.remove();
+        document.getElementById("floorsBtn")?.classList.remove("active");
+        document.removeEventListener("pointerdown", dismiss);
+      }
+    });
   }, 0);
 }
 
-/* ─── DOOR PINS ───────────────────────────────────────────── */
-async function loadDoorPins() {
-  try {
-    const res = await fetch(apiPath("ow/door-pins") + "?v=" + Date.now());
-    doorPins = res.ok ? await res.json() : [];
-    doorPins.forEach(normalizeDoorPin);
-  } catch { doorPins = []; }
-}
-async function saveDoorPin(pin) {
-  normalizeDoorPin(pin);
-  const z0 = doorPinPrimaryZoneId(pin);
-  if (z0) pin.zone_id = z0;
-  await fetch(apiPath("ow/save-door-pin"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(pin) });
-  showSaveToast('Door / Window');
-  try { const h = await fetch(apiPath("ow/health"),{cache:"no-store"}); const d = await h.json(); if(d.dataVersion) _lastDataVersion = d.dataVersion; } catch{}
-}
-async function deleteDoorPin(id) {
-  doorPins = doorPins.filter(p => p.id !== id);
-  await fetch(apiPath("ow/delete-door-pin"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id }) });
+function bindSearchUI() {
+  const searchPanelHtml = `
+    <div class="search-panel" id="searchPanel" aria-hidden="true">
+      <div class="search-header" id="searchTitlebar">
+        <span class="search-title">Search</span>
+        <button class="search-close" id="searchCloseBtn">✕</button>
+      </div>
+      <input type="text" class="search-input" id="searchInput" placeholder="Zone name or entity…" autocomplete="off">
+      <div class="search-results" id="searchResults"></div>
+      <div class="search-hint">Search zones and entities</div>
+    </div>
+  `;
+  document.body.insertAdjacentHTML("beforeend", searchPanelHtml);
+
+  // Make search panel draggable (issue 9)
+  const panel    = document.getElementById("searchPanel");
+  const titlebar = document.getElementById("searchTitlebar");
+  makeDraggable(panel, titlebar, "searchPanel");
+
+  const searchBtn   = document.getElementById("searchBtn");
+
+  if (searchBtn)   searchBtn.onclick   = () => setSearchOpen(!searchOpen);
+
+  document.getElementById("searchCloseBtn").onclick = () => setSearchOpen(false);
+  panel.addEventListener("pointerdown", e => e.stopPropagation());
+
+  const input = document.getElementById("searchInput");
+  input.oninput = () => {
+    clearTimeout(searchDebounce);
+    searchDebounce = setTimeout(() => runSearch(input.value), 80);
+  };
+  input.onkeydown = e => { if (e.key === "Escape") setSearchOpen(false); };
+
+  document.addEventListener("pointerdown", e => {
+    if (!searchOpen) return;
+    if (panel.contains(e.target)) return;
+    if (searchBtn && searchBtn.contains(e.target)) return;
+    setSearchOpen(false);
+  });
 }
 
-function doorPinIsOpen(pin) {
-  const state = String(haStates[pin?.sensor_entity]?.state || '').toLowerCase();
-  return ['on','open','opening','detected','unlocked'].includes(state);
+
+/* ─── ZONE EDITOR MAP INTERACTION HELPERS ─────────────────── */
+function setZoneSvgInteractionState() {
+  const enabled = editorMode ? 'all' : 'none';
+  document.querySelectorAll('#zonesSvg, .fp-svg').forEach(svg => {
+    svg.style.pointerEvents = enabled;
+    if (!editorMode) svg.style.cursor = '';
+  });
 }
-function doorPinDisplayState(pin) {
-  if (!pin?.sensor_entity) return '—';
-  const raw = String(haStates[pin.sensor_entity]?.state || '—').toLowerCase();
-  if (['on','open','opening','detected','unlocked'].includes(raw)) return 'OPEN';
-  if (['off','closed','closing','locked'].includes(raw)) return 'CLOSED';
-  return raw === '—' ? '—' : raw.toUpperCase();
+
+function clearZoneEditorSelection(render = true) {
+  selectedZoneId = null;
+  selectedGroupId = null;
+  highlightedZoneId = null;
+  highlightedUntil = 0;
+  highlightedGroupId = null;
+  highlightedGroupUntil = 0;
+  isEditingPoints = false;
+  activePinId = null;
+  activePinType = null;
+  placingPinType = null;
+  placingEntityId = null;
+  placingZoneId = null;
+  _placingExistingPinId = null;
+  document.querySelectorAll('#zonesSvg, .fp-svg').forEach(svg => { svg.style.cursor = ''; });
+  if (render) {
+    renderZones();
+    renderZonesEditor();
+  }
 }
-function doorControlInfo(pin) {
-  const entityId = pin?.control_entity;
-  if (!entityId) return null;
-  const domain = entityId.split('.')[0];
-  const state = String(haStates[entityId]?.state || '').toLowerCase();
-  if (domain === 'lock') { const locked = state === 'locked' || state === 'off'; return { domain, service: locked ? 'unlock' : 'lock', label: locked ? 'Unlock' : 'Lock' }; }
-  if (domain === 'cover') { const closed = state === 'closed' || state === 'closing' || state === 'off'; return { domain, service: closed ? 'open_cover' : 'close_cover', label: closed ? 'Open' : 'Close' }; }
-  if (domain === 'switch' || domain === 'input_boolean') { const on = state === 'on' || state === 'open' || state === 'opening' || state === 'unlocked'; return { domain, service: on ? 'turn_off' : 'turn_on', label: on ? 'Close' : 'Open' }; }
-  if (domain === 'button') return { domain, service: 'press', label: 'Press' };
-  return null;
+
+/* ─── ZONES BUTTON ACTIVE STATE ───────────────────────────── */
+function bindZonesButton() {
+  const zonesBtn = document.getElementById("zonesBtn");
+  if (!zonesBtn) return;
+  zonesBtn.onclick = () => {
+    editorMode = !editorMode;
+    isCreatingZone = false;
+    isEditingPoints = false;
+    currentNewZone = null;
+    if (editorMode) {
+      editorPosRestored = false; // allow position restore on open
+      // Load HA registry for floor/area linking (non-blocking)
+      if (!_haRegistry.loaded) loadHARegistry().then(() => renderZonesEditor());
+    }
+    zonesBtn.classList.toggle("active", editorMode);
+    setZoneSvgInteractionState();
+    renderZonesEditor();
+    renderZones();
+  };
 }
-function callDoorPinControl(pin) {
-  const info = doorControlInfo(pin);
-  if (!info || !pin?.control_entity) return;
-  _callDomainService(info.domain, info.service, pin.control_entity);
+
+/* ─── LIVE REFRESH ────────────────────────────────────────── */
+// Zone flash interval is declared alongside renderZones above.
+// This stub kept for clarity.
+function startLiveRefresh() { /* flash driven by interval in renderZones block */ }
+
+/* ─── INIT ────────────────────────────────────────────────── */
+function initFloorplan() {
+  const img     = document.getElementById("floorplanImage");
+  const wrapper = document.getElementById("floorplanWrapper");
+  const svg     = document.getElementById("zonesSvg");
+  if (!img || !wrapper || !svg) return;
+
+  function getPanelSize() {
+    // Use the map panel dimensions — not the full viewport
+    const panel = document.getElementById("mapPanel") || document.querySelector(".split-panel-map");
+    if (panel && panel.offsetWidth > 0) {
+      return { vw: panel.offsetWidth, vh: panel.offsetHeight };
+    }
+    return { vw: window.innerWidth, vh: window.innerHeight };
+  }
+
+  function onLoad() {
+    const iw = img.naturalWidth;
+    const ih = img.naturalHeight;
+    if (!iw || !ih) return;
+
+    wrapper.style.width  = iw + "px";
+    wrapper.style.height = ih + "px";
+    svg.setAttribute("width",  iw);
+    svg.setAttribute("height", ih);
+    svg.setAttribute("viewBox", `0 0 ${iw} ${ih}`);
+
+    if (!localStorage.getItem("zoomScale")) {
+      const { vw, vh } = getPanelSize();
+      zoom.scale = Math.min(vw / iw, vh / ih, 1);
+      zoom.x = (vw - iw * zoom.scale) / 2;
+      zoom.y = (vh - ih * zoom.scale) / 2;
+      applyTransform();
+    } else {
+      loadZoom();
+    }
+    renderZones();
+  }
+
+  if (img.complete && img.naturalWidth) {
+    onLoad();
+  } else {
+    img.onload = onLoad;
+  }
 }
+
+async function init() {
+  // Unified page — always load floorplan sidebar
+  await loadModule("sidebarContainer", "sidebar.html");
+
+  if (!document.getElementById("sidebarEl")) {
+    console.warn('[HA-Overwatch] sidebarEl not found — check module paths');
+  }
+
+  await loadModule("expandBtnContainer", "expand-btn.html");
+  await loadModule("statusContainer", "status.html");
+  await loadModule("zonesEditorContainer", "zones-editor.html");
+
+  bindZoomControls();
+  bindZoomControlsMultiPanel(); // wraps zoom/reset for multi-panel mode
+  bindPan();
+  // initFloorplan() called after loadFloors() so the saved floor image is used
+  bindZonesButton();
+  bindStatusBar();
+  applyStatusVisibility(); // apply hide prefs after DOM is ready
+  bindSearchUI();
+
+  bindSidebarToggle();
+  bindCommonSidebarButtons();
+  bindFloorSwitcher();
+  initViewToggle();  // apply startup view mode, wire split handle drag
+  // Hide zones editor button for non-admin (direct browser access)
+  if (IS_DIRECT_MODE) {
+    const zonesBtn = document.getElementById("zonesBtn");
+    if (zonesBtn) zonesBtn.style.display = "none";
+  }
+
+  // Automations button — admin only (hidden in direct/public mode)
+  const automationsBtn = document.getElementById("automationsBtn");
+  if (automationsBtn) {
+    if (IS_DIRECT_MODE) {
+      automationsBtn.style.display = "none"; // hide completely in direct/public mode
+    } else {
+      automationsBtn.onclick = () => {
+        if (window.OW_Automations?.toggle) {
+          window.OW_Automations.toggle();
+        }
+      };
+    }
+  }
+
+  await loadZones();
+  await loadGroups();
+  await loadFloors();   // sets activeFloorId, loads correct floor image, calls initFloorplan
+  await loadLights();
+  await loadSirens();
+  await loadCameraPins();
+  await loadDoorPins();
+  // Load low-res camera map from dedicated file
+  try {
+    const r = await fetch(apiPath("ow/cam-low-res-map") + "?v=" + Date.now());
+    camLowResMap = r.ok ? await r.json() : {};
+  } catch { try { camLowResMap = JSON.parse(uiConfig.cam_low_res_map || '{}'); } catch { camLowResMap = {}; } }
+  if (window.setCamLowResMap) window.setCamLowResMap(camLowResMap);
+  if (window.OW) window.OW.uiConfig = { ...uiConfig, cam_low_res_map: JSON.stringify(camLowResMap) };
+
+  await loadArmAllowedIps();
+  window._updateFloorBtn?.(); // show/hide floor switcher based on floor count
+  bindZonesSvgEvents();
+  applyFloorPanels();   // build single or multi-panel layout based on saved settings
+  renderZonesEditor();
+  renderZones();
+  await loadConfig();
+
+  await startServerHealthCheck();
+
+  if (!haConnected) {
+    if (IS_DIRECT_MODE) {
+      startDirectModePoller(); // Direct Mode: poll /ow/states, no WebSocket
+    } else {
+      connectHA();             // Ingress Mode: WebSocket via proxy
+    }
+  }
+
+  startLiveRefresh();
+  logEvent("info", "HA-Overwatch initialised.", "system");
+
+  subscribeHAEntities();
+
+  // ── Expose shared state for cameras.js ─────────────────────
+  // These are live references — cameras.js reads them directly.
+  window.OW = {
+    get zones()         { return zones; },
+    get groups()        { return groups; },
+    get floors()        { return floors; },
+    get activeFloorId() { return activeFloorId; },
+    activeFloor,
+    setActiveFloor,
+    get haStates()      { return haStates; },
+    get haConnected()   { return haConnected; },
+    get uiConfig()      { return uiConfig; },
+    get masterEnabled() { return masterEnabled; },
+    get isAddonMode()   { return isAddonMode; },
+    isEntityTriggered,
+    zoneTriggerEntities,
+    zoneActiveTriggerEntity,
+    isEntityGhosted,
+    getZoneState,
+    apiPath,
+    logEvent,
+    renderSettingsPanel,
+    renderLogPanel,
+    getHASocket: () => haSocket,
+    // sendHA shared with cameras.js — MUST use this, not raw haSocket.send,
+    // to avoid "Identifier values have to increase" errors (shared haMsgId counter)
+    sendHA,
+  };
+  window.renderSettingsPanel      = renderSettingsPanel;
+  window.renderLogPanel           = renderLogPanel;
+  window.isAddonMode              = isAddonMode;
+  window.bindSidebarToggle        = bindSidebarToggle;
+  window.bindCommonSidebarButtons = bindCommonSidebarButtons;
+  window.setViewMode              = setViewMode;   // so cameras.js view buttons work
+}
+
+/* ─── VIEW MODE (Map / Split / Cameras) ───────────────────── */
+const VIEW_MODES = ['map', 'split', 'cameras'];
+
+function getViewMode() {
+  const saved = localStorage.getItem('ow_view_mode') || 'map';
+  return VIEW_MODES.includes(saved) ? saved : 'map';
+}
+
+function setViewMode(mode) {
+  localStorage.setItem('ow_view_mode', mode);
+  // Remove all view classes, add the right one
+  document.body.classList.remove('view-map', 'view-cameras', 'view-split');
+  document.body.classList.add(`view-${mode}`);
+  // Update toggle button states
+  document.querySelectorAll('.view-toggle-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.view === mode);
+  });
+  // Resize floorplan if switching to map or split
+  if (mode === 'map' || mode === 'split') {
+    setTimeout(() => fitFloorplanToPanel(), 50);
+  }
+  // Notify cameras.js
+  if (window.camUpdate) window.camUpdate();
+}
+
+function initViewToggle() {
+  // Restore split direction and apply startup view — no floating widget
+  const savedDir = localStorage.getItem('ow_split_dir') || 'h';
+  document.body.setAttribute('data-split-dir', savedDir);
+  applySplitPct(parseFloat(localStorage.getItem('ow_split_pos') || '50'));
+
+  // Apply startup view mode — default to split-h if nothing saved
+  const startMode = localStorage.getItem('ow_view_mode') || 'split';
+  setViewMode(startMode);
+
+  // Split handle drag
+  const handle = document.getElementById('splitHandle');
+  if (handle) {
+    let dragging = false, startPos = 0, startPct = 50;
+    let rafPending = false;
+
+    handle.addEventListener('pointerdown', e => {
+      if (mapLocked) return; // locked
+      dragging  = true;
+      handle.classList.add('dragging');
+      const isV = document.body.getAttribute('data-split-dir') === 'v';
+      startPos  = isV ? e.clientY : e.clientX;
+      startPct  = parseFloat(localStorage.getItem('ow_split_pos') || '50');
+      handle.setPointerCapture(e.pointerId);
+      e.preventDefault();
+    });
+
+    handle.addEventListener('pointermove', e => {
+      if (!dragging) return;
+      const root  = document.getElementById('splitRoot');
+      if (!root) return;
+      const isV   = document.body.getAttribute('data-split-dir') === 'v';
+      const total = isV ? root.offsetHeight : root.offsetWidth;
+      const delta = isV ? e.clientY - startPos : e.clientX - startPos;
+      const pct   = Math.max(20, Math.min(80, startPct + (delta / total * 100)));
+      applySplitPct(pct);
+      if (!rafPending) {
+        rafPending = true;
+        requestAnimationFrame(() => { rafPending = false; fitFloorplanToPanel(); });
+      }
+    });
+
+    handle.addEventListener('pointerup', () => {
+      if (!dragging) return;
+      dragging = false;
+      handle.classList.remove('dragging');
+      const root = document.getElementById('splitRoot');
+      const pct  = parseFloat(root?.style.getPropertyValue('--split-pct') || '50');
+      localStorage.setItem('ow_split_pos', pct.toFixed(1));
+      fitFloorplanToPanel();
+    });
+  }
+}
+function fitFloorplanToPanel() {
+  // Multi-panel mode — fit each panel independently
+  if (getNumPanels() > 1 && document.querySelector('.floor-panel')) {
+    const n = getNumPanels();
+    for (let i = 0; i < n; i++) fitPanelToContainer(i);
+    return;
+  }
+  const img = document.getElementById('floorplanImage');
+  if (!img || !img.naturalWidth) return;
+  const panel = document.getElementById('mapPanel');
+  const vw = (panel && panel.offsetWidth  > 0) ? panel.offsetWidth  : window.innerWidth;
+  const vh = (panel && panel.offsetHeight > 0) ? panel.offsetHeight : window.innerHeight;
+  const iw = img.naturalWidth, ih = img.naturalHeight;
+  zoom.scale = Math.min(vw / iw, vh / ih, 1);
+  zoom.x = (vw - iw * zoom.scale) / 2;
+  zoom.y = (vh - ih * zoom.scale) / 2;
+  applyTransform();
+  renderZones();
+}
+
+function applySplitPct(pct) {
+  const root = document.getElementById('splitRoot');
+  if (root) root.style.setProperty('--split-pct', `${pct.toFixed(1)}%`);
+}
+
+
+window.addEventListener("DOMContentLoaded", init);
