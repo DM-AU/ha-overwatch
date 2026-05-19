@@ -1,18 +1,7 @@
 /* ─── HA-Overwatch Toast Module ────────────────────────────────
- * Stable baseline: v1.551.36.06.
+ * Stable baseline: v1.551.36.07.
  * Extracted from app.js as a classic browser script.
- *
- * Load order:
- *   1. modules/ow-utils.js
- *   2. modules/ow-door-pins.js
- *   3. modules/ow-sidebar.js
- *   4. modules/ow-toast.js
- *   5. app.js
- *
- * Compatibility design:
- * - Functions intentionally remain global.
- * - `_saveToastTimer` remains declared in app.js to avoid moving top-level mutable state.
- * - The toast CSS injection IIFE can safely run before app.js.
+ * `_saveToastTimer` remains declared in app.js.
  */
 
 function showSaveToast(label) {
