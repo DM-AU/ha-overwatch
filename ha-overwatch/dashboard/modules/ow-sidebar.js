@@ -1,17 +1,7 @@
 /* ─── HA-Overwatch Sidebar Module ──────────────────────────────
- * Stable baseline: v1.551.36.05.
+ * Stable baseline: v1.551.36.06.
  * Extracted from app.js as a classic browser script.
- *
- * Load order:
- *   1. modules/ow-utils.js
- *   2. modules/ow-door-pins.js
- *   3. modules/ow-sidebar.js
- *   4. app.js
- *
- * Compatibility design:
- * - Functions intentionally remain global.
- * - Function bodies reference app.js globals at call time after app.js has loaded.
- * - No top-level mutable app state moved in this pass.
+ * Load before app.js.
  */
 
 function updateExpandBtn(collapsed) {
