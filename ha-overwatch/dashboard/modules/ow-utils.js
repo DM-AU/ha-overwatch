@@ -1,12 +1,6 @@
 /* ─── HA-Overwatch Utility Module ─────────────────────────────
- * Extracted from app.js as a classic browser script.
- *
- * Load order:
- *   1. modules/ow-utils.js
- *   2. feature modules
- *   3. app.js
- *
- * This phase intentionally extracts only helpers needed by pre-app modules.
+ * Stable baseline: v1.551.36.05.
+ * Contains only helpers required before app.js loads.
  */
 
 function escapeHtml(s) {
