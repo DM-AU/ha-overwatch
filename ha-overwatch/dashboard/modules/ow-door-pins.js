@@ -4,15 +4,14 @@
  * Load order:
  *   1. modules/ow-utils.js
  *   2. modules/ow-door-pins.js
- *   3. modules/ow-camera-config.js
- *   4. app.js
+ *   3. app.js
  *
  * Compatibility design:
  * - Functions intentionally remain global (classic script function declarations).
  * - Function bodies may reference globals declared in app.js (zones, doorPins,
  *   haStates, apiPath, renderZones, renderZonesEditor, etc.). Those references
  *   are resolved at call time after app.js has loaded.
- * - No behaviour change intended in this modularisation pass.
+ * - No behaviour change intended in this hotfix beyond restoring camera helpers to app.js.
  */
 
 // ─────────────────────────────────────────────────────────────
