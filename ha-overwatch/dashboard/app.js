@@ -1,18 +1,3 @@
-/* ============================================================
- * HA-Overwatch — app.js  (Phase 1 v2)
- *
- * Fixes & features in this revision:
- *  1. Larger sidebar icons (28px default)
- *  2. Search highlight-only — no map zoom/pan
- *  3. Point insertion anywhere on map in edit-points mode
- *  4. Zone editor close button fixed via titlebar clone
- *  5. HA entity search inside zone editor (live + fallback)
- *  6. Config polling fixed — proper hash + cache-bust
- *  7. Sidebar position & floorplan upload in Settings
- *  8. Alarm entity status bar + colour-coded dot
- *  9. Connection log panel + toast alerts + server health
- * ============================================================ */
-
 /* ─── CONFIG DEFAULTS ─────────────────────────────────────── */
 let uiConfig = {
   floorplan: "img/floorplan.png",
@@ -102,6 +87,143 @@ let sirens     = [];      // Map siren pins [{id, name, entity_id, floor_id, x, 
 let cameraPins = [];      // Map camera pins [{id, name, entity_id, floor_id, x, y}]
 let doorPins   = [];      // Map door pins [{id, name, sensor_entity, control_entity, floor_id, x, y, rotation}]
 let camLowResMap = {};    // { "camera.high": "camera.low" } — persisted to ui.yaml
+
+
+// ─────────────────────────────────────────────────────────────
+// Door pin schema helpers (multi-zone + control-trigger support)
+//
+// Backward compat:
+// - legacy pins may have pin.zone_id (string)
+// - new pins use pin.zone_ids (string[])
+// - we continue writing pin.zone_id as the first zone for older backends
+//
+function doorPinZoneIds(pin) {
+  if (!pin) return [];
+  if (Array.isArray(pin.zone_ids) && pin.zone_ids.length) return pin.zone_ids.filter(Boolean);
+  if (pin.zone_id) return [pin.zone_id];
+  return [];
+}
+
+function doorPinPrimaryZoneId(pin) {
+  return doorPinZoneIds(pin)[0] || pin?.zone_id || '';
+}
+
+function normalizeDoorPin(pin) {
+  if (!pin || typeof pin !== 'object') return pin;
+  if ((!Array.isArray(pin.zone_ids) || !pin.zone_ids.length) && pin.zone_id) {
+    pin.zone_ids = [pin.zone_id];
+  }
+  if (Array.isArray(pin.zone_ids) && pin.zone_ids.length && !pin.zone_id) {
+    pin.zone_id = pin.zone_ids[0];
+  }
+  if (pin.control_counts_as_trigger == null) pin.control_counts_as_trigger = false;
+  if (pin.control_trigger_state === undefined) pin.control_trigger_state = null;
+  return pin;
+}
+
+function inferControlTriggerState(entityId) {
+  if (!entityId) return null;
+  const domain = String(entityId).split('.')[0];
+  if (domain === 'lock')  return 'unlocked';
+  if (domain === 'cover') return 'open';
+  if (domain === 'switch') return 'on';
+  return null;
+}
+
+function doorPinWantedControlState(pin) {
+  if (!pin?.control_entity) return null;
+  const explicit = pin.control_trigger_state;
+  if (explicit === null || explicit === undefined || explicit === '') {
+    return inferControlTriggerState(pin.control_entity);
+  }
+  return String(explicit);
+}
+
+function doorPinControlTriggered(pin) {
+  if (!pin?.control_counts_as_trigger || !pin?.control_entity) return false;
+  const wanted = (doorPinWantedControlState(pin) || '').toLowerCase();
+  if (!wanted) return false;
+  const st = String(haStates?.[pin.control_entity]?.state || '').toLowerCase();
+  return st === wanted;
+}
+
+function isDoorTriggered(pin) {
+  const sensorTrig = !!(pin?.sensor_entity && isEntityTriggered(pin.sensor_entity));
+  const controlTrig = doorPinControlTriggered(pin);
+  return sensorTrig || controlTrig;
+}
+
+function doorPinTriggerSourceEntity(pin) {
+  if (pin?.sensor_entity && isEntityTriggered(pin.sensor_entity)) return pin.sensor_entity;
+  if (doorPinControlTriggered(pin)) return pin.control_entity;
+  return '';
+}
+
+let _doorLinksPopoverEl = null;
+function closeDoorLinksPopover() {
+  if (_doorLinksPopoverEl) { _doorLinksPopoverEl.remove(); _doorLinksPopoverEl = null; }
+}
+
+function openDoorLinksPopover(pinId, anchorEl) {
+  closeDoorLinksPopover();
+  const pin = doorPins.find(p => p.id === pinId);
+  if (!pin || !anchorEl) return;
+
+  const zids = doorPinZoneIds(pin);
+  const rows = zids
+    .map(zid => zones.find(z => z.id === zid))
+    .filter(Boolean)
+    .map(z => `<div style="padding:4px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">• ${escapeHtml(z.name || z.id)}</div>`)
+    .join('') || `<div style="padding:4px 0;color:#666;">No linked zones</div>`;
+
+  const pop = document.createElement('div');
+  pop.className = 'ow-door-links-popover';
+  pop.style.cssText = 'position:fixed;z-index:9000;background:rgba(14,14,14,0.98);border:1px solid rgba(255,255,255,0.12);border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,0.65);padding:10px 12px;min-width:180px;max-width:260px;color:#e0e0e0;font-size:12px;';
+  pop.innerHTML = `
+    <div style="font-size:10px;letter-spacing:0.08em;text-transform:uppercase;color:#666;margin-bottom:6px;">Linked zones</div>
+    <div style="max-height:160px;overflow:auto;">${rows}</div>
+    <div style="margin-top:8px;display:flex;justify-content:flex-end;gap:6px;">
+      <button id="owDoorLinksEdit" style="background:rgba(0,150,255,0.15);border:1px solid rgba(0,150,255,0.35);color:#4db8ff;border-radius:7px;padding:4px 10px;cursor:pointer;font-size:11px;">Edit door…</button>
+      <button id="owDoorLinksClose" style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);color:#888;border-radius:7px;padding:4px 10px;cursor:pointer;font-size:11px;">Close</button>
+    </div>
+  `;
+
+  document.body.appendChild(pop);
+  _doorLinksPopoverEl = pop;
+
+  const rect = anchorEl.getBoundingClientRect();
+  const pad = 8;
+  const w = pop.offsetWidth || 220;
+  const h = pop.offsetHeight || 180;
+  let left = rect.left;
+  let top  = rect.bottom + pad;
+  if (left + w > window.innerWidth - 10) left = window.innerWidth - w - 10;
+  if (top + h > window.innerHeight - 10) top = rect.top - h - pad;
+  if (top < 10) top = 10;
+  if (left < 10) left = 10;
+  pop.style.left = Math.round(left) + 'px';
+  pop.style.top  = Math.round(top) + 'px';
+
+  pop.querySelector('#owDoorLinksClose')?.addEventListener('click', e => { e.stopPropagation(); closeDoorLinksPopover(); });
+  pop.querySelector('#owDoorLinksEdit')?.addEventListener('click', e => {
+    e.stopPropagation();
+    closeDoorLinksPopover();
+    if (!editorMode) editorMode = true;
+    selectPin('door', pin.id);
+    renderZones();
+    renderZonesEditor(true);
+  });
+
+  setTimeout(() => {
+    function outside(e) {
+      if (_doorLinksPopoverEl && !_doorLinksPopoverEl.contains(e.target) && e.target !== anchorEl) {
+        closeDoorLinksPopover();
+        document.removeEventListener('pointerdown', outside, true);
+      }
+    }
+    document.addEventListener('pointerdown', outside, true);
+  }, 0);
+}
 
 function getCamLowRes(highResId) {
   const forceHigh = localStorage.getItem('ow_cam_always_high_res') === 'true';
@@ -1014,9 +1136,13 @@ async function loadDoorPins() {
   try {
     const res = await fetch(apiPath("ow/door-pins") + "?v=" + Date.now());
     doorPins = res.ok ? await res.json() : [];
+    doorPins.forEach(normalizeDoorPin);
   } catch { doorPins = []; }
 }
 async function saveDoorPin(pin) {
+  normalizeDoorPin(pin);
+  const z0 = doorPinPrimaryZoneId(pin);
+  if (z0) pin.zone_id = z0;
   await fetch(apiPath("ow/save-door-pin"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(pin) });
   showSaveToast('Door / Window');
   try { const h = await fetch(apiPath("ow/health"),{cache:"no-store"}); const d = await h.json(); if(d.dataVersion) _lastDataVersion = d.dataVersion; } catch{}
@@ -2170,15 +2296,19 @@ function isEntityTriggered(entityId) {
 }
 function zoneTriggerEntities(zone) {
   if (!zone) return [];
-  const sensors = (zone.sensors || []).filter(e => !isEntityGhosted(e));
-  const doorSensors = doorPins
-    .filter(p => p.zone_id === zone.id && p.sensor_entity && !isEntityGhosted(p.sensor_entity))
-    .map(p => p.sensor_entity);
-  return [...sensors, ...doorSensors];
+  // Door pins are evaluated via isDoorTriggered() (sensor OR optional control).
+  // This returns zone-linked sensor entities only.
+  return (zone.sensors || []).filter(e => !isEntityGhosted(e));
 }
 
 function zoneActiveTriggerEntity(zone) {
-  return zoneTriggerEntities(zone).find(isEntityTriggered) || '';
+  if (!zone) return '';
+  const s = (zone.sensors || []).filter(e => !isEntityGhosted(e)).find(isEntityTriggered);
+  if (s) return s;
+  const dp = doorPins
+    .filter(p => doorPinZoneIds(p).includes(zone.id))
+    .find(p => isDoorTriggered(p));
+  return dp ? (doorPinTriggerSourceEntity(dp) || dp.sensor_entity || dp.control_entity || '') : '';
 }
 
 
@@ -2201,13 +2331,9 @@ function getZoneState(zone) {
   if (!enabled || !masterOn) return "disabled";
   if (!haConnected) return "normal";
   const sensors = (zone.sensors || []).filter(e => !isEntityGhosted(e));
-  // Also treat open door pins as triggered sensors (issue 8)
-  const doorSensors = doorPins
-    .filter(p => p.zone_id === zone.id && p.sensor_entity && !isEntityGhosted(p.sensor_entity))
-    .map(p => p.sensor_entity);
-  const allSensors = [...sensors, ...doorSensors];
-  if (!allSensors.length) return "normal";
-  const anyTriggered   = allSensors.some(isEntityTriggered);
+  const zoneDoorPins = doorPins.filter(p => doorPinZoneIds(p).includes(zone.id));
+  if (!sensors.length && !zoneDoorPins.length) return "normal";
+  const anyTriggered = sensors.some(isEntityTriggered) || zoneDoorPins.some(isDoorTriggered);
   // Only fault if haStates has loaded (>50 entities) — avoids false fault at startup
   // before the get_states response arrives. Also allow a brief grace period via
   // haStatesLoaded flag set after the first successful states fetch.
@@ -2228,12 +2354,13 @@ function checkZoneStateChanges() {
   if (!haConnected) return;
   for (const zone of zones) {
     const sensors = zoneTriggerEntities(zone);
+    const zoneDoorPins = doorPins.filter(p => doorPinZoneIds(p).includes(zone.id));
     // Compute raw state without the prev-state side effects
     let state = "normal";
     if (getZoneState(zone) === "disabled") {
       state = "disabled";
     } else {
-      const anyTriggered   = sensors.some(isEntityTriggered);
+      const anyTriggered = sensors.some(isEntityTriggered) || zoneDoorPins.some(isDoorTriggered);
       const statesReady2   = haStatesLoaded || Object.keys(haStates).length > 50;
       const anyUnavailable = statesReady2 && sensors.length > 0 && sensors.some(id => {
         const st = haStates[id];
@@ -2871,6 +2998,7 @@ function makeDraggableEditor(containerEl) {
       setZoneSvgInteractionState();
       const zonesBtn = document.getElementById("zonesBtn");
       if (zonesBtn) zonesBtn.classList.remove("active");
+      closeDoorLinksPopover();
       renderZonesEditor();
       renderZones();
     };
@@ -3297,6 +3425,7 @@ function placePinAtFloorplanCoord(x, y, floorId) {
     entity_id: type === 'door' ? undefined : entityId,
     sensor_entity: type === 'door' ? '' : undefined,
     control_entity: type === 'door' ? null : undefined,
+    zone_ids: type === 'door' ? [zoneId] : undefined,
     zone_id:   type === 'door' ? zoneId : undefined,
     floor_id:  pinFloor,
     x:         Math.round(x),
@@ -3331,8 +3460,8 @@ function makeDoorPin(pin, isEdit, scale) {
   const colOffDoor = rootCS.getPropertyValue('--color-door-closed').trim() || '#ffcc00';
 
   // Zone arm state — find the zone this pin belongs to
-  const ownerZone   = zones.find(z => z.id === pin.zone_id);
-  const zoneArmed   = ownerZone ? getZoneState(ownerZone) !== 'disabled' : true;
+  const linkedZones = doorPinZoneIds(pin).map(zid => zones.find(z => z.id === zid)).filter(Boolean);
+  const zoneArmed   = linkedZones.length ? linkedZones.some(z => getZoneState(z) !== 'disabled') : true;
 
   // Open door: use armed colour if zone armed, disarmed colour if zone disarmed
   // Closed door: always green (safe, shut)
@@ -3692,7 +3821,7 @@ function renderZonePopupContent() {
   const zState     = getZoneState(zone);
   const isArmed    = zState !== 'disabled';
   const sensors_   = (zone.sensors || []).filter(e => !isEntityGhosted(e));
-  const doors_     = doorPins.filter(p => p.zone_id === zone.id && (p.sensor_entity || p.control_entity) && !isEntityGhosted(p.sensor_entity) && !isEntityGhosted(p.control_entity));
+  const doors_     = doorPins.filter(p => doorPinZoneIds(p).includes(zone.id) && (p.sensor_entity || p.control_entity) && !isEntityGhosted(p.sensor_entity) && !isEntityGhosted(p.control_entity));
   const lights_    = (zone.lights  || []).filter(e => !isEntityGhosted(e));
   const sirens_    = (zone.sirens  || []).filter(e => !isEntityGhosted(e));
   const cameras_   = (zone.cameras || []).filter(e => !isEntityGhosted(e));
@@ -3823,6 +3952,10 @@ function renderZonePopupContent() {
       callDoorPinControl(pin);
       setTimeout(refreshZonePopupIfOpen, 250);
     });
+  });
+
+  popup.querySelectorAll('.zp-door-links').forEach(btn => {
+    btn.addEventListener('click', e => { e.stopPropagation(); openDoorLinksPopover(btn.dataset.pinId, btn); });
   });
 
   // Arm/Disarm — optimistic: flip the zone switch in haStates immediately
@@ -4025,11 +4158,14 @@ function startPinAnimLoop() {
     const hasActiveLights = lights.some(p => haStates[p.entity_id]?.state === 'on');
     const suppressDoorDisarmed = localStorage.getItem('ow_hide_door_alert_disarmed') === 'true';
     const hasOpenDoors    = doorPins.some(p => {
-      if (!p.sensor_entity || isEntityGhosted(p.sensor_entity) || !isEntityTriggered(p.sensor_entity)) return false;
+      if (p.sensor_entity && isEntityGhosted(p.sensor_entity)) return false;
+      if (p.control_entity && isEntityGhosted(p.control_entity)) return false;
+      if (!isDoorTriggered(p)) return false;
       if (suppressDoorDisarmed) {
         // Check if the zone is disarmed — check arm switch directly (not getZoneState
         // which would return 'triggered' because the open door makes the zone triggered)
-        const zone = zones.find(z => z.id === p.zone_id);
+        const linked = doorPinZoneIds(p).map(zid => zones.find(z => z.id === zid)).filter(Boolean);
+      const zone = linked[0] || null;
         if (!zone) return true;
         let zoneEnabled;
         if (!zoneUseServerState()) {
@@ -4189,6 +4325,40 @@ function renderZonesEditor(force = false) {
             <div id="pinCtrlResults" style="display:none;position:absolute;top:100%;left:0;right:0;background:#1a1a1a;border:1px solid rgba(255,255,255,0.15);border-radius:6px;z-index:100;max-height:160px;overflow-y:auto;"></div>
           </div>
         </div>
+        <div style="position:relative;margin-top:6px;">
+          <div style="display:flex;align-items:center;gap:8px;">
+            <label style="font-size:12px;color:#aaa;flex:1;display:flex;align-items:center;gap:8px;">
+              <input type="checkbox" id="pinControlCountsChk" ${pin.control_counts_as_trigger ? 'checked' : ''} style="accent-color:#0096ff;">
+              <span>Count control entity as triggered</span>
+            </label>
+            <button id="pinControlTriggerCog" title="Trigger settings" style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);color:#888;border-radius:7px;padding:4px 8px;cursor:pointer;font-size:12px;line-height:1;">⚙</button>
+          </div>
+          <div id="pinControlTriggerPopover" style="display:none;position:absolute;right:0;top:100%;margin-top:6px;background:rgba(14,14,14,0.98);border:1px solid rgba(255,255,255,0.12);border-radius:10px;box-shadow:0 10px 32px rgba(0,0,0,0.65);padding:10px 12px;z-index:120;min-width:220px;">
+            <div style="font-size:10px;letter-spacing:0.08em;text-transform:uppercase;color:#666;margin-bottom:6px;">Trigger when control state is…</div>
+            <select id="pinControlTriggerSelect" style="width:100%;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:7px 8px;color:#ddd;font-size:12px;">
+              <option value="">Auto</option>
+              <option value="unlocked">unlocked</option>
+              <option value="open">open</option>
+              <option value="on">on</option>
+            </select>
+            <div style="font-size:10px;color:#555;margin-top:6px;line-height:1.25;">Auto infers: lock→unlocked, cover→open, switch→on. Unknown domains do nothing unless overridden.</div>
+          </div>
+        </div>
+
+        <div style="margin-top:10px;">
+          <label style="font-size:12px;color:#aaa;">Linked zones</label>
+          <div id="pinZonesList" style="margin-top:4px;border:1px solid rgba(255,255,255,0.10);border-radius:10px;padding:6px 8px;max-height:140px;overflow:auto;">
+            ${zones.map(z => {
+              const checked = doorPinZoneIds(pin).includes(z.id);
+              return `<label style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12px;color:${checked ? '#ddd' : '#aaa'};">
+                <input type="checkbox" class="pinZoneLinkChk" data-zone-id="${escapeHtml(z.id)}" ${checked ? 'checked' : ''} style="accent-color:#0096ff;">
+                <span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(z.name || z.id)}</span>
+              </label>`;
+            }).join('')}
+          </div>
+          <div style="font-size:10px;color:#555;margin-top:3px;">Door appears and triggers in all checked zones.</div>
+        </div>
+
         <div style="margin-top:10px;">
           <label style="font-size:12px;color:#aaa;">Door type</label>
           <div style="display:flex;gap:6px;margin-top:4px;flex-wrap:wrap;">
@@ -4704,11 +4874,50 @@ function renderZonesEditor(force = false) {
         });
 
         wireEntitySearch('pinControlEntityInput', 'pinCtrlResults',
-          ['lock.', 'switch.', 'button.'],
+          ['lock.', 'cover.', 'switch.', 'input_boolean.', 'button.'],
           val => { pin.control_entity = val; savePin(); renderZones(); }
         );
         document.getElementById('pinControlEntityInput')?.addEventListener('blur', e => {
           pin.control_entity = e.target.value.trim() || null; savePin(); renderZones();
+        });
+
+        const ctlChk = document.getElementById('pinControlCountsChk');
+        if (ctlChk) {
+          ctlChk.addEventListener('change', e => { pin.control_counts_as_trigger = !!e.target.checked; savePin(); renderZones(); });
+        }
+        const cog = document.getElementById('pinControlTriggerCog');
+        const pop = document.getElementById('pinControlTriggerPopover');
+        const sel = document.getElementById('pinControlTriggerSelect');
+        if (sel) {
+          const v = pin.control_trigger_state;
+          sel.value = (v === null || v === undefined) ? '' : String(v);
+          sel.addEventListener('change', () => { pin.control_trigger_state = sel.value ? sel.value : null; savePin(); renderZones(); });
+        }
+        if (cog && pop) {
+          cog.addEventListener('click', e => { e.stopPropagation(); pop.style.display = (pop.style.display === 'none' || !pop.style.display) ? 'block' : 'none'; });
+          document.addEventListener('pointerdown', function _close(e) {
+            if (!pop) return;
+            if (pop.style.display === 'none') return;
+            if (pop.contains(e.target) || cog.contains(e.target)) return;
+            pop.style.display = 'none';
+          }, true);
+        }
+        document.querySelectorAll('.pinZoneLinkChk').forEach(chk => {
+          chk.addEventListener('change', () => {
+            const zid = chk.dataset.zoneId;
+            const current = new Set(doorPinZoneIds(pin));
+            if (chk.checked) current.add(zid); else current.delete(zid);
+            let next = Array.from(current).filter(Boolean);
+            if (!next.length) {
+              const fallback = doorPinPrimaryZoneId(pin) || zones[0]?.id || null;
+              if (fallback) next = [fallback];
+            }
+            pin.zone_ids = next;
+            pin.zone_id  = next[0];
+            savePin();
+            renderZones();
+            if (!current.size && next.length) renderZonesEditor(true);
+          });
         });
 
         const rotEl  = document.getElementById('pinRotationInput');
@@ -5111,6 +5320,10 @@ function renderZonesEditor(force = false) {
       });
     });
 
+    document.querySelectorAll(".door-pin-links-btn").forEach(btn => {
+      btn.addEventListener("click", e => { e.stopPropagation(); openDoorLinksPopover(btn.dataset.id, btn); });
+    });
+
     document.querySelectorAll(".door-pin-ghost").forEach(btn => {
       btn.addEventListener("click", e => {
         e.stopPropagation();
@@ -5197,6 +5410,7 @@ function renderZonesEditor(force = false) {
 /* ─── DEVICE ROW HELPER ───────────────────────────────────── */
 // Door pin summary row in zone editor Doors tab
 function doorPinRow(pin, zone) {
+  normalizeDoorPin(pin);
   const sState = haStates[pin.sensor_entity]?.state;
   const isOpen = ['on','open','opening','detected','unlocked'].includes(String(sState || '').toLowerCase());
   const excluded = !!(zone && pin.sensor_entity && (zone.ha_excluded_entities || []).includes(pin.sensor_entity));
@@ -5209,15 +5423,21 @@ function doorPinRow(pin, zone) {
   const ghostBtn = zone?.ha_area_id && pin.sensor_entity
     ? `<button class="door-pin-ghost" data-entity-id="${escapeHtml(pin.sensor_entity)}" title="${excluded ? 'Restore entity' : 'Ghost entity — keep visible but ignore in Overwatch'}" style="background:none;border:1px solid ${excluded ? 'rgba(255,149,0,0.5)' : 'rgba(255,255,255,0.12)'};border-radius:4px;padding:2px 6px;cursor:pointer;font-size:10px;color:${excluded ? '#ff9500' : '#555'};flex-shrink:0;">${excluded ? '👻 Hidden' : '👻'}</button>`
     : '';
-  return `<div class="ha-entity-row" data-door-pin-id="${escapeHtml(pin.id)}" style="flex-wrap:wrap;gap:4px;${excluded ? 'opacity:0.45;' : ''}">
+  const zCount = doorPinZoneIds(pin).length;
+  const linkBtn = zCount > 1
+    ? `<button class="door-pin-links-btn" data-id="${escapeHtml(pin.id)}" title="View linked zones" style="background:none;border:1px solid rgba(255,255,255,0.12);border-radius:4px;padding:2px 6px;cursor:pointer;font-size:10px;color:#666;flex-shrink:0;">🔗 ${zCount}</button>`
+    : '';
+  return `<div class="ha-entity-row" data-door-pin-id="${escapeHtml(pin.id)}" style="flex-wrap:wrap;gap:6px;${excluded ? 'opacity:0.45;' : ''}">
     <div class="ha-entity-state" style="background:${colour};flex-shrink:0;"></div>
     <span class="ha-entity-id" title="${escapeHtml(pin.sensor_entity||'')}">${escapeHtml(pin.name || pin.sensor_entity?.split('.').pop() || 'Door')}</span>
     <span class="ha-entity-type" style="font-size:10px;color:#555;">${excluded ? 'GHOSTED' : sState ? (isOpen?'OPEN':'CLOSED') : '—'}</span>
+    ${linkBtn}
     ${ghostBtn}
     ${placeBtn}
     <button class="door-pin-delete-btn" data-id="${escapeHtml(pin.id)}" style="background:none;border:none;color:#ff3b30;cursor:pointer;font-size:12px;flex-shrink:0;">✕</button>
   </div>`;
 }
+
 
 
 function deviceRow(entityId, devType, zone) {
@@ -8426,9 +8646,9 @@ async function syncZoneFromHAArea(zone, opts = {}) {
   const beforeGhosts = zone.ha_excluded_entities || [];
   zone.ha_excluded_entities = beforeGhosts.filter(eid => allAreaEntityIds.has(eid));
   removed += beforeGhosts.length - zone.ha_excluded_entities.length;
-  const staleDoorPins = doorPins.filter(p => p.zone_id === zone.id && p.sensor_entity && !byType.doors.has(p.sensor_entity));
+  const staleDoorPins = doorPins.filter(p => doorPinZoneIds(p).includes(zone.id) && p.sensor_entity && !byType.doors.has(p.sensor_entity));
   for (const p of staleDoorPins) { doorPins = doorPins.filter(dp => dp.id !== p.id); await fetch(apiPath('ow/delete-door-pin'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: p.id }) }).catch(() => null); removed++; }
-  for (const e of areaEntities.filter(e => byType.doors.has(e.entity_id))) if (!doorPins.some(p => p.sensor_entity === e.entity_id && p.zone_id === zone.id)) { const newPin = { id: 'door_' + Date.now() + '_' + Math.random().toString(36).slice(2,6), name: haStates[e.entity_id]?.attributes?.friendly_name || e.name || e.entity_id.split('.').pop().replace(/_/g,' '), sensor_entity: e.entity_id, control_entity: null, zone_id: zone.id, floor_id: zone.floor_id || null, x: null, y: null, rotation: 0 }; doorPins.push(newPin); await saveDoorPin(newPin); added++; }
+  for (const e of areaEntities.filter(e => byType.doors.has(e.entity_id))) if (!doorPins.some(p => p.sensor_entity === e.entity_id && doorPinZoneIds(p).includes(zone.id))) { const newPin = { id: 'door_' + Date.now() + '_' + Math.random().toString(36).slice(2,6), name: haStates[e.entity_id]?.attributes?.friendly_name || e.name || e.entity_id.split('.').pop().replace(/_/g,' '), sensor_entity: e.entity_id, control_entity: null, zone_id: zone.id, floor_id: zone.floor_id || null, x: null, y: null, rotation: 0 }; doorPins.push(newPin); await saveDoorPin(newPin); added++; }
   await saveZone(zone); subscribeHAEntities(); renderZones(); if (window.renderCameraStatusBar) window.renderCameraStatusBar(); if (window.camUpdate) window.camUpdate();
   showToast(`Synced HA area: ${added} added, ${removed} removed ✓`, (added || removed) ? 'ok' : 'info');
 }
