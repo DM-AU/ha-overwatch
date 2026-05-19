@@ -110,14 +110,16 @@ function doorPinPrimaryZoneId(pin) {
 
 function normalizeDoorPin(pin) {
   if (!pin || typeof pin !== 'object') return pin;
+  // Migrate legacy single-zone to multi-zone
   if ((!Array.isArray(pin.zone_ids) || !pin.zone_ids.length) && pin.zone_id) {
     pin.zone_ids = [pin.zone_id];
   }
   if (Array.isArray(pin.zone_ids) && pin.zone_ids.length && !pin.zone_id) {
     pin.zone_id = pin.zone_ids[0];
   }
+  // Default new fields
   if (pin.control_counts_as_trigger == null) pin.control_counts_as_trigger = false;
-  if (pin.control_trigger_state === undefined) pin.control_trigger_state = null;
+  if (pin.control_trigger_state === undefined) pin.control_trigger_state = null; // null = Auto
   return pin;
 }
 
@@ -159,6 +161,7 @@ function doorPinTriggerSourceEntity(pin) {
   return '';
 }
 
+// Linked zones popover (used in editor + runtime zone popup)
 let _doorLinksPopoverEl = null;
 function closeDoorLinksPopover() {
   if (_doorLinksPopoverEl) { _doorLinksPopoverEl.remove(); _doorLinksPopoverEl = null; }
@@ -4325,6 +4328,7 @@ function renderZonesEditor(force = false) {
             <div id="pinCtrlResults" style="display:none;position:absolute;top:100%;left:0;right:0;background:#1a1a1a;border:1px solid rgba(255,255,255,0.15);border-radius:6px;z-index:100;max-height:160px;overflow-y:auto;"></div>
           </div>
         </div>
+
         <div style="position:relative;margin-top:6px;">
           <div style="display:flex;align-items:center;gap:8px;">
             <label style="font-size:12px;color:#aaa;flex:1;display:flex;align-items:center;gap:8px;">
@@ -4347,16 +4351,10 @@ function renderZonesEditor(force = false) {
 
         <div style="margin-top:10px;">
           <label style="font-size:12px;color:#aaa;">Linked zones</label>
-          <div id="pinZonesList" style="margin-top:4px;border:1px solid rgba(255,255,255,0.10);border-radius:10px;padding:6px 8px;max-height:140px;overflow:auto;">
-            ${zones.map(z => {
-              const checked = doorPinZoneIds(pin).includes(z.id);
-              return `<label style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12px;color:${checked ? '#ddd' : '#aaa'};">
-                <input type="checkbox" class="pinZoneLinkChk" data-zone-id="${escapeHtml(z.id)}" ${checked ? 'checked' : ''} style="accent-color:#0096ff;">
-                <span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(z.name || z.id)}</span>
-              </label>`;
-            }).join('')}
-          </div>
-          <div style="font-size:10px;color:#555;margin-top:3px;">Door appears and triggers in all checked zones.</div>
+          <input id="pinZonesSearchInput" type="text" value="" placeholder="Search zones…" autocomplete="off"
+            style="width:100%;margin-top:6px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:6px 8px;color:#ccc;font-size:12px;outline:none;">
+          <div id="pinZonesList" style="margin-top:6px;border:1px solid rgba(255,255,255,0.10);border-radius:10px;padding:6px 8px;max-height:160px;overflow:auto;"></div>
+          <div style="font-size:10px;color:#555;margin-top:3px;">Checked zones float to the top. List is alphabetical.</div>
         </div>
 
         <div style="margin-top:10px;">
@@ -4588,7 +4586,7 @@ function renderZonesEditor(force = false) {
               <div style="font-size:11px;color:#555;padding:6px 0 8px;">Place door &amp; window sensors on the map. Each has a sensor (open/closed) and an optional control entity (lock/switch). Use the search below to add a sensor without placing it on the map.</div>
               <div class="entity-search-wrap"><input type="text" id="doorSearchInput" class="entity-search-input" placeholder="Search doors &amp; windows…" autocomplete="off">
               <div class="entity-search-results" id="doorSearchResults" style="display:none;"></div></div>
-              <div class="ha-entity-list" id="zoneDoorList">${doorPins.filter(p=>p.zone_id===selectedZone.id).map(p=>doorPinRow(p, selectedZone)).join("")}</div>
+              <div class="ha-entity-list" id="zoneDoorList">${doorPins.filter(p=>doorPinZoneIds(p).includes(selectedZone.id)).map(p=>doorPinRow(p, selectedZone)).join("")}</div>
               <button id="addDoorPinBtn" style="margin-top:8px;width:100%;background:rgba(0,150,255,0.1);border:1px solid rgba(0,150,255,0.3);color:#0096ff;border-radius:6px;padding:6px;cursor:pointer;font-size:12px;">+ Place Door or Window on Map</button>
             </div>
           </div>
@@ -4881,20 +4879,33 @@ function renderZonesEditor(force = false) {
           pin.control_entity = e.target.value.trim() || null; savePin(); renderZones();
         });
 
+        // Control trigger options
         const ctlChk = document.getElementById('pinControlCountsChk');
         if (ctlChk) {
-          ctlChk.addEventListener('change', e => { pin.control_counts_as_trigger = !!e.target.checked; savePin(); renderZones(); });
+          ctlChk.addEventListener('change', e => {
+            pin.control_counts_as_trigger = !!e.target.checked;
+            savePin();
+            renderZones();
+          });
         }
+
         const cog = document.getElementById('pinControlTriggerCog');
         const pop = document.getElementById('pinControlTriggerPopover');
         const sel = document.getElementById('pinControlTriggerSelect');
         if (sel) {
           const v = pin.control_trigger_state;
           sel.value = (v === null || v === undefined) ? '' : String(v);
-          sel.addEventListener('change', () => { pin.control_trigger_state = sel.value ? sel.value : null; savePin(); renderZones(); });
+          sel.addEventListener('change', () => {
+            pin.control_trigger_state = sel.value ? sel.value : null;
+            savePin();
+            renderZones();
+          });
         }
         if (cog && pop) {
-          cog.addEventListener('click', e => { e.stopPropagation(); pop.style.display = (pop.style.display === 'none' || !pop.style.display) ? 'block' : 'none'; });
+          cog.addEventListener('click', e => {
+            e.stopPropagation();
+            pop.style.display = (pop.style.display === 'none' || !pop.style.display) ? 'block' : 'none';
+          });
           document.addEventListener('pointerdown', function _close(e) {
             if (!pop) return;
             if (pop.style.display === 'none') return;
@@ -4902,23 +4913,68 @@ function renderZonesEditor(force = false) {
             pop.style.display = 'none';
           }, true);
         }
-        document.querySelectorAll('.pinZoneLinkChk').forEach(chk => {
-          chk.addEventListener('change', () => {
-            const zid = chk.dataset.zoneId;
-            const current = new Set(doorPinZoneIds(pin));
-            if (chk.checked) current.add(zid); else current.delete(zid);
-            let next = Array.from(current).filter(Boolean);
-            if (!next.length) {
-              const fallback = doorPinPrimaryZoneId(pin) || zones[0]?.id || null;
-              if (fallback) next = [fallback];
-            }
-            pin.zone_ids = next;
-            pin.zone_id  = next[0];
-            savePin();
-            renderZones();
-            if (!current.size && next.length) renderZonesEditor(true);
+
+        // Linked zones list (alphabetical, search, checked first)
+        const zsInp = document.getElementById('pinZonesSearchInput');
+        const zsList = document.getElementById('pinZonesList');
+        function _zoneLabel(z) { return String((z?.name || z?.id || '')).trim(); }
+        function renderLinkedZonesList() {
+          if (!zsList) return;
+          const q = String(zsInp?.value || '').trim().toLowerCase();
+          const beforeScroll = zsList.scrollTop;
+          const linked = new Set(doorPinZoneIds(pin));
+          const items = [...zones].map(z => ({
+            z,
+            id: z.id,
+            name: _zoneLabel(z),
+            checked: linked.has(z.id),
+          }))
+          .filter(x => !q || x.id.toLowerCase().includes(q) || x.name.toLowerCase().includes(q))
+          .sort((a,b) => {
+            if (a.checked !== b.checked) return a.checked ? -1 : 1;
+            return a.name.localeCompare(b.name);
           });
-        });
+
+          zsList.innerHTML = items.map(x => {
+            const floor = floors.find(f => f.id === x.z.floor_id)?.name || '';
+            const floorTag = floor ? `<span style="font-size:10px;color:#555;margin-left:6px;">${escapeHtml(floor)}</span>` : '';
+            return `<label style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12px;color:${x.checked ? '#ddd' : '#aaa'};">
+              <input type="checkbox" class="pinZoneLinkChk" data-zone-id="${escapeHtml(x.id)}" ${x.checked ? 'checked' : ''} style="accent-color:#0096ff;">
+              <span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;">${escapeHtml(x.name)}</span>${floorTag}
+            </label>`;
+          }).join('') || `<div style="padding:6px 2px;color:#555;font-size:12px;">No matches</div>`;
+
+          zsList.scrollTop = beforeScroll;
+
+          zsList.querySelectorAll('.pinZoneLinkChk').forEach(chk => {
+            chk.addEventListener('change', () => {
+              const zid = chk.dataset.zoneId;
+              const current = new Set(doorPinZoneIds(pin));
+              if (chk.checked) current.add(zid); else current.delete(zid);
+
+              // Keep legacy zone_id stable when possible (compat for any remaining code reading zone_id)
+              const primary = (pin.zone_id && current.has(pin.zone_id)) ? pin.zone_id : (Array.from(current)[0] || null);
+              let rest = Array.from(current).filter(id => id && id !== primary);
+              rest.sort((a,b) => _zoneLabel(zones.find(z=>z.id===a)).localeCompare(_zoneLabel(zones.find(z=>z.id===b))));
+
+              let next = primary ? [primary, ...rest] : rest;
+              if (!next.length) {
+                const fallback = pin.zone_id || zones[0]?.id || null;
+                if (fallback) next = [fallback];
+              }
+
+              pin.zone_ids = next;
+              pin.zone_id  = next[0];
+              savePin();
+              renderZones();
+              renderLinkedZonesList();
+            });
+          });
+        }
+
+        zsInp?.addEventListener('input', () => renderLinkedZonesList());
+        renderLinkedZonesList();
+
 
         const rotEl  = document.getElementById('pinRotationInput');
         const rotVal = document.getElementById('pinRotationVal');
@@ -5140,7 +5196,7 @@ function renderZonesEditor(force = false) {
       if (oldAreaId && oldAreaId !== newAreaId) {
         const oldAreaEntities = new Set(haEntitiesForArea(oldAreaId).map(e => e.entity_id));
         // Also include door pins from old area
-        const oldDoorPins = doorPins.filter(p => p.zone_id === selectedZone.id && oldAreaEntities.has(p.sensor_entity));
+        const oldDoorPins = doorPins.filter(p => doorPinZoneIds(p).includes(selectedZone.id) && oldAreaEntities.has(p.sensor_entity));
         for (const pin of oldDoorPins) {
           doorPins.splice(doorPins.indexOf(pin), 1);
           await fetch(apiPath('ow/delete-door-pin'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: pin.id }) });
@@ -5416,6 +5472,8 @@ function doorPinRow(pin, zone) {
   const excluded = !!(zone && pin.sensor_entity && (zone.ha_excluded_entities || []).includes(pin.sensor_entity));
   const colour = excluded ? '#777' : sState === undefined ? '#555' : isOpen ? '#ff9500' : '#34c759';
   const isPlaced = pin.x != null && pin.y != null;
+  const zCount = doorPinZoneIds(pin).length;
+
   const editBtn = `<button class="door-pin-edit-btn" data-id="${escapeHtml(pin.id)}" style="background:none;border:1px solid rgba(255,255,255,0.15);border-radius:4px;padding:2px 6px;cursor:pointer;font-size:10px;color:#888;flex-shrink:0;">Edit</button>`;
   const placeBtn = !isPlaced
     ? `<button class="door-pin-place-btn" data-id="${escapeHtml(pin.id)}" style="background:none;border:1px solid rgba(0,150,255,0.4);border-radius:4px;padding:2px 6px;cursor:pointer;font-size:10px;color:#4db8ff;flex-shrink:0;">📍 Place</button>${editBtn}`
@@ -5423,10 +5481,10 @@ function doorPinRow(pin, zone) {
   const ghostBtn = zone?.ha_area_id && pin.sensor_entity
     ? `<button class="door-pin-ghost" data-entity-id="${escapeHtml(pin.sensor_entity)}" title="${excluded ? 'Restore entity' : 'Ghost entity — keep visible but ignore in Overwatch'}" style="background:none;border:1px solid ${excluded ? 'rgba(255,149,0,0.5)' : 'rgba(255,255,255,0.12)'};border-radius:4px;padding:2px 6px;cursor:pointer;font-size:10px;color:${excluded ? '#ff9500' : '#555'};flex-shrink:0;">${excluded ? '👻 Hidden' : '👻'}</button>`
     : '';
-  const zCount = doorPinZoneIds(pin).length;
   const linkBtn = zCount > 1
     ? `<button class="door-pin-links-btn" data-id="${escapeHtml(pin.id)}" title="View linked zones" style="background:none;border:1px solid rgba(255,255,255,0.12);border-radius:4px;padding:2px 6px;cursor:pointer;font-size:10px;color:#666;flex-shrink:0;">🔗 ${zCount}</button>`
     : '';
+
   return `<div class="ha-entity-row" data-door-pin-id="${escapeHtml(pin.id)}" style="flex-wrap:wrap;gap:6px;${excluded ? 'opacity:0.45;' : ''}">
     <div class="ha-entity-state" style="background:${colour};flex-shrink:0;"></div>
     <span class="ha-entity-id" title="${escapeHtml(pin.sensor_entity||'')}">${escapeHtml(pin.name || pin.sensor_entity?.split('.').pop() || 'Door')}</span>
