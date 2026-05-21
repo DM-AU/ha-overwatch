@@ -3890,7 +3890,22 @@ async function init() {
     }
   }
 
-  await loadZones();
+  
+  // Alarms button — admin only (hidden in direct/public mode)
+  const alarmsBtn = document.getElementById("alarmsBtn");
+  if (alarmsBtn) {
+    if (IS_DIRECT_MODE) {
+      alarmsBtn.style.display = "none";
+    } else {
+      alarmsBtn.onclick = () => {
+        if (window.OW_Alarms?.toggle) {
+          window.OW_Alarms.toggle();
+        }
+      };
+    }
+  }
+
+await loadZones();
   await loadGroups();
   await loadFloors();   // sets activeFloorId, loads correct floor image, calls initFloorplan
   await loadLights();
