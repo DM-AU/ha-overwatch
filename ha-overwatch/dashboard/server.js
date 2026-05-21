@@ -216,6 +216,33 @@ function saveFloors(floors) {
   bumpDataVersion();
 }
 
+// ── Alarms (config/alarms.json) ─────────────────────────────
+const ALARMS_FILE = () => path.join(DATA_DIR, "config", "alarms.json");
+function defaultAlarms() {
+  return [
+    { id: "away", name: "Away", role: "away", builtin: true, locked: true, default_armed: true,
+      members: { floor_ids: ["*"], group_ids: ["*"], zone_ids: ["*"] } },
+    { id: "home", name: "Home", role: "home", builtin: true, locked: false, default_armed: false,
+      members: { floor_ids: [], group_ids: [], zone_ids: [] } },
+  ];
+}
+function loadAlarms() {
+  try {
+    const txt = fs.readFileSync(ALARMS_FILE(), "utf8");
+    const data = JSON.parse(txt);
+    const alarms = Array.isArray(data) ? data : (data.alarms || []);
+    return alarms.length ? alarms : defaultAlarms();
+  } catch {
+    return defaultAlarms();
+  }
+}
+function saveAlarms(alarms) {
+  const p = ALARMS_FILE();
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, JSON.stringify(Array.isArray(alarms) ? alarms : [], null, 2), "utf8");
+  bumpDataVersion();
+}
+
 /* ─── GROUPS ──────────────────────────────────────────────── */
 function loadGroups() {
   try {
@@ -642,6 +669,21 @@ const server = http.createServer(async (req, res) => {
     const f = path.join(DATA_DIR, "config", "arm_allowed_ips.json");
     try { json(res, JSON.parse(fs.readFileSync(f, "utf8"))); }
     catch { json(res, { ips: [] }); }
+    return;
+  }
+
+  /* ── /ow/alarms — alarm definitions ─────────────────────── */
+  if (pathname === "/ow/alarms" && req.method === "GET") {
+    json(res, loadAlarms());
+    return;
+  }
+  if (pathname === "/ow/alarms" && req.method === "POST") {
+    try {
+      const body = await readBody(req);
+      const alarms = Array.isArray(body) ? body : (body?.alarms || []);
+      saveAlarms(alarms);
+      json(res, { ok: true });
+    } catch (e) { err(res, e.message, 500); }
     return;
   }
 
@@ -1266,6 +1308,13 @@ const server = http.createServer(async (req, res) => {
             return z ? (nameSlug(z.name) || zid) : zid;
           }),
         })),
+        alarms: loadAlarms().map(a => ({
+          id:       nameSlug(a.name) || a.id,
+          name:     a.name || a.id,
+          raw_id:   a.id,
+          builtin:  !!a.builtin,
+          role:     a.role || null,
+        })),
         camera_groups: groups
           .filter(g => (g.zone_ids || []).some(zid =>
             zones.find(z => z.id === zid && (z.cameras || []).length > 0)))
@@ -1584,6 +1633,8 @@ async def async_setup_entry(
         entities = []
         # Master (always one)
         entities.append(OverwatchMasterSwitch(coordinator))
+        for a in data.get("alarms", []):
+            entities.append(OverwatchAlarmSwitch(coordinator, a))
         for g in data.get("groups", []):
             entities.append(OverwatchGroupSwitch(coordinator, g))
         for z in data.get("zones", []):
@@ -1691,6 +1742,16 @@ class OverwatchMasterSwitch(OWSwitch):
             unique_id="overwatch_zone_master",
             name="Overwatch Zone Master",
             icon="mdi:shield-home")
+
+
+class OverwatchAlarmSwitch(OWSwitch):
+    def __init__(self, c, a):
+        aid = a["id"]
+        super().__init__(c,
+            entity_id=f"switch.overwatch_alarm_{aid}",
+            unique_id=f"overwatch_alarm_{aid}",
+            name=f"Alarm: {a.get('name', aid)}",
+            icon="mdi:shield-alert")
 
 
 class OverwatchGroupSwitch(OWSwitch):

@@ -3898,9 +3898,7 @@ async function init() {
       alarmsBtn.style.display = "none";
     } else {
       alarmsBtn.onclick = () => {
-        if (window.OW_Alarms?.toggle) {
-          window.OW_Alarms.toggle();
-        }
+        if (window.OW_Alarms?.toggle) window.OW_Alarms.toggle();
       };
     }
   }
