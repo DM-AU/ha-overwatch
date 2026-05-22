@@ -1,7 +1,12 @@
 /* ================================================================
  * HA-Overwatch — ow-alarms.js
- * v0.05.04 hotfix: selector cascade UX, editable Away name,
- * Home default all zones, collapsed selector tree, faster HA reload request.
+ * v0.05.05A: Effective alarm state + suppression reason display.
+ *
+ * Scope:
+ * - Frontend-only validation layer.
+ * - Calculates selected / active / suppressed zones per alarm.
+ * - Displays suppression reasons in Alarm Manager and editor.
+ * - No trigger execution yet.
  * ================================================================ */
 (function () {
   'use strict';
@@ -30,10 +35,11 @@
 
   function m(a) { a.members ||= {}; a.members.floor_ids ||= []; a.members.group_ids ||= []; a.members.zone_ids ||= []; return a.members; }
   function hasWildcard(mem) { return [mem?.floor_ids, mem?.group_ids, mem?.zone_ids].some(arr => Array.isArray(arr) && arr.includes('*')); }
-  function clearParents(mem) { mem.floor_ids = []; mem.group_ids = []; mem.zone_ids = (mem.zone_ids || []).filter(x => x !== '*'); }
   function explicitZoneIds(mem) { return new Set((mem.zone_ids || []).filter(x => x !== '*')); }
   function setExplicitZoneIds(mem, ids) { mem.floor_ids = []; mem.group_ids = []; mem.zone_ids = [...new Set(ids)].filter(Boolean); }
   function allZoneIds() { return zones().map(z => z.id); }
+  function zoneName(zoneId) { return zones().find(z => z.id === zoneId)?.name || zoneId; }
+  function alarmName(alarmId) { return alarms.find(a => a.id === alarmId)?.name || alarmId; }
 
   function haSwitchOn(entityId) {
     const st = haStates()[entityId];
@@ -69,16 +75,11 @@
       alarms.unshift({ id: 'home', name: 'Home', role: 'home', builtin: true, default_armed: false, configured: false, members: { floor_ids: [], group_ids: [], zone_ids: allZoneIds() } });
     }
     alarms.forEach(a => {
-      a.id ||= uid(); a.name ||= a.id; m(a);
+      a.id ||= uid();
+      a.name ||= a.id;
       const mem = m(a);
-      // Convert legacy wildcard alarms to explicit zones for editor UX.
       if (hasWildcard(mem)) setExplicitZoneIds(mem, allZoneIds());
-      // Existing Home with no selections came from old default. Treat as unconfigured and default to all zones once.
-      if (a.role === 'home' && !a.configured && !mem.floor_ids.length && !mem.group_ids.length && !mem.zone_ids.length) {
-        setExplicitZoneIds(mem, allZoneIds());
-      }
-      // Existing Away legacy wildcard/empty becomes explicit all, but remains user-editable.
-      if (a.role === 'away' && !a.configured && !mem.floor_ids.length && !mem.group_ids.length && !mem.zone_ids.length) {
+      if ((a.role === 'home' || a.role === 'away') && !a.configured && !mem.floor_ids.length && !mem.group_ids.length && !mem.zone_ids.length) {
         setExplicitZoneIds(mem, allZoneIds());
       }
     });
@@ -96,7 +97,6 @@
   async function saveAlarms() {
     ensureDefaults();
     await fetch(apiPath('ow/alarms'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(alarms, null, 2) });
-    // Entity creation/rename is HA-side, but trigger the reload as aggressively as the current backend supports.
     if (typeof window.scheduleHAReload === 'function') window.scheduleHAReload(250);
     else fetch(apiPath('ow/reload'), { method: 'POST' }).catch(() => {});
   }
@@ -105,23 +105,77 @@
     const mem = m(a);
     if (hasWildcard(mem)) return zones().slice();
     const out = new Map();
-    (mem.floor_ids || []).forEach(fid => zonesForFloor(fid).forEach(z => out.set(z.id, z))); // backward compatibility only
-    (mem.group_ids || []).forEach(gid => zonesForGroup(gid).forEach(z => out.set(z.id, z))); // backward compatibility only
+    (mem.floor_ids || []).forEach(fid => zonesForFloor(fid).forEach(z => out.set(z.id, z))); // backward compatibility
+    (mem.group_ids || []).forEach(gid => zonesForGroup(gid).forEach(z => out.set(z.id, z))); // backward compatibility
     (mem.zone_ids || []).forEach(zid => { const z = zones().find(x => x.id === zid); if (z) out.set(z.id, z); });
     return [...out.values()];
   }
 
-  function effectiveState(a) {
-    if (!alarmArmed(a)) return { status: 'disarmed', zones: resolveAlarmZones(a), suppressed: [] };
-    const myZones = resolveAlarmZones(a);
-    const myIds = new Set(myZones.map(z => z.id));
-    const suppressed = new Set();
-    alarms.forEach(other => {
-      if (other.id === a.id || alarmArmed(other)) return;
-      resolveAlarmZones(other).forEach(z => { if (myIds.has(z.id)) suppressed.add(z.id); });
+  function getAlarmEffectiveState(a) {
+    const selectedZones = resolveAlarmZones(a);
+    const selectedZoneIds = selectedZones.map(z => z.id);
+    const selectedSet = new Set(selectedZoneIds);
+    const suppressions = [];
+    const suppressedSet = new Set();
+
+    if (!alarmArmed(a)) {
+      return {
+        state: 'disarmed',
+        selectedZoneIds,
+        activeZoneIds: [],
+        suppressedZoneIds: [],
+        suppressions: [],
+      };
+    }
+
+    selectedZones.forEach(z => {
+      if (!zoneArmed(z)) {
+        suppressedSet.add(z.id);
+        suppressions.push({
+          zoneId: z.id,
+          reason: 'manual_zone_disarm',
+          source: zoneSwitchId(z),
+          label: `${z.name || z.id} suppressed by manual zone disarm`,
+        });
+      }
     });
-    myZones.forEach(z => { if (!zoneArmed(z)) suppressed.add(z.id); });
-    return { status: suppressed.size ? 'armed_partial' : 'armed_full', zones: myZones, suppressed: [...suppressed] };
+
+    alarms.forEach(other => {
+      if (other.id === a.id) return;
+      if (alarmArmed(other)) return;
+      resolveAlarmZones(other).forEach(z => {
+        if (!selectedSet.has(z.id)) return;
+        suppressedSet.add(z.id);
+        suppressions.push({
+          zoneId: z.id,
+          reason: 'overlap_disarmed_alarm',
+          source: other.id,
+          label: `${z.name || z.id} suppressed by disarmed alarm ${other.name || other.id}`,
+        });
+      });
+    });
+
+    const suppressedZoneIds = [...suppressedSet];
+    const activeZoneIds = selectedZoneIds.filter(id => !suppressedSet.has(id));
+    return {
+      state: suppressedZoneIds.length ? 'armed_partial' : 'armed_full',
+      selectedZoneIds,
+      activeZoneIds,
+      suppressedZoneIds,
+      suppressions,
+    };
+  }
+
+  // Kept as compatibility alias for older code paths in this module.
+  function effectiveState(a) {
+    const eff = getAlarmEffectiveState(a);
+    return {
+      status: eff.state,
+      zones: eff.selectedZoneIds.map(id => zones().find(z => z.id === id)).filter(Boolean),
+      suppressed: eff.suppressedZoneIds,
+      suppressions: eff.suppressions,
+      activeZoneIds: eff.activeZoneIds,
+    };
   }
 
   function injectStyles() {
@@ -130,8 +184,9 @@
     s.id = 'ow-alarms-style';
     s.textContent = `
       .owa-btn{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);color:#aaa;border-radius:8px;padding:7px 12px;cursor:pointer;font-size:12px;font-weight:600}.owa-btn.primary{background:#0064d2;color:#fff}.owa-btn:disabled{opacity:.35;cursor:default}
-      .owa-card{display:flex;align-items:center;gap:12px;background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.08);border-radius:10px;padding:12px;margin:0 0 8px;cursor:pointer}.owa-card:hover{background:rgba(255,255,255,.055)}
-      .owa-input{width:100%;box-sizing:border-box;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);border-radius:7px;color:#fff;padding:8px 10px;outline:none}.owa-muted{font-size:11px;color:#555}.owa-tree{background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.08);border-radius:10px;padding:8px;max-height:58vh;overflow:auto}.owa-row{display:flex;align-items:center;gap:8px;padding:4px 4px}.owa-row span{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.owa-exp{width:22px;height:22px;border:0;background:transparent;color:#aaa;cursor:pointer}.owa-exp.leaf{visibility:hidden}.owa-pill{font-size:10px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;border-radius:999px;padding:3px 8px;border:1px solid rgba(255,255,255,.12)}`;
+      .owa-card{display:flex;align-items:flex-start;gap:12px;background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.08);border-radius:10px;padding:12px;margin:0 0 8px;cursor:pointer}.owa-card:hover{background:rgba(255,255,255,.055)}
+      .owa-input{width:100%;box-sizing:border-box;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);border-radius:7px;color:#fff;padding:8px 10px;outline:none}.owa-muted{font-size:11px;color:#555}.owa-tree{background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.08);border-radius:10px;padding:8px;max-height:44vh;overflow:auto}.owa-row{display:flex;align-items:center;gap:8px;padding:4px 4px}.owa-row span{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.owa-exp{width:22px;height:22px;border:0;background:transparent;color:#aaa;cursor:pointer}.owa-exp.leaf{visibility:hidden}.owa-pill{font-size:10px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;border-radius:999px;padding:3px 8px;border:1px solid rgba(255,255,255,.12)}
+      .owa-counts{display:flex;gap:8px;flex-wrap:wrap;margin-top:6px}.owa-count{font-size:10px;color:#999;background:rgba(255,255,255,.045);border:1px solid rgba(255,255,255,.075);border-radius:999px;padding:3px 7px}.owa-supp{margin-top:8px;padding:8px 10px;background:rgba(255,149,0,.07);border:1px solid rgba(255,149,0,.16);border-radius:8px;color:#c8a166;font-size:11px}.owa-supp ul{margin:5px 0 0 16px;padding:0}.owa-supp li{margin:2px 0}.owa-section{background:rgba(255,255,255,.025);border:1px solid rgba(255,255,255,.07);border-radius:10px;padding:10px;margin-top:12px}`;
     document.head.appendChild(s);
   }
 
@@ -140,19 +195,49 @@
     panel = document.createElement('div');
     panel.id = 'owAlarmsPanel';
     panel.style.cssText = 'position:fixed;inset:0;z-index:9600;background:rgba(8,8,10,.98);color:#e0e0e0;font:13px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;display:flex;flex-direction:column;opacity:0;pointer-events:none;transition:opacity .18s ease;';
-    document.body.appendChild(panel); injectStyles();
+    document.body.appendChild(panel);
+    injectStyles();
   }
   function startDynamicRefresh() { stopDynamicRefresh(); refreshTimer = setInterval(() => { if (openState && panel && !draft) renderList(false); }, 1000); }
   function stopDynamicRefresh() { if (refreshTimer) clearInterval(refreshTimer); refreshTimer = null; }
 
-  async function open() { if (!isAdmin()) return; mount(); await loadAlarms(); openState = true; document.getElementById('alarmsBtn')?.classList.add('active'); renderList(true); startDynamicRefresh(); requestAnimationFrame(() => { panel.style.opacity = '1'; panel.style.pointerEvents = 'all'; }); }
-  function close() { openState = false; draft = null; editingId = null; stopDynamicRefresh(); document.getElementById('alarmsBtn')?.classList.remove('active'); if (panel) { panel.style.opacity = '0'; panel.style.pointerEvents = 'none'; setTimeout(() => { panel?.remove(); panel = null; }, 180); } }
+  async function open() {
+    if (!isAdmin()) return;
+    mount();
+    await loadAlarms();
+    openState = true;
+    document.getElementById('alarmsBtn')?.classList.add('active');
+    renderList(true);
+    startDynamicRefresh();
+    requestAnimationFrame(() => { panel.style.opacity = '1'; panel.style.pointerEvents = 'all'; });
+  }
+  function close() {
+    openState = false;
+    draft = null;
+    editingId = null;
+    stopDynamicRefresh();
+    document.getElementById('alarmsBtn')?.classList.remove('active');
+    if (panel) { panel.style.opacity = '0'; panel.style.pointerEvents = 'none'; setTimeout(() => { panel?.remove(); panel = null; }, 180); }
+  }
   function toggle() { openState ? close() : open(); }
 
   function pill(status) {
     if (status === 'armed_full') return '<span class="owa-pill" style="background:rgba(50,215,75,.15);border-color:rgba(50,215,75,.35);color:#32d74b">Armed</span>';
     if (status === 'armed_partial') return '<span class="owa-pill" style="background:rgba(255,149,0,.15);border-color:rgba(255,149,0,.35);color:#ff9500">Armed Partial</span>';
     return '<span class="owa-pill" style="background:rgba(255,255,255,.05);color:#777">Disarmed</span>';
+  }
+
+  function suppressionSummaryHtml(eff, max = 3) {
+    if (!eff.suppressions.length) return '';
+    const unique = [];
+    const seen = new Set();
+    eff.suppressions.forEach(s => {
+      const key = `${s.zoneId}|${s.reason}|${s.source}`;
+      if (!seen.has(key)) { seen.add(key); unique.push(s); }
+    });
+    const shown = unique.slice(0, max);
+    const more = unique.length > max ? `<li>+ ${unique.length - max} more suppression reason(s)</li>` : '';
+    return `<div class="owa-supp"><b>Suppressed:</b><ul>${shown.map(s => `<li>${esc(s.label)}</li>`).join('')}${more}</ul></div>`;
   }
 
   function renderList(resetScroll) {
@@ -164,13 +249,14 @@
     panel.querySelectorAll('[data-edit]').forEach(el => el.onclick = () => { const a = alarms.find(x => x.id === el.dataset.edit); if (!a) return; editingId = a.id; draft = JSON.parse(JSON.stringify(a)); ensureDraftExplicit(); expanded.floors.clear(); expanded.groups.clear(); renderEditor(); });
     panel.querySelectorAll('[data-toggle]').forEach(btn => btn.onclick = e => { e.stopPropagation(); const a = alarms.find(x => x.id === btn.dataset.toggle); if (!a || !canToggle()) return; window.owCallSwitch?.(alarmSwitchId(a), !alarmArmed(a)); setTimeout(() => renderList(false), 250); });
     panel.querySelectorAll('[data-delete]').forEach(btn => btn.onclick = async e => { e.stopPropagation(); const a = alarms.find(x => x.id === btn.dataset.delete); if (!a || a.builtin) return; if (!confirm(`Delete ${a.name}?`)) return; alarms = alarms.filter(x => x.id !== a.id); await saveAlarms(); renderList(true); });
-    const list = panel.querySelector('[data-owa-list]'); if (list && !resetScroll) list.scrollTop = scrollTop;
+    const list = panel.querySelector('[data-owa-list]');
+    if (list && !resetScroll) list.scrollTop = scrollTop;
   }
 
   function cardHtml(a) {
-    const eff = effectiveState(a);
+    const eff = getAlarmEffectiveState(a);
     const dDisabled = a.builtin ? 'disabled' : '';
-    return `<div class="owa-card" data-edit="${esc(a.id)}"><div style="width:32px;height:32px;border-radius:9px;background:rgba(255,255,255,.05);display:flex;align-items:center;justify-content:center">🛡️</div><div style="flex:1;min-width:0"><div style="display:flex;gap:10px;align-items:center"><b>${esc(a.name)}</b>${pill(eff.status)}</div><div class="owa-muted" style="margin-top:4px">${eff.zones.length} zones${eff.suppressed.length ? `, ${eff.suppressed.length} suppressed` : ''}</div></div><button class="owa-btn" data-toggle="${esc(a.id)}" ${canToggle() ? '' : 'disabled'}>${alarmArmed(a) ? 'ON' : 'OFF'}</button><button class="owa-btn" data-delete="${esc(a.id)}" ${dDisabled}>🗑</button></div>`;
+    return `<div class="owa-card" data-edit="${esc(a.id)}"><div style="width:32px;height:32px;border-radius:9px;background:rgba(255,255,255,.05);display:flex;align-items:center;justify-content:center;flex:0 0 auto">🛡️</div><div style="flex:1;min-width:0"><div style="display:flex;gap:10px;align-items:center"><b>${esc(a.name)}</b>${pill(eff.state)}</div><div class="owa-counts"><span class="owa-count">Selected ${eff.selectedZoneIds.length}</span><span class="owa-count">Active ${eff.activeZoneIds.length}</span><span class="owa-count">Suppressed ${eff.suppressedZoneIds.length}</span></div>${suppressionSummaryHtml(eff)}</div><div style="display:flex;gap:6px;flex:0 0 auto"><button class="owa-btn" data-toggle="${esc(a.id)}" ${canToggle() ? '' : 'disabled'}>${alarmArmed(a) ? 'ON' : 'OFF'}</button><button class="owa-btn" data-delete="${esc(a.id)}" ${dDisabled}>🗑</button></div></div>`;
   }
 
   function ensureDraftExplicit() {
@@ -180,18 +266,44 @@
     setExplicitZoneIds(mem, ids);
   }
 
+  function draftEffectivePreview() {
+    if (!draft) return null;
+    const existingIndex = alarms.findIndex(a => a.id === editingId);
+    const original = existingIndex >= 0 ? alarms[existingIndex] : null;
+    if (existingIndex >= 0) alarms[existingIndex] = draft;
+    else alarms.push(draft);
+    const eff = getAlarmEffectiveState(draft);
+    if (existingIndex >= 0) alarms[existingIndex] = original;
+    else alarms = alarms.filter(a => a.id !== draft.id);
+    return eff;
+  }
+
   function renderEditor() {
     stopDynamicRefresh();
-    panel.innerHTML = `<div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px 12px;border-bottom:1px solid rgba(255,255,255,.07)"><div style="display:flex;gap:10px;align-items:center"><button id="owaBack" class="owa-btn">← Back</button><b>${editingId === 'new' ? 'New Alarm' : 'Edit Alarm'}</b></div><button id="owaSave" class="owa-btn primary">💾 Save</button></div><div style="flex:1;overflow:auto;padding:16px 18px 40px"><label class="owa-muted">Alarm Name</label><input id="owaName" class="owa-input" value="${esc(draft.name)}"><div class="owa-muted" style="margin-top:6px">HA entity: ${esc(alarmSwitchId(draft))}</div><h3 style="font-size:13px;margin:18px 0 6px">Members</h3><div class="owa-muted" style="margin-bottom:8px">Floors/groups are batch selectors only. Selecting a parent writes explicit zones so members can be unticked afterwards.</div><div id="owaTree" class="owa-tree"></div></div>`;
+    const eff = draftEffectivePreview();
+    panel.innerHTML = `<div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px 12px;border-bottom:1px solid rgba(255,255,255,.07)"><div style="display:flex;gap:10px;align-items:center"><button id="owaBack" class="owa-btn">← Back</button><b>${editingId === 'new' ? 'New Alarm' : 'Edit Alarm'}</b>${eff ? pill(eff.state) : ''}</div><button id="owaSave" class="owa-btn primary">💾 Save</button></div><div style="flex:1;overflow:auto;padding:16px 18px 40px"><label class="owa-muted">Alarm Name</label><input id="owaName" class="owa-input" value="${esc(draft.name)}"><div class="owa-muted" style="margin-top:6px">HA entity: ${esc(alarmSwitchId(draft))}</div>${eff ? effectiveDetailHtml(eff) : ''}<h3 style="font-size:13px;margin:18px 0 6px">Members</h3><div class="owa-muted" style="margin-bottom:8px">Floors/groups are batch selectors only. Selecting a parent writes explicit zones so members can be unticked afterwards.</div><div id="owaTree" class="owa-tree"></div></div>`;
     panel.querySelector('#owaBack').onclick = () => { draft = null; editingId = null; renderList(true); startDynamicRefresh(); };
     panel.querySelector('#owaName').oninput = e => { draft.name = e.target.value; };
     renderTree(panel.querySelector('#owaTree'));
     panel.querySelector('#owaSave').onclick = async () => {
       if (!(draft.name || '').trim()) return alert('Enter an alarm name.');
-      draft.configured = true; ensureDraftExplicit();
-      if (editingId === 'new') alarms.push(draft); else { const i = alarms.findIndex(a => a.id === editingId); if (i >= 0) alarms[i] = draft; }
-      await saveAlarms(); await loadAlarms(); draft = null; editingId = null; renderList(true); startDynamicRefresh();
+      draft.configured = true;
+      ensureDraftExplicit();
+      if (editingId === 'new') alarms.push(draft);
+      else { const i = alarms.findIndex(a => a.id === editingId); if (i >= 0) alarms[i] = draft; }
+      await saveAlarms();
+      await loadAlarms();
+      draft = null;
+      editingId = null;
+      renderList(true);
+      startDynamicRefresh();
     };
+  }
+
+  function effectiveDetailHtml(eff) {
+    const activePreview = eff.activeZoneIds.slice(0, 8).map(id => esc(zoneName(id))).join(', ');
+    const suppressedPreview = eff.suppressedZoneIds.slice(0, 8).map(id => esc(zoneName(id))).join(', ');
+    return `<div class="owa-section"><div style="font-weight:700;margin-bottom:6px">Effective state</div><div class="owa-counts"><span class="owa-count">Selected ${eff.selectedZoneIds.length}</span><span class="owa-count">Active ${eff.activeZoneIds.length}</span><span class="owa-count">Suppressed ${eff.suppressedZoneIds.length}</span></div>${activePreview ? `<div class="owa-muted" style="margin-top:8px">Active: ${activePreview}${eff.activeZoneIds.length > 8 ? '…' : ''}</div>` : ''}${suppressedPreview ? `<div class="owa-muted" style="margin-top:5px">Suppressed zones: ${suppressedPreview}${eff.suppressedZoneIds.length > 8 ? '…' : ''}</div>` : ''}${suppressionSummaryHtml(eff, 12)}</div>`;
   }
 
   function selectedSet() { return explicitZoneIds(m(draft)); }
@@ -220,7 +332,8 @@
     });
     host.innerHTML = html || '<div class="owa-muted">No zones configured.</div>';
     host.querySelectorAll('[data-expand]').forEach(btn => btn.onclick = e => {
-      e.preventDefault(); e.stopPropagation();
+      e.preventDefault();
+      e.stopPropagation();
       const set = btn.dataset.type === 'floor' ? expanded.floors : expanded.groups;
       set.has(btn.dataset.id) ? set.delete(btn.dataset.id) : set.add(btn.dataset.id);
       renderTree(host);
@@ -243,5 +356,10 @@
     return `<label class="owa-row" style="padding-left:${pad}px"><button class="owa-exp ${expandable ? '' : 'leaf'}" data-expand="1" data-type="${esc(type)}" data-id="${esc(id)}">${symbol}</button><input type="checkbox" data-type="${esc(type)}" data-id="${esc(id)}" data-mixed="${mixed && !checked ? 'true' : 'false'}" ${checked ? 'checked' : ''}><span>${esc(label)}</span></label>`;
   }
 
-  window.OW_Alarms = { open, close, toggle };
+  window.OW_Alarms = {
+    open,
+    close,
+    toggle,
+    getAlarmEffectiveState,
+  };
 })();
