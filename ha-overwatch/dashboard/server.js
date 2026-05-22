@@ -1852,9 +1852,15 @@ async def async_setup_entry(
             entities.append(OverwatchZoneSwitch(coordinator, z))
         for f in data.get("floors", []):
             entities.append(OverwatchZoneFloorSwitch(coordinator, f))
-        # Camera switch entities are intentionally not generated for now.
-        # Existing HA camera switch restore state was causing on/off chatter during integration reload.
-        # Dashboard camera controls remain dashboard-side; HA camera entities will be reintroduced after switch semantics are stable.
+        entities.append(OverwatchCameraAllSwitch(coordinator))
+        for g in data.get("camera_groups", []):
+            entities.append(OverwatchCameraGroupSwitch(coordinator, g))
+        for z in data.get("camera_zones", []):
+            entities.append(OverwatchCameraZoneSwitch(coordinator, z))
+        for f in data.get("floors", []):
+            entities.append(OverwatchCameraFloorSwitch(coordinator, f))
+        for c in data.get("cameras", []):
+            entities.append(OverwatchCameraSwitch(coordinator, c))
         return entities
 
     def _sync_entities() -> None:
@@ -1907,7 +1913,7 @@ class OWSwitch(CoordinatorEntity, SwitchEntity, RestoreEntity):
     """
     _attr_should_poll = False
 
-    def __init__(self, coordinator, entity_id: str, unique_id: str, name: str, icon: str = "mdi:shield"):
+    def __init__(self, coordinator, entity_id: str, unique_id: str, name: str, icon: str = "mdi:shield", default_on: bool = True):
         super().__init__(coordinator)
         # Set entity_id explicitly — this overrides HA's auto-generation
         self.entity_id = entity_id
@@ -1915,16 +1921,21 @@ class OWSwitch(CoordinatorEntity, SwitchEntity, RestoreEntity):
         self._attr_name = name
         self._attr_icon = icon
         self._attr_device_info = _dev(coordinator)
-        self._is_on = True
+        self._default_on = default_on
+        self._is_on = None
 
     @property
-    def is_on(self) -> bool:
+    def is_on(self) -> bool | None:
         return self._is_on
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
-        if (state := await self.async_get_last_state()) is not None:
+        state = await self.async_get_last_state()
+        if state is not None and state.state not in ("unknown", "unavailable"):
             self._is_on = state.state != "off"
+        else:
+            self._is_on = self._default_on
+        self.async_write_ha_state()
 
     async def async_turn_on(self, **kwargs) -> None:
         self._is_on = True
@@ -1996,7 +2007,8 @@ class OverwatchCameraFloorSwitch(OWSwitch):
             entity_id=f"switch.overwatch_camera_floor_{fid}",
             unique_id=f"overwatch_camera_floor_{fid}",
             name=f"Camera Floor: {f.get('name', fid)}",
-            icon="mdi:cctv")
+            icon="mdi:cctv",
+            default_on=True)
 
 
 class OverwatchCameraAllSwitch(OWSwitch):
@@ -2005,7 +2017,8 @@ class OverwatchCameraAllSwitch(OWSwitch):
             entity_id="switch.overwatch_camera_all",
             unique_id="overwatch_camera_all",
             name="Camera All",
-            icon="mdi:cctv")
+            icon="mdi:cctv",
+            default_on=True)
 
 
 class OverwatchCameraGroupSwitch(OWSwitch):
@@ -2015,7 +2028,8 @@ class OverwatchCameraGroupSwitch(OWSwitch):
             entity_id=f"switch.overwatch_camera_group_{gid}",
             unique_id=f"overwatch_camera_group_{gid}",
             name=f"Camera Group: {g.get('name', gid)}",
-            icon="mdi:cctv")
+            icon="mdi:cctv",
+            default_on=True)
 
 
 class OverwatchCameraZoneSwitch(OWSwitch):
@@ -2025,7 +2039,8 @@ class OverwatchCameraZoneSwitch(OWSwitch):
             entity_id=f"switch.overwatch_camera_zone_{zid}",
             unique_id=f"overwatch_camera_zone_{zid}",
             name=f"Camera Zone: {z.get('name', zid)}",
-            icon="mdi:cctv")
+            icon="mdi:cctv",
+            default_on=True)
 
 
 class OverwatchCameraSwitch(OWSwitch):
@@ -2037,7 +2052,8 @@ class OverwatchCameraSwitch(OWSwitch):
             entity_id=f"switch.overwatch_camera_{safe}",
             unique_id=f"overwatch_camera_{safe}",
             name=f"Camera: {cam.get('name', cid)}",
-            icon="mdi:cctv")
+            icon="mdi:cctv",
+            default_on=True)
 `,
   "binary_sensor.py": `"""Binary sensor platform for HA Overwatch.
 
@@ -2185,7 +2201,7 @@ class OverwatchZoneTriggered(OWSensor):
   "manifest.json": `{
   "domain": "ha_overwatch",
   "name": "HA Overwatch",
-  "version": "1.14.0",
+  "version": "1.14.2",
   "documentation": "https://github.com/DM-AU/ha-overwatch",
   "issue_tracker": "https://github.com/DM-AU/ha-overwatch/issues",
   "codeowners": [],
