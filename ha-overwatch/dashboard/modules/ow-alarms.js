@@ -1,6 +1,6 @@
 /* ================================================================
  * HA-Overwatch — ow-alarms.js
- * v0.05.05C: Alarm Manager sorting controls.
+ * v0.05.05D: Alarm Manager sorting focus/terminology hotfix.
  *
  * Scope:
  * - Frontend-only.
@@ -196,7 +196,20 @@
     injectStyles();
   }
 
-  function startDynamicRefresh() { stopDynamicRefresh(); refreshTimer = setInterval(() => { if (openState && panel && !draft) renderList(false); }, 1000); }
+  function isSortControlActive() {
+    const activeElement = document.activeElement;
+    if (!activeElement || !panel || !panel.contains(activeElement)) return false;
+    return !!activeElement.closest('#owaSortMode,#owaSortReverse,.owa-sortbar');
+  }
+
+  function startDynamicRefresh() {
+    stopDynamicRefresh();
+    refreshTimer = setInterval(() => {
+      if (!openState || !panel || draft) return;
+      if (isSortControlActive()) return;
+      renderList(false);
+    }, 1000);
+  }
   function stopDynamicRefresh() { if (refreshTimer) clearInterval(refreshTimer); refreshTimer = null; }
 
   async function open() {
@@ -231,7 +244,7 @@
     if (sortMode === 'name') return sortReverse ? 'Name Z-A' : 'Name A-Z';
     if (sortMode === 'active') return sortReverse ? 'Most Active' : 'Least Active';
     if (sortMode === 'suppressed') return sortReverse ? 'Most Suppressed' : 'Least Suppressed';
-    return sortReverse ? 'Armed → Safe' : 'Safe → Armed';
+    return sortReverse ? 'Armed → Disarmed' : 'Disarmed → Armed';
   }
 
   function suppressionSummaryHtml(eff, max = 3) {
