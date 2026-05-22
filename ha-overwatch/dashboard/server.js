@@ -409,6 +409,56 @@ function buildAlarmEffectiveState() {
   };
 }
 
+function isTriggeredStateValue(state) {
+  return ["on", "open", "opening", "detected", "home", "triggered", "motion", "unlocked"]
+    .includes(String(state || "").toLowerCase());
+}
+
+function buildTriggeredSnapshot() {
+  const zones = loadZones();
+  const out = {};
+  for (const zone of zones) {
+    const slug = nameSlug(zone.name) || zone.id;
+    const details = (zone.sensors || []).map(entityId => {
+      const st = serverHaStates[entityId];
+      return {
+        entity_id: entityId,
+        state: st ? st.state : "unknown",
+        triggered: st ? isTriggeredStateValue(st.state) : false,
+        last_changed: st ? st.last_changed : null,
+        last_updated: st ? st.last_updated : null,
+      };
+    });
+    out[slug] = details.some(d => d.triggered);
+  }
+  return out;
+}
+
+function buildTriggeredDetailSnapshot() {
+  const zones = loadZones();
+  const out = {};
+  for (const zone of zones) {
+    const slug = nameSlug(zone.name) || zone.id;
+    const sensors = (zone.sensors || []).map(entityId => {
+      const st = serverHaStates[entityId];
+      return {
+        entity_id: entityId,
+        state: st ? st.state : "unknown",
+        triggered: st ? isTriggeredStateValue(st.state) : false,
+        last_changed: st ? st.last_changed : null,
+        last_updated: st ? st.last_updated : null,
+      };
+    });
+    out[slug] = {
+      zone_id: zone.id,
+      zone_name: zone.name || zone.id,
+      triggered: sensors.some(s => s.triggered),
+      sensors,
+    };
+  }
+  return out;
+}
+
 /* ─── GROUPS ──────────────────────────────────────────────── */
 function loadGroups() {
   try {
@@ -940,22 +990,17 @@ const server = http.createServer(async (req, res) => {
 
   /* ── /ow/triggered — coordinator polls for zone triggered states ── */
   if (pathname === "/ow/triggered" && req.method === "GET") {
-    // v1.3 fix: always return every configured zone, not only zones that have
-    // changed since listener startup. Direct :8099 dashboards rely on a stable
-    // complete key set; missing keys caused zones/doors/lights to look stale.
-    let allZones = [];
-    try { allZones = typeof loadZones === "function" ? loadZones() : []; } catch {}
-    const out = {};
-    for (const zone of allZones) {
-      const slug = nameSlug(zone.name) || zone.id;
-      out[slug] = !!globalTriggeredZones[slug];
-    }
-    // Preserve transient/renamed keys for already-open browsers, but configured
-    // zones above are authoritative.
-    Object.keys(globalTriggeredZones || {}).forEach(k => {
-      if (!(k in out)) out[k] = !!globalTriggeredZones[k];
-    });
-    json(res, out);
+    // Authoritative snapshot from current HA state cache. Do not use globalTriggeredZones
+    // here; that cache can go stale across HA integration reloads or missed clear events.
+    try { json(res, buildTriggeredSnapshot()); }
+    catch (e) { err(res, e.message, 500); }
+    return;
+  }
+
+  /* ── /ow/triggered-detail — debug why a zone is considered triggered ── */
+  if (pathname === "/ow/triggered-detail" && req.method === "GET") {
+    try { json(res, buildTriggeredDetailSnapshot()); }
+    catch (e) { err(res, e.message, 500); }
     return;
   }
 
@@ -1875,7 +1920,7 @@ class OWSwitch(CoordinatorEntity, SwitchEntity, RestoreEntity):
     """
     _attr_should_poll = False
 
-    def __init__(self, coordinator, entity_id: str, unique_id: str, name: str, icon: str = "mdi:shield", default_on: bool = True):
+    def __init__(self, coordinator, entity_id: str, unique_id: str, name: str, icon: str = "mdi:shield", default_on: bool = True, restore_state: bool = True):
         super().__init__(coordinator)
         # Set entity_id explicitly — this overrides HA's auto-generation
         self.entity_id = entity_id
@@ -1884,6 +1929,7 @@ class OWSwitch(CoordinatorEntity, SwitchEntity, RestoreEntity):
         self._attr_icon = icon
         self._attr_device_info = _dev(coordinator)
         self._is_on = default_on
+        self._restore_state = restore_state
 
     @property
     def is_on(self) -> bool:
@@ -1891,6 +1937,8 @@ class OWSwitch(CoordinatorEntity, SwitchEntity, RestoreEntity):
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
+        if not self._restore_state:
+            return
         if (state := await self.async_get_last_state()) is not None:
             self._is_on = state.state != "off"
 
@@ -1965,7 +2013,8 @@ class OverwatchCameraFloorSwitch(OWSwitch):
             unique_id=f"overwatch_camera_floor_{fid}",
             name=f"Camera Floor: {f.get('name', fid)}",
             icon="mdi:cctv",
-            default_on=False)
+            default_on=False,
+            restore_state=False)
 
 
 class OverwatchCameraAllSwitch(OWSwitch):
@@ -1975,7 +2024,8 @@ class OverwatchCameraAllSwitch(OWSwitch):
             unique_id="overwatch_camera_all",
             name="Camera All",
             icon="mdi:cctv",
-            default_on=False)
+            default_on=False,
+            restore_state=False)
 
 
 class OverwatchCameraGroupSwitch(OWSwitch):
@@ -1986,7 +2036,8 @@ class OverwatchCameraGroupSwitch(OWSwitch):
             unique_id=f"overwatch_camera_group_{gid}",
             name=f"Camera Group: {g.get('name', gid)}",
             icon="mdi:cctv",
-            default_on=False)
+            default_on=False,
+            restore_state=False)
 
 
 class OverwatchCameraZoneSwitch(OWSwitch):
@@ -1997,7 +2048,8 @@ class OverwatchCameraZoneSwitch(OWSwitch):
             unique_id=f"overwatch_camera_zone_{zid}",
             name=f"Camera Zone: {z.get('name', zid)}",
             icon="mdi:cctv",
-            default_on=False)
+            default_on=False,
+            restore_state=False)
 
 
 class OverwatchCameraSwitch(OWSwitch):
@@ -2010,7 +2062,8 @@ class OverwatchCameraSwitch(OWSwitch):
             unique_id=f"overwatch_camera_{safe}",
             name=f"Camera: {cam.get('name', cid)}",
             icon="mdi:cctv",
-            default_on=False)
+            default_on=False,
+            restore_state=False)
 `,
   "binary_sensor.py": `"""Binary sensor platform for HA Overwatch.
 
