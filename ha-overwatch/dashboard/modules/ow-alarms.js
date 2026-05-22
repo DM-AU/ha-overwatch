@@ -1,12 +1,13 @@
 /* ================================================================
  * HA-Overwatch — ow-alarms.js
- * v0.05.05D: Alarm Manager sorting focus/terminology hotfix.
+ * v0.05.10: Alarm response profile configuration + editor Save/Back UX alignment.
  *
  * Scope:
  * - Frontend-only.
  * - Adds display sorting by Name, Status, Active Zones, Suppressed Zones.
  * - Retains effective alarm state preview and corrected security colours.
  * - Red = Armed, Amber = Armed Partial, Green = Disarmed.
+ * - Adds response profile configuration for triggered_armed and triggered_disarmed.
  * - No trigger execution yet.
  * ================================================================ */
 (function () {
@@ -51,7 +52,61 @@
   const allZoneIds = () => zones().map(z => z.id);
   const zoneName = id => zones().find(z => z.id === id)?.name || id;
 
-  function haSwitchOn(entityId) { const st = haStates()[entityId]; if (!st) return null; return String(st.state || '').toLowerCase() !== 'off'; }
+const emptyResponseAction = () => ({ enabled:false, entities:[], targets:[] });
+  const emptyResponseSet = () => ({
+    notify: emptyResponseAction(),
+    sirens: emptyResponseAction(),
+    lights: emptyResponseAction(),
+    cameras: emptyResponseAction(),
+    scripts: emptyResponseAction(),
+    automations: emptyResponseAction(),
+  });
+  function defaultResponses() {
+    return {
+      enabled: true,
+      triggered_armed: emptyResponseSet(),
+      triggered_disarmed: emptyResponseSet(),
+    };
+  }
+  function normaliseResponseAction(action) {
+    const a = action && typeof action === 'object' ? action : {};
+    return {
+      enabled: !!a.enabled,
+      entities: Array.isArray(a.entities) ? a.entities.filter(Boolean).map(String) : [],
+      targets: Array.isArray(a.targets) ? a.targets.filter(Boolean).map(String) : [],
+    };
+  }
+  function normaliseResponseSet(set) {
+    const s = set && typeof set === 'object' ? set : {};
+    return {
+      notify: normaliseResponseAction(s.notify),
+      sirens: normaliseResponseAction(s.sirens),
+      lights: normaliseResponseAction(s.lights),
+      cameras: normaliseResponseAction(s.cameras),
+      scripts: normaliseResponseAction(s.scripts),
+      automations: normaliseResponseAction(s.automations),
+    };
+  }
+  function normaliseResponses(responses) {
+    const r = responses && typeof responses === 'object' ? responses : {};
+    return {
+      enabled: r.enabled !== false,
+      triggered_armed: normaliseResponseSet(r.triggered_armed || r.armed || r.triggered || {}),
+      triggered_disarmed: normaliseResponseSet(r.triggered_disarmed || r.disarmed || {}),
+    };
+  }
+  function ensureResponses(a) {
+    a.responses = normaliseResponses(a.responses || defaultResponses());
+    return a.responses;
+  }
+  function linesToArray(value) {
+    return String(value || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  }
+  function arrayToLines(value) {
+    return (Array.isArray(value) ? value : []).join('\n');
+  }
+
+    function haSwitchOn(entityId) { const st = haStates()[entityId]; if (!st) return null; return String(st.state || '').toLowerCase() !== 'off'; }
   function alarmArmed(a) { const on = haSwitchOn(alarmSwitchId(a)); return on === null ? !!a.default_armed : on; }
   function zoneArmed(z) { const on = haSwitchOn(zoneSwitchId(z)); return on === null ? true : on; }
 
@@ -69,6 +124,7 @@
       const mem = m(a);
       if (hasWildcard(mem)) setExplicitZoneIds(mem, allZoneIds());
       if ((a.role === 'home' || a.role === 'away') && !a.configured && !mem.floor_ids.length && !mem.group_ids.length && !mem.zone_ids.length) setExplicitZoneIds(mem, allZoneIds());
+      ensureResponses(a);
     });
   }
 
@@ -320,14 +376,16 @@
 
   function renderEditor() {
     stopDynamicRefresh();
+    ensureResponses(draft);
     const eff = draftEffectivePreview();
-    panel.innerHTML = `<div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px 12px;border-bottom:1px solid rgba(255,255,255,.07)"><div style="display:flex;gap:10px;align-items:center"><button id="owaBack" class="owa-btn">← Back</button><b>${editingId === 'new' ? 'New Alarm' : 'Edit Alarm'}</b>${eff ? pill(eff.state) : ''}</div><button id="owaSave" class="owa-btn primary">💾 Save</button></div><div style="flex:1;overflow:auto;padding:16px 18px 40px"><label class="owa-muted">Alarm Name</label><input id="owaName" class="owa-input" value="${esc(draft.name)}"><div class="owa-muted" style="margin-top:6px">HA entity: ${esc(alarmSwitchId(draft))}</div>${eff ? effectiveDetailHtml(eff) : ''}<h3 style="font-size:13px;margin:18px 0 6px">Members</h3><div class="owa-muted" style="margin-bottom:8px">Floors/groups are batch selectors only. Selecting a parent writes explicit zones so members can be unticked afterwards.</div><div id="owaTree" class="owa-tree"></div></div>`;
+    panel.innerHTML = `<div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px 12px;border-bottom:1px solid rgba(255,255,255,.07)"><div style="display:flex;gap:10px;align-items:center"><b>${editingId === 'new' ? 'New Alarm' : 'Edit Alarm'}</b>${eff ? pill(eff.state) : ''}</div><div style="display:flex;gap:8px;align-items:center"><button id="owaSave" class="owa-btn primary">💾 Save</button><button id="owaBack" class="owa-btn">← Back</button></div></div><div style="flex:1;overflow:auto;padding:16px 18px 40px"><label class="owa-muted">Alarm Name</label><input id="owaName" class="owa-input" value="${esc(draft.name)}"><div class="owa-muted" style="margin-top:6px">HA entity: ${esc(alarmSwitchId(draft))}</div>${eff ? effectiveDetailHtml(eff) : ''}${responseProfileHtml()}<h3 style="font-size:13px;margin:18px 0 6px">Members</h3><div class="owa-muted" style="margin-bottom:8px">Floors/groups are batch selectors only. Selecting a parent writes explicit zones so members can be unticked afterwards.</div><div id="owaTree" class="owa-tree"></div></div>`;
     panel.querySelector('#owaBack').onclick = () => { draft = null; editingId = null; renderList(true); startDynamicRefresh(); };
     panel.querySelector('#owaName').oninput = e => { draft.name = e.target.value; };
     renderTree(panel.querySelector('#owaTree'));
     panel.querySelector('#owaSave').onclick = async () => {
       if (!(draft.name || '').trim()) return alert('Enter an alarm name.');
       draft.configured = true;
+      readResponseDraft();
       ensureDraftExplicit();
       if (editingId === 'new') alarms.push(draft); else { const i = alarms.findIndex(a => a.id === editingId); if (i >= 0) alarms[i] = draft; }
       await saveAlarms();
@@ -338,6 +396,39 @@
       startDynamicRefresh();
     };
   }
+
+
+  function responseActionHtml(scope, key, label, hint, action, fieldName) {
+    const value = arrayToLines(fieldName === 'targets' ? action.targets : action.entities);
+    return `<div class="owa-response-row" style="display:grid;grid-template-columns:150px 1fr;gap:10px;align-items:start;margin-top:9px"><label style="display:flex;gap:8px;align-items:center;font-weight:600"><input type="checkbox" data-response-enabled="${scope}.${key}" ${action.enabled ? 'checked' : ''}>${esc(label)}</label><div><textarea class="owa-input" data-response-list="${scope}.${key}.${fieldName}" rows="2" placeholder="${esc(hint)}" style="resize:vertical;min-height:46px">${esc(value)}</textarea></div></div>`;
+  }
+
+  function responseSetHtml(scope, title, description, set) {
+    return `<div class="owa-section"><div style="font-weight:700;margin-bottom:4px">${esc(title)}</div><div class="owa-muted" style="margin-bottom:8px">${esc(description)}</div>${responseActionHtml(scope, 'notify', 'Notify', 'One notify target per line. Leave blank for future default notification handling.', set.notify, 'targets')}${responseActionHtml(scope, 'sirens', 'Sirens', 'siren.front_yard\nsiren.garage', set.sirens, 'entities')}${responseActionHtml(scope, 'lights', 'light.front_yard\nlight.driveway', set.lights, 'entities')}${responseActionHtml(scope, 'cameras', 'camera.front_yard\ncamera.driveway', set.cameras, 'entities')}${responseActionHtml(scope, 'scripts', 'script.alarm_snapshot\nscript.turn_on_exterior_lights', set.scripts, 'entities')}${responseActionHtml(scope, 'automations', 'automation.custom_alarm_response', set.automations, 'entities')}</div>`;
+  }
+
+  function responseProfileHtml() {
+    const r = ensureResponses(draft);
+    return `<h3 style="font-size:13px;margin:18px 0 6px">Response Profile</h3><div class="owa-muted" style="margin-bottom:8px">Stored on the alarm profile only. Execution and managed HA automation generation are deferred to the next alarm milestones.</div><div class="owa-section"><label style="display:flex;gap:8px;align-items:center;font-weight:700"><input type="checkbox" id="owaResponsesEnabled" ${r.enabled ? 'checked' : ''}>Enable responses for this alarm</label><div class="owa-muted" style="margin-top:6px">When disabled, OW should evaluate alarm state but skip response execution for this profile.</div></div>${responseSetHtml('triggered_armed', 'Triggered Armed', 'Actions for active unsuppressed zones while the alarm is armed.', r.triggered_armed)}${responseSetHtml('triggered_disarmed', 'Triggered Disarmed', 'Actions for selected zones that trigger while the alarm is disarmed. Useful for lights/cameras without siren escalation.', r.triggered_disarmed)}`;
+  }
+
+  function readResponseDraft() {
+    const r = ensureResponses(draft);
+    const enabled = panel.querySelector('#owaResponsesEnabled');
+    if (enabled) r.enabled = !!enabled.checked;
+    panel.querySelectorAll('[data-response-enabled]').forEach(cb => {
+      const [scope, key] = cb.dataset.responseEnabled.split('.');
+      if (!r[scope] || !r[scope][key]) return;
+      r[scope][key].enabled = !!cb.checked;
+    });
+    panel.querySelectorAll('[data-response-list]').forEach(ta => {
+      const [scope, key, field] = ta.dataset.responseList.split('.');
+      if (!r[scope] || !r[scope][key]) return;
+      r[scope][key][field] = linesToArray(ta.value);
+    });
+    draft.responses = normaliseResponses(r);
+  }
+
 
   function effectiveDetailHtml(eff) {
     const active = eff.activeZoneIds.slice(0, 8).map(id => esc(zoneName(id))).join(', ');
