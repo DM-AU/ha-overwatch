@@ -243,6 +243,169 @@ function saveAlarms(alarms) {
   bumpDataVersion();
 }
 
+// ── Alarm effective-state resolver ─────────────────────────
+function stateEntityOn(entityId, fallback = false) {
+  const st = serverHaStates[entityId];
+  if (!st || st.state == null) return !!fallback;
+  const s = String(st.state).toLowerCase();
+  return !(s === "off" || s === "false" || s === "0" || s === "unavailable" || s === "unknown");
+}
+
+function zoneCanonicalIds(zone) {
+  const slug = nameSlug(zone.name) || zone.id;
+  return new Set([zone.id, zone.raw_id, slug].filter(Boolean).map(String));
+}
+
+function floorCanonicalIds(floor) {
+  const slug = nameSlug(floor.name) || floor.id;
+  return new Set([floor.id, floor.raw_id, slug].filter(Boolean).map(String));
+}
+
+function groupCanonicalIds(group) {
+  const slug = nameSlug(group.name) || group.id;
+  return new Set([group.id, group.raw_id, slug].filter(Boolean).map(String));
+}
+
+function setHasAny(set, values) {
+  for (const v of values || []) {
+    if (set.has(String(v))) return true;
+  }
+  return false;
+}
+
+function alarmSelectedZones(alarm, zones, groups, floors) {
+  const members = alarm.members || {};
+  const zoneIds = members.zone_ids || [];
+  const groupIds = members.group_ids || [];
+  const floorIds = members.floor_ids || [];
+
+  const includeAllZones = zoneIds.includes("*") || groupIds.includes("*") || floorIds.includes("*");
+  const selected = new Map();
+
+  function addZone(zone) {
+    if (zone && zone.id) selected.set(zone.id, zone);
+  }
+
+  if (includeAllZones) {
+    zones.forEach(addZone);
+    return [...selected.values()];
+  }
+
+  zones.forEach(zone => {
+    if (setHasAny(zoneCanonicalIds(zone), zoneIds)) addZone(zone);
+  });
+
+  const selectedGroupIds = new Set((groupIds || []).map(String));
+  groups.forEach(group => {
+    if (!setHasAny(groupCanonicalIds(group), selectedGroupIds)) return;
+    (group.zone_ids || []).forEach(zid => addZone(zones.find(z => z.id === zid || zoneCanonicalIds(z).has(String(zid)))));
+  });
+
+  const selectedFloorIds = new Set((floorIds || []).map(String));
+  floors.forEach(floor => {
+    if (!setHasAny(floorCanonicalIds(floor), selectedFloorIds)) return;
+    const isFirstFloor = floors.length === 0 || floors[0].id === floor.id;
+    zones.forEach(zone => {
+      if (zone.floor_id === floor.id || (!zone.floor_id && isFirstFloor)) addZone(zone);
+    });
+  });
+
+  return [...selected.values()];
+}
+
+function alarmSwitchEntityId(alarm) {
+  return `switch.overwatch_alarm_${nameSlug(alarm.name) || alarm.id}`;
+}
+
+function zoneSwitchEntityId(zone) {
+  return `switch.overwatch_zone_${nameSlug(zone.name) || zone.id}`;
+}
+
+function alarmDesiredArmed(alarm) {
+  return stateEntityOn(alarmSwitchEntityId(alarm), alarm.default_armed === true);
+}
+
+function buildAlarmEffectiveState() {
+  const zones = loadZones();
+  const groups = loadGroups();
+  const floors = loadFloors();
+  const alarms = loadAlarms();
+
+  const selectedByAlarm = new Map();
+  const armedByAlarm = new Map();
+
+  alarms.forEach(alarm => {
+    selectedByAlarm.set(alarm.id, alarmSelectedZones(alarm, zones, groups, floors));
+    armedByAlarm.set(alarm.id, alarmDesiredArmed(alarm));
+  });
+
+  const effective = alarms.map(alarm => {
+    const selectedZones = selectedByAlarm.get(alarm.id) || [];
+    const isArmed = armedByAlarm.get(alarm.id) === true;
+    const suppressed = [];
+    const suppressedZoneIds = new Set();
+
+    if (isArmed) {
+      selectedZones.forEach(zone => {
+        const zSwitch = zoneSwitchEntityId(zone);
+        if (!stateEntityOn(zSwitch, zone.enabled !== false)) {
+          suppressedZoneIds.add(zone.id);
+          suppressed.push({
+            zone_id: nameSlug(zone.name) || zone.id,
+            zone_raw_id: zone.id,
+            zone_name: zone.name || zone.id,
+            reason: "manual_zone_disarm",
+            source: zSwitch,
+          });
+        }
+      });
+
+      alarms.forEach(other => {
+        if (other.id === alarm.id) return;
+        if (armedByAlarm.get(other.id) === true) return;
+        const otherSelected = selectedByAlarm.get(other.id) || [];
+        const otherSelectedIds = new Set(otherSelected.map(z => z.id));
+        selectedZones.forEach(zone => {
+          if (!otherSelectedIds.has(zone.id)) return;
+          if (suppressedZoneIds.has(zone.id)) return;
+          suppressedZoneIds.add(zone.id);
+          suppressed.push({
+            zone_id: nameSlug(zone.name) || zone.id,
+            zone_raw_id: zone.id,
+            zone_name: zone.name || zone.id,
+            reason: "overlap_disarmed_alarm",
+            source_alarm: nameSlug(other.name) || other.id,
+            source_alarm_name: other.name || other.id,
+          });
+        });
+      });
+    }
+
+    const selectedCount = selectedZones.length;
+    const suppressedCount = isArmed ? suppressedZoneIds.size : 0;
+    const activeCount = isArmed ? Math.max(0, selectedCount - suppressedCount) : 0;
+    const state = !isArmed ? "disarmed" : (suppressedCount > 0 ? "armed_partial" : "armed_full");
+
+    return {
+      id: nameSlug(alarm.name) || alarm.id,
+      raw_id: alarm.id,
+      name: alarm.name || alarm.id,
+      role: alarm.role || null,
+      builtin: !!alarm.builtin,
+      state,
+      selected_zones: selectedCount,
+      active_zones: activeCount,
+      suppressed_zones: suppressedCount,
+      suppression_reasons: suppressed,
+    };
+  });
+
+  return {
+    alarms: effective,
+    generated_at: new Date().toISOString(),
+  };
+}
+
 /* ─── GROUPS ──────────────────────────────────────────────── */
 function loadGroups() {
   try {
@@ -683,6 +846,13 @@ const server = http.createServer(async (req, res) => {
       const alarms = Array.isArray(body) ? body : (body?.alarms || []);
       saveAlarms(alarms);
       json(res, { ok: true });
+    } catch (e) { err(res, e.message, 500); }
+    return;
+  }
+
+  if (pathname === "/ow/alarms/effective" && req.method === "GET") {
+    try {
+      json(res, buildAlarmEffectiveState());
     } catch (e) { err(res, e.message, 500); }
     return;
   }
@@ -1476,7 +1646,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
-PLATFORMS = [Platform.SWITCH, Platform.BINARY_SENSOR]
+PLATFORMS = [Platform.SWITCH, Platform.BINARY_SENSOR, Platform.SENSOR]
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
@@ -1497,9 +1667,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     triggered_coordinator = TriggeredCoordinator(hass, url)
     await triggered_coordinator.async_config_entry_first_refresh()
 
+    # Alarm effective-state coordinator — polls /ow/alarms/effective for rich sensor state
+    alarm_effective_coordinator = AlarmEffectiveCoordinator(hass, url)
+    await alarm_effective_coordinator.async_config_entry_first_refresh()
+
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {
         "zone_coordinator":     zone_coordinator,
         "triggered_coordinator": triggered_coordinator,
+        "alarm_effective_coordinator": alarm_effective_coordinator,
     }
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
@@ -1555,6 +1730,26 @@ class TriggeredCoordinator(DataUpdateCoordinator):
                     return await resp.json(content_type=None)
         except aiohttp.ClientError:
             return {}
+
+class AlarmEffectiveCoordinator(DataUpdateCoordinator):
+    """Polls /ow/alarms/effective for alarm profile effective states."""
+
+    def __init__(self, hass: HomeAssistant, url: str) -> None:
+        super().__init__(hass, _LOGGER, name="HA Overwatch Alarm Effective State",
+            update_interval=timedelta(seconds=10))
+        self.url = url
+
+    async def _async_update_data(self) -> dict:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{self.url}/ow/alarms/effective",
+                    timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    if resp.status != 200:
+                        return {"alarms": []}
+                    return await resp.json(content_type=None)
+        except aiohttp.ClientError:
+            return {"alarms": []}
+
 `,
   "const.py": `"""Constants for HA Overwatch integration."""
 DOMAIN = "ha_overwatch"
@@ -1834,6 +2029,97 @@ class OverwatchCameraSwitch(OWSwitch):
             name=f"Camera: {cam.get('name', cid)}",
             icon="mdi:cctv")
 `,
+  "sensor.py": `"""Sensor platform for HA Overwatch alarm effective states."""
+from __future__ import annotations
+import logging
+from homeassistant.components.sensor import SensorEntity
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from .const import DOMAIN
+from . import AlarmEffectiveCoordinator
+
+_LOGGER = logging.getLogger(__name__)
+
+
+async def async_setup_entry(
+    hass: HomeAssistant, entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
+    coordinator: AlarmEffectiveCoordinator = hass.data[DOMAIN][entry.entry_id]["alarm_effective_coordinator"]
+    alarms = coordinator.data.get("alarms", []) if coordinator.data else []
+    entities = [OverwatchAlarmEffectiveStateSensor(coordinator, alarm) for alarm in alarms]
+    async_add_entities(entities)
+
+    registry = er.async_get(hass)
+    for ent in entities:
+        registry.async_get_or_create(
+            domain="sensor",
+            platform=DOMAIN,
+            unique_id=ent.unique_id,
+            suggested_object_id=ent.suggested_object_id,
+        )
+
+
+def _dev(coordinator: AlarmEffectiveCoordinator) -> DeviceInfo:
+    return DeviceInfo(
+        identifiers={(DOMAIN, "overwatch")},
+        name="HA Overwatch",
+        manufacturer="HA Overwatch",
+        model="Floor Plan Dashboard",
+        configuration_url=coordinator.url,
+    )
+
+
+class OverwatchAlarmEffectiveStateSensor(CoordinatorEntity, SensorEntity):
+    """Reports one alarm profile's effective state and metadata."""
+
+    _attr_icon = "mdi:shield-check"
+    _attr_should_poll = False
+
+    def __init__(self, coordinator: AlarmEffectiveCoordinator, alarm: dict) -> None:
+        super().__init__(coordinator)
+        aid = alarm["id"]
+        name = alarm.get("name", aid)
+        self._aid = aid
+        self._attr_unique_id = f"overwatch_alarm_{aid}_effective_state"
+        self._attr_name = f"Alarm Effective State: {name}"
+        self._attr_device_info = _dev(coordinator)
+        self._attr_entity_registry_enabled_default = True
+        self.entity_id = f"sensor.overwatch_alarm_{aid}_effective_state"
+        self.suggested_object_id = f"overwatch_alarm_{aid}_effective_state"
+
+    @property
+    def alarm_data(self) -> dict:
+        for alarm in (self.coordinator.data or {}).get("alarms", []):
+            if alarm.get("id") == self._aid:
+                return alarm
+        return {}
+
+    @property
+    def native_value(self) -> str:
+        return self.alarm_data.get("state", "unknown")
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        alarm = self.alarm_data
+        return {
+            "alarm_id": alarm.get("id", self._aid),
+            "alarm_raw_id": alarm.get("raw_id"),
+            "alarm_name": alarm.get("name"),
+            "role": alarm.get("role"),
+            "builtin": alarm.get("builtin"),
+            "selected_zones": alarm.get("selected_zones", 0),
+            "active_zones": alarm.get("active_zones", 0),
+            "suppressed_zones": alarm.get("suppressed_zones", 0),
+            "suppression_reasons": alarm.get("suppression_reasons", []),
+            "generated_at": (self.coordinator.data or {}).get("generated_at"),
+        }
+`
+,
   "binary_sensor.py": `"""Binary sensor platform for HA Overwatch.
 
 Reads triggered state from TriggeredCoordinator which polls /ow/triggered every 2s.
