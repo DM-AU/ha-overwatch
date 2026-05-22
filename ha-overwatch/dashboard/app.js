@@ -2628,9 +2628,8 @@ function connectHA() {
         haStates[data.entity_id] = data.new_state;
 
         // Sync masterEnabled when the HA master switch changes.
-        // Do NOT cascade HA state_changed events back into HA service calls.
-        // Integration reload/restore events are not reliable user intent and caused switch storms.
-        // Cascading must only happen from explicit dashboard/UI actions.
+        // HA-origin state_changed events are state updates only; they must not fan out
+        // into further HA service calls because integration reload/restore events caused storms.
         if (data.entity_id === "switch.overwatch_zone_master") {
           const newMaster = (data.new_state.state || "").toLowerCase() !== "off";
           if (masterEnabled !== newMaster) {
@@ -2639,18 +2638,14 @@ function connectHA() {
           }
         }
 
-        // HA-origin switch updates are state updates only.
-        // Browser-side fan-out for zone/camera group, floor, zone, and all switches is intentionally disabled.
-        // The dashboard already performs fan-out when the user explicitly toggles controls.
-
-        // Re-render when any overwatch switch changes
+        // Re-render when any overwatch switch changes.
+        // This updates OW from HA without cascading HA-origin events back into HA.
         if (data.entity_id.startsWith("switch.overwatch_")) {
           updateStatusDropdownInPlace();
           renderZones();
-          // Re-render camera status bar when a camera switch changes
-          if (window.renderCameraStatusBar &&
-              data.entity_id.startsWith("switch.overwatch_camera_")) {
-            window.renderCameraStatusBar();
+          if (data.entity_id.startsWith("switch.overwatch_camera_")) {
+            if (window.renderCameraStatusBar) window.renderCameraStatusBar();
+            if (window.camUpdate) window.camUpdate();
           }
         }
 
