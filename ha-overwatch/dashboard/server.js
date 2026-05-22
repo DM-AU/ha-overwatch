@@ -138,7 +138,7 @@ function loadZones() {
 }
 
 function parseZoneYaml(text) {
-  const z = { enabled: true, sensors: [], cameras: [], lights: [], sirens: [] };
+  const z = { enabled: true, sensors: [], cameras: [], lights: [], sirens: [], ha_excluded_entities: [] };
   let section = "";
   for (const raw of text.split("\n")) {
     const line = raw.trim();
@@ -148,6 +148,7 @@ function parseZoneYaml(text) {
     if (line === "cameras:") { section = "cameras"; continue; }
     if (line === "lights:")  { section = "lights";  continue; }
     if (line === "sirens:")  { section = "sirens";  continue; }
+    if (line === "ha_excluded_entities:") { section = "ha_excluded_entities"; continue; }
     if (line === "points:")  { section = "points";  continue; }
     // List items
     if (line.startsWith("- ") && section) {
@@ -156,6 +157,7 @@ function parseZoneYaml(text) {
       else if (section === "cameras") z.cameras.push(val);
       else if (section === "lights")  z.lights.push(val);
       else if (section === "sirens")  z.sirens.push(val);
+      else if (section === "ha_excluded_entities") z.ha_excluded_entities.push(val);
       continue;
     }
     // Key: value pairs reset the section
@@ -170,6 +172,11 @@ function parseZoneYaml(text) {
     else if (key === "enabled")  z.enabled  = val !== "false";
     else if (key === "floor_id") z.floor_id = val;
   }
+  const excluded = new Set((z.ha_excluded_entities || []).map(String));
+  z.sensors = (z.sensors || []).filter(entityId => !excluded.has(String(entityId)));
+  z.cameras = (z.cameras || []).filter(entityId => !excluded.has(String(entityId)));
+  z.lights  = (z.lights  || []).filter(entityId => !excluded.has(String(entityId)));
+  z.sirens  = (z.sirens  || []).filter(entityId => !excluded.has(String(entityId)));
   return z;
 }
 
@@ -421,13 +428,7 @@ function buildTriggeredSnapshot() {
     const slug = nameSlug(zone.name) || zone.id;
     const details = (zone.sensors || []).map(entityId => {
       const st = serverHaStates[entityId];
-      return {
-        entity_id: entityId,
-        state: st ? st.state : "unknown",
-        triggered: st ? isTriggeredStateValue(st.state) : false,
-        last_changed: st ? st.last_changed : null,
-        last_updated: st ? st.last_updated : null,
-      };
+      return { entity_id: entityId, state: st ? st.state : "unknown", triggered: st ? isTriggeredStateValue(st.state) : false };
     });
     out[slug] = details.some(d => d.triggered);
   }
@@ -449,12 +450,7 @@ function buildTriggeredDetailSnapshot() {
         last_updated: st ? st.last_updated : null,
       };
     });
-    out[slug] = {
-      zone_id: zone.id,
-      zone_name: zone.name || zone.id,
-      triggered: sensors.some(s => s.triggered),
-      sensors,
-    };
+    out[slug] = { zone_id: zone.id, zone_name: zone.name || zone.id, triggered: sensors.some(s => s.triggered), sensors };
   }
   return out;
 }
@@ -904,9 +900,8 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (pathname === "/ow/alarms/effective" && req.method === "GET") {
-    try {
-      json(res, buildAlarmEffectiveState());
-    } catch (e) { err(res, e.message, 500); }
+    try { json(res, buildAlarmEffectiveState()); }
+    catch (e) { err(res, e.message, 500); }
     return;
   }
 
@@ -990,8 +985,6 @@ const server = http.createServer(async (req, res) => {
 
   /* ── /ow/triggered — coordinator polls for zone triggered states ── */
   if (pathname === "/ow/triggered" && req.method === "GET") {
-    // Authoritative snapshot from current HA state cache. Do not use globalTriggeredZones
-    // here; that cache can go stale across HA integration reloads or missed clear events.
     try { json(res, buildTriggeredSnapshot()); }
     catch (e) { err(res, e.message, 500); }
     return;
@@ -1859,15 +1852,9 @@ async def async_setup_entry(
             entities.append(OverwatchZoneSwitch(coordinator, z))
         for f in data.get("floors", []):
             entities.append(OverwatchZoneFloorSwitch(coordinator, f))
-        entities.append(OverwatchCameraAllSwitch(coordinator))
-        for g in data.get("camera_groups", []):
-            entities.append(OverwatchCameraGroupSwitch(coordinator, g))
-        for z in data.get("camera_zones", []):
-            entities.append(OverwatchCameraZoneSwitch(coordinator, z))
-        for f in data.get("floors", []):
-            entities.append(OverwatchCameraFloorSwitch(coordinator, f))
-        for c in data.get("cameras", []):
-            entities.append(OverwatchCameraSwitch(coordinator, c))
+        # Camera switch entities are intentionally not generated for now.
+        # Existing HA camera switch restore state was causing on/off chatter during integration reload.
+        # Dashboard camera controls remain dashboard-side; HA camera entities will be reintroduced after switch semantics are stable.
         return entities
 
     def _sync_entities() -> None:
@@ -1920,7 +1907,7 @@ class OWSwitch(CoordinatorEntity, SwitchEntity, RestoreEntity):
     """
     _attr_should_poll = False
 
-    def __init__(self, coordinator, entity_id: str, unique_id: str, name: str, icon: str = "mdi:shield", default_on: bool = True, restore_state: bool = True):
+    def __init__(self, coordinator, entity_id: str, unique_id: str, name: str, icon: str = "mdi:shield"):
         super().__init__(coordinator)
         # Set entity_id explicitly — this overrides HA's auto-generation
         self.entity_id = entity_id
@@ -1928,8 +1915,7 @@ class OWSwitch(CoordinatorEntity, SwitchEntity, RestoreEntity):
         self._attr_name = name
         self._attr_icon = icon
         self._attr_device_info = _dev(coordinator)
-        self._is_on = default_on
-        self._restore_state = restore_state
+        self._is_on = True
 
     @property
     def is_on(self) -> bool:
@@ -1937,8 +1923,6 @@ class OWSwitch(CoordinatorEntity, SwitchEntity, RestoreEntity):
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
-        if not self._restore_state:
-            return
         if (state := await self.async_get_last_state()) is not None:
             self._is_on = state.state != "off"
 
@@ -2012,9 +1996,7 @@ class OverwatchCameraFloorSwitch(OWSwitch):
             entity_id=f"switch.overwatch_camera_floor_{fid}",
             unique_id=f"overwatch_camera_floor_{fid}",
             name=f"Camera Floor: {f.get('name', fid)}",
-            icon="mdi:cctv",
-            default_on=False,
-            restore_state=False)
+            icon="mdi:cctv")
 
 
 class OverwatchCameraAllSwitch(OWSwitch):
@@ -2023,9 +2005,7 @@ class OverwatchCameraAllSwitch(OWSwitch):
             entity_id="switch.overwatch_camera_all",
             unique_id="overwatch_camera_all",
             name="Camera All",
-            icon="mdi:cctv",
-            default_on=False,
-            restore_state=False)
+            icon="mdi:cctv")
 
 
 class OverwatchCameraGroupSwitch(OWSwitch):
@@ -2035,9 +2015,7 @@ class OverwatchCameraGroupSwitch(OWSwitch):
             entity_id=f"switch.overwatch_camera_group_{gid}",
             unique_id=f"overwatch_camera_group_{gid}",
             name=f"Camera Group: {g.get('name', gid)}",
-            icon="mdi:cctv",
-            default_on=False,
-            restore_state=False)
+            icon="mdi:cctv")
 
 
 class OverwatchCameraZoneSwitch(OWSwitch):
@@ -2047,9 +2025,7 @@ class OverwatchCameraZoneSwitch(OWSwitch):
             entity_id=f"switch.overwatch_camera_zone_{zid}",
             unique_id=f"overwatch_camera_zone_{zid}",
             name=f"Camera Zone: {z.get('name', zid)}",
-            icon="mdi:cctv",
-            default_on=False,
-            restore_state=False)
+            icon="mdi:cctv")
 
 
 class OverwatchCameraSwitch(OWSwitch):
@@ -2061,9 +2037,7 @@ class OverwatchCameraSwitch(OWSwitch):
             entity_id=f"switch.overwatch_camera_{safe}",
             unique_id=f"overwatch_camera_{safe}",
             name=f"Camera: {cam.get('name', cid)}",
-            icon="mdi:cctv",
-            default_on=False,
-            restore_state=False)
+            icon="mdi:cctv")
 `,
   "binary_sensor.py": `"""Binary sensor platform for HA Overwatch.
 
