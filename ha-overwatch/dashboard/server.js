@@ -1875,7 +1875,7 @@ class OWSwitch(CoordinatorEntity, SwitchEntity, RestoreEntity):
     """
     _attr_should_poll = False
 
-    def __init__(self, coordinator, entity_id: str, unique_id: str, name: str, icon: str = "mdi:shield"):
+    def __init__(self, coordinator, entity_id: str, unique_id: str, name: str, icon: str = "mdi:shield", default_on: bool = True):
         super().__init__(coordinator)
         # Set entity_id explicitly — this overrides HA's auto-generation
         self.entity_id = entity_id
@@ -1883,7 +1883,7 @@ class OWSwitch(CoordinatorEntity, SwitchEntity, RestoreEntity):
         self._attr_name = name
         self._attr_icon = icon
         self._attr_device_info = _dev(coordinator)
-        self._is_on = True
+        self._is_on = default_on
 
     @property
     def is_on(self) -> bool:
@@ -1964,7 +1964,8 @@ class OverwatchCameraFloorSwitch(OWSwitch):
             entity_id=f"switch.overwatch_camera_floor_{fid}",
             unique_id=f"overwatch_camera_floor_{fid}",
             name=f"Camera Floor: {f.get('name', fid)}",
-            icon="mdi:cctv")
+            icon="mdi:cctv",
+            default_on=False)
 
 
 class OverwatchCameraAllSwitch(OWSwitch):
@@ -1973,7 +1974,8 @@ class OverwatchCameraAllSwitch(OWSwitch):
             entity_id="switch.overwatch_camera_all",
             unique_id="overwatch_camera_all",
             name="Camera All",
-            icon="mdi:cctv")
+            icon="mdi:cctv",
+            default_on=False)
 
 
 class OverwatchCameraGroupSwitch(OWSwitch):
@@ -1983,7 +1985,8 @@ class OverwatchCameraGroupSwitch(OWSwitch):
             entity_id=f"switch.overwatch_camera_group_{gid}",
             unique_id=f"overwatch_camera_group_{gid}",
             name=f"Camera Group: {g.get('name', gid)}",
-            icon="mdi:cctv")
+            icon="mdi:cctv",
+            default_on=False)
 
 
 class OverwatchCameraZoneSwitch(OWSwitch):
@@ -1993,7 +1996,8 @@ class OverwatchCameraZoneSwitch(OWSwitch):
             entity_id=f"switch.overwatch_camera_zone_{zid}",
             unique_id=f"overwatch_camera_zone_{zid}",
             name=f"Camera Zone: {z.get('name', zid)}",
-            icon="mdi:cctv")
+            icon="mdi:cctv",
+            default_on=False)
 
 
 class OverwatchCameraSwitch(OWSwitch):
@@ -2005,7 +2009,8 @@ class OverwatchCameraSwitch(OWSwitch):
             entity_id=f"switch.overwatch_camera_{safe}",
             unique_id=f"overwatch_camera_{safe}",
             name=f"Camera: {cam.get('name', cid)}",
-            icon="mdi:cctv")
+            icon="mdi:cctv",
+            default_on=False)
 `,
   "binary_sensor.py": `"""Binary sensor platform for HA Overwatch.
 
@@ -2624,6 +2629,9 @@ function startHAListener() {
   }
 
   function pushBinarySensor(zone, isTriggered) {
+    // Disabled: generated binary_sensor entities poll /ow/triggered via TriggeredCoordinator.
+    // Pushing state through /api/states caused stale HA-triggered states after reloads.
+    return;
     if (!process.env.SUPERVISOR_TOKEN) return;
     const slug     = nameSlug(zone.name) || zone.id;
     const entityId = `binary_sensor.overwatch_zone_${slug}_triggered`;
