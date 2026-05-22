@@ -14,7 +14,7 @@
  *   argv[2] = port         (default 8099)
  *   argv[3] = data dir     (default: same as script dir)
  *             Static app files always served from script dir.
- *             Config, zones, and uploads read/written from data dir.
+ *             Config, zones, and uploads read/written from data dir.a
  * ============================================================ */
 
 const http    = require("http");
@@ -289,18 +289,11 @@ function alarmSelectedZones(alarm, zones, groups, floors) {
   const includeAllZones = zoneIds.includes("*") || groupIds.includes("*") || floorIds.includes("*");
   const selected = new Map();
 
-  function addZone(zone) {
-    if (zone && zone.id) selected.set(zone.id, zone);
-  }
+  function addZone(zone) { if (zone && zone.id) selected.set(zone.id, zone); }
 
-  if (includeAllZones) {
-    zones.forEach(addZone);
-    return [...selected.values()];
-  }
+  if (includeAllZones) { zones.forEach(addZone); return [...selected.values()]; }
 
-  zones.forEach(zone => {
-    if (setHasAny(zoneCanonicalIds(zone), zoneIds)) addZone(zone);
-  });
+  zones.forEach(zone => { if (setHasAny(zoneCanonicalIds(zone), zoneIds)) addZone(zone); });
 
   const selectedGroupIds = new Set((groupIds || []).map(String));
   groups.forEach(group => {
@@ -315,25 +308,15 @@ function alarmSelectedZones(alarm, zones, groups, floors) {
   floors.forEach(floor => {
     if (!setHasAny(floorCanonicalIds(floor), selectedFloorIds)) return;
     const isFirstFloor = floors.length === 0 || floors[0].id === floor.id;
-    zones.forEach(zone => {
-      if (zone.floor_id === floor.id || (!zone.floor_id && isFirstFloor)) addZone(zone);
-    });
+    zones.forEach(zone => { if (zone.floor_id === floor.id || (!zone.floor_id && isFirstFloor)) addZone(zone); });
   });
 
   return [...selected.values()];
 }
 
-function alarmSwitchEntityId(alarm) {
-  return `switch.overwatch_alarm_${nameSlug(alarm.name) || alarm.id}`;
-}
-
-function zoneSwitchEntityId(zone) {
-  return `switch.overwatch_zone_${nameSlug(zone.name) || zone.id}`;
-}
-
-function alarmDesiredArmed(alarm) {
-  return stateEntityOn(alarmSwitchEntityId(alarm), alarm.default_armed === true);
-}
+function alarmSwitchEntityId(alarm) { return `switch.overwatch_alarm_${nameSlug(alarm.name) || alarm.id}`; }
+function zoneSwitchEntityId(zone) { return `switch.overwatch_zone_${nameSlug(zone.name) || zone.id}`; }
+function alarmDesiredArmed(alarm) { return stateEntityOn(alarmSwitchEntityId(alarm), alarm.default_armed === true); }
 
 function buildAlarmEffectiveState() {
   const zones = loadZones();
@@ -343,7 +326,6 @@ function buildAlarmEffectiveState() {
 
   const selectedByAlarm = new Map();
   const armedByAlarm = new Map();
-
   alarms.forEach(alarm => {
     selectedByAlarm.set(alarm.id, alarmSelectedZones(alarm, zones, groups, floors));
     armedByAlarm.set(alarm.id, alarmDesiredArmed(alarm));
@@ -360,33 +342,19 @@ function buildAlarmEffectiveState() {
         const zSwitch = zoneSwitchEntityId(zone);
         if (!stateEntityOn(zSwitch, zone.enabled !== false)) {
           suppressedZoneIds.add(zone.id);
-          suppressed.push({
-            zone_id: nameSlug(zone.name) || zone.id,
-            zone_raw_id: zone.id,
-            zone_name: zone.name || zone.id,
-            reason: "manual_zone_disarm",
-            source: zSwitch,
-          });
+          suppressed.push({ zone_id: nameSlug(zone.name) || zone.id, zone_raw_id: zone.id, zone_name: zone.name || zone.id, reason: "manual_zone_disarm", source: zSwitch });
         }
       });
 
       alarms.forEach(other => {
         if (other.id === alarm.id) return;
         if (armedByAlarm.get(other.id) === true) return;
-        const otherSelected = selectedByAlarm.get(other.id) || [];
-        const otherSelectedIds = new Set(otherSelected.map(z => z.id));
+        const otherSelectedIds = new Set((selectedByAlarm.get(other.id) || []).map(z => z.id));
         selectedZones.forEach(zone => {
           if (!otherSelectedIds.has(zone.id)) return;
           if (suppressedZoneIds.has(zone.id)) return;
           suppressedZoneIds.add(zone.id);
-          suppressed.push({
-            zone_id: nameSlug(zone.name) || zone.id,
-            zone_raw_id: zone.id,
-            zone_name: zone.name || zone.id,
-            reason: "overlap_disarmed_alarm",
-            source_alarm: nameSlug(other.name) || other.id,
-            source_alarm_name: other.name || other.id,
-          });
+          suppressed.push({ zone_id: nameSlug(zone.name) || zone.id, zone_raw_id: zone.id, zone_name: zone.name || zone.id, reason: "overlap_disarmed_alarm", source_alarm: nameSlug(other.name) || other.id, source_alarm_name: other.name || other.id });
         });
       });
     }
@@ -396,29 +364,14 @@ function buildAlarmEffectiveState() {
     const activeCount = isArmed ? Math.max(0, selectedCount - suppressedCount) : 0;
     const state = !isArmed ? "disarmed" : (suppressedCount > 0 ? "armed_partial" : "armed_full");
 
-    return {
-      id: nameSlug(alarm.name) || alarm.id,
-      raw_id: alarm.id,
-      name: alarm.name || alarm.id,
-      role: alarm.role || null,
-      builtin: !!alarm.builtin,
-      state,
-      selected_zones: selectedCount,
-      active_zones: activeCount,
-      suppressed_zones: suppressedCount,
-      suppression_reasons: suppressed,
-    };
+    return { id: nameSlug(alarm.name) || alarm.id, raw_id: alarm.id, name: alarm.name || alarm.id, role: alarm.role || null, builtin: !!alarm.builtin, state, selected_zones: selectedCount, active_zones: activeCount, suppressed_zones: suppressedCount, suppression_reasons: suppressed };
   });
 
-  return {
-    alarms: effective,
-    generated_at: new Date().toISOString(),
-  };
+  return { alarms: effective, generated_at: new Date().toISOString() };
 }
 
 function isTriggeredStateValue(state) {
-  return ["on", "open", "opening", "detected", "home", "triggered", "motion", "unlocked"]
-    .includes(String(state || "").toLowerCase());
+  return ["on", "open", "opening", "detected", "home", "triggered", "motion", "unlocked"].includes(String(state || "").toLowerCase());
 }
 
 function buildTriggeredSnapshot() {
@@ -442,13 +395,7 @@ function buildTriggeredDetailSnapshot() {
     const slug = nameSlug(zone.name) || zone.id;
     const sensors = (zone.sensors || []).map(entityId => {
       const st = serverHaStates[entityId];
-      return {
-        entity_id: entityId,
-        state: st ? st.state : "unknown",
-        triggered: st ? isTriggeredStateValue(st.state) : false,
-        last_changed: st ? st.last_changed : null,
-        last_updated: st ? st.last_updated : null,
-      };
+      return { entity_id: entityId, state: st ? st.state : "unknown", triggered: st ? isTriggeredStateValue(st.state) : false, last_changed: st ? st.last_changed : null, last_updated: st ? st.last_updated : null };
     });
     out[slug] = { zone_id: zone.id, zone_name: zone.name || zone.id, triggered: sensors.some(s => s.triggered), sensors };
   }
@@ -1907,15 +1854,14 @@ def _dev(coordinator: ZoneCoordinator) -> DeviceInfo:
 
 class OWSwitch(CoordinatorEntity, SwitchEntity, RestoreEntity):
     """Base switch — state lives in HA, restored across restarts.
-    
-    entity_id is set explicitly so it is always predictable regardless
-    of device name or HA naming conventions.
+
+    Parent cascades are handled only from async_turn_on/off, not from HA state_changed
+    events. This prevents integration reload/restored-state events from fanning out.
     """
     _attr_should_poll = False
 
     def __init__(self, coordinator, entity_id: str, unique_id: str, name: str, icon: str = "mdi:shield"):
         super().__init__(coordinator)
-        # Set entity_id explicitly — this overrides HA's auto-generation
         self.entity_id = entity_id
         self._attr_unique_id = unique_id
         self._attr_name = name
@@ -1945,6 +1891,39 @@ class OWSwitch(CoordinatorEntity, SwitchEntity, RestoreEntity):
         # Do not republish state on coordinator refresh — state is authoritative in HA
         pass
 
+    @property
+    def ow_data(self) -> dict:
+        return self.coordinator.data or {}
+
+    async def _call_switches(self, entity_ids: list[str], on: bool) -> None:
+        ids = sorted({eid for eid in entity_ids if eid and eid != self.entity_id})
+        if not ids:
+            return
+        await self.hass.services.async_call(
+            "switch",
+            "turn_on" if on else "turn_off",
+            {"entity_id": ids},
+            blocking=False,
+        )
+
+    @staticmethod
+    def _safe_camera_id(cam_id: str) -> str:
+        return cam_id.replace("camera.", "", 1).replace(".", "_").replace("-", "_").replace(" ", "_").lower()
+
+    @staticmethod
+    def _zone_entity(zone: dict) -> str:
+        return f"switch.overwatch_zone_{zone['id']}"
+
+    @classmethod
+    def _camera_entity(cls, cam_id: str) -> str:
+        return f"switch.overwatch_camera_{cls._safe_camera_id(cam_id)}"
+
+    def _floor_zones(self, floor_id: str) -> list[dict]:
+        zones = self.ow_data.get("zones", [])
+        floors = self.ow_data.get("floors", [])
+        is_first_floor = len(floors) == 0 or floors[0].get("id") == floor_id
+        return [z for z in zones if z.get("floor_id") == floor_id or (not z.get("floor_id") and is_first_floor)]
+
 
 class OverwatchMasterSwitch(OWSwitch):
     def __init__(self, c):
@@ -1953,6 +1932,18 @@ class OverwatchMasterSwitch(OWSwitch):
             unique_id="overwatch_zone_master",
             name="Overwatch Zone Master",
             icon="mdi:shield-home")
+
+    async def _cascade(self, on: bool) -> None:
+        zones = self.ow_data.get("zones", [])
+        await self._call_switches([self._zone_entity(z) for z in zones], on)
+
+    async def async_turn_on(self, **kwargs) -> None:
+        await super().async_turn_on(**kwargs)
+        await self._cascade(True)
+
+    async def async_turn_off(self, **kwargs) -> None:
+        await super().async_turn_off(**kwargs)
+        await self._cascade(False)
 
 
 class OverwatchAlarmSwitch(OWSwitch):
@@ -1967,12 +1958,30 @@ class OverwatchAlarmSwitch(OWSwitch):
 
 class OverwatchGroupSwitch(OWSwitch):
     def __init__(self, c, g):
+        self._group = g
         gid = g["id"]
         super().__init__(c,
             entity_id=f"switch.overwatch_zone_group_{gid}",
             unique_id=f"overwatch_zone_group_{gid}",
             name=f"Zone Group: {g.get('name', gid)}",
             icon="mdi:layers")
+
+    async def _cascade(self, on: bool) -> None:
+        zones = self.ow_data.get("zones", [])
+        child = []
+        for zid in self._group.get("zone_ids", []):
+            z = next((z for z in zones if z.get("id") == zid), None)
+            if z:
+                child.append(self._zone_entity(z))
+        await self._call_switches(child, on)
+
+    async def async_turn_on(self, **kwargs) -> None:
+        await super().async_turn_on(**kwargs)
+        await self._cascade(True)
+
+    async def async_turn_off(self, **kwargs) -> None:
+        await super().async_turn_off(**kwargs)
+        await self._cascade(False)
 
 
 class OverwatchZoneSwitch(OWSwitch):
@@ -1987,6 +1996,7 @@ class OverwatchZoneSwitch(OWSwitch):
 
 class OverwatchZoneFloorSwitch(OWSwitch):
     def __init__(self, c, f):
+        self._floor = f
         fid = f["id"]
         super().__init__(c,
             entity_id=f"switch.overwatch_zone_floor_{fid}",
@@ -1994,15 +2004,43 @@ class OverwatchZoneFloorSwitch(OWSwitch):
             name=f"Zone Floor: {f.get('name', fid)}",
             icon="mdi:floor-plan")
 
+    async def _cascade(self, on: bool) -> None:
+        await self._call_switches([self._zone_entity(z) for z in self._floor_zones(self._floor["id"])], on)
+
+    async def async_turn_on(self, **kwargs) -> None:
+        await super().async_turn_on(**kwargs)
+        await self._cascade(True)
+
+    async def async_turn_off(self, **kwargs) -> None:
+        await super().async_turn_off(**kwargs)
+        await self._cascade(False)
+
 
 class OverwatchCameraFloorSwitch(OWSwitch):
     def __init__(self, c, f):
+        self._floor = f
         fid = f["id"]
         super().__init__(c,
             entity_id=f"switch.overwatch_camera_floor_{fid}",
             unique_id=f"overwatch_camera_floor_{fid}",
             name=f"Camera Floor: {f.get('name', fid)}",
             icon="mdi:cctv")
+
+    async def _cascade(self, on: bool) -> None:
+        child = []
+        for z in self._floor_zones(self._floor["id"]):
+            if z.get("cameras"):
+                child.append(f"switch.overwatch_camera_zone_{z['id']}")
+                child.extend(self._camera_entity(cam_id) for cam_id in z.get("cameras", []))
+        await self._call_switches(child, on)
+
+    async def async_turn_on(self, **kwargs) -> None:
+        await super().async_turn_on(**kwargs)
+        await self._cascade(True)
+
+    async def async_turn_off(self, **kwargs) -> None:
+        await super().async_turn_off(**kwargs)
+        await self._cascade(False)
 
 
 class OverwatchCameraAllSwitch(OWSwitch):
@@ -2013,9 +2051,26 @@ class OverwatchCameraAllSwitch(OWSwitch):
             name="Camera All",
             icon="mdi:cctv")
 
+    async def _cascade(self, on: bool) -> None:
+        child = []
+        for z in self.ow_data.get("zones", []):
+            if z.get("cameras"):
+                child.append(f"switch.overwatch_camera_zone_{z['id']}")
+                child.extend(self._camera_entity(cam_id) for cam_id in z.get("cameras", []))
+        await self._call_switches(child, on)
+
+    async def async_turn_on(self, **kwargs) -> None:
+        await super().async_turn_on(**kwargs)
+        await self._cascade(True)
+
+    async def async_turn_off(self, **kwargs) -> None:
+        await super().async_turn_off(**kwargs)
+        await self._cascade(False)
+
 
 class OverwatchCameraGroupSwitch(OWSwitch):
     def __init__(self, c, g):
+        self._group = g
         gid = g["id"]
         super().__init__(c,
             entity_id=f"switch.overwatch_camera_group_{gid}",
@@ -2023,9 +2078,28 @@ class OverwatchCameraGroupSwitch(OWSwitch):
             name=f"Camera Group: {g.get('name', gid)}",
             icon="mdi:cctv")
 
+    async def _cascade(self, on: bool) -> None:
+        zones = self.ow_data.get("zones", [])
+        child = []
+        for zid in self._group.get("zone_ids", []):
+            z = next((z for z in zones if z.get("id") == zid), None)
+            if z and z.get("cameras"):
+                child.append(f"switch.overwatch_camera_zone_{z['id']}")
+                child.extend(self._camera_entity(cam_id) for cam_id in z.get("cameras", []))
+        await self._call_switches(child, on)
+
+    async def async_turn_on(self, **kwargs) -> None:
+        await super().async_turn_on(**kwargs)
+        await self._cascade(True)
+
+    async def async_turn_off(self, **kwargs) -> None:
+        await super().async_turn_off(**kwargs)
+        await self._cascade(False)
+
 
 class OverwatchCameraZoneSwitch(OWSwitch):
     def __init__(self, c, z):
+        self._zone = z
         zid = z["id"]
         super().__init__(c,
             entity_id=f"switch.overwatch_camera_zone_{zid}",
@@ -2033,12 +2107,22 @@ class OverwatchCameraZoneSwitch(OWSwitch):
             name=f"Camera Zone: {z.get('name', zid)}",
             icon="mdi:cctv")
 
+    async def _cascade(self, on: bool) -> None:
+        await self._call_switches([self._camera_entity(cam_id) for cam_id in self._zone.get("cameras", [])], on)
+
+    async def async_turn_on(self, **kwargs) -> None:
+        await super().async_turn_on(**kwargs)
+        await self._cascade(True)
+
+    async def async_turn_off(self, **kwargs) -> None:
+        await super().async_turn_off(**kwargs)
+        await self._cascade(False)
+
 
 class OverwatchCameraSwitch(OWSwitch):
     def __init__(self, c, cam):
         cid = cam["id"]
-        bare = cid[len("camera."):] if cid.startswith("camera.") else cid
-        safe = bare.replace(".", "_").replace("-", "_")
+        safe = cid.replace("camera.", "", 1).replace(".", "_").replace("-", "_").replace(" ", "_").lower()
         super().__init__(c,
             entity_id=f"switch.overwatch_camera_{safe}",
             unique_id=f"overwatch_camera_{safe}",
@@ -2191,7 +2275,7 @@ class OverwatchZoneTriggered(OWSensor):
   "manifest.json": `{
   "domain": "ha_overwatch",
   "name": "HA Overwatch",
-  "version": "1.14.5",
+  "version": "1.14.6",
   "documentation": "https://github.com/DM-AU/ha-overwatch",
   "issue_tracker": "https://github.com/DM-AU/ha-overwatch/issues",
   "codeowners": [],
@@ -2395,11 +2479,6 @@ function startHAListener() {
   let   cachedZones    = [];  // refreshed every 60s and on auth_ok
   let   sensorToZones  = {};  // entityId -> [zone, ...] for fast lookup
   let   zoneCacheTimer = null; // tracked so we don't stack intervals on reconnect
-  let   haStateHydrated = false;
-  let   cascadeSuppressedUntil = 0;
-  const CASCADE_GRACE_MS = 15000;
-  const SUPPRESSED_WRITE_MS = 5000;
-  const suppressedCascadeWrites = {}; // entity_id -> { state, until, reason }
 
   function refreshZoneCache() {
     cachedZones   = loadZones();
@@ -2422,9 +2501,6 @@ function startHAListener() {
       return;
     }
     if (msg.type === "auth_ok") {
-      haStateHydrated = false;
-      cascadeSuppressedUntil = Date.now() + CASCADE_GRACE_MS;
-      Object.keys(suppressedCascadeWrites).forEach(k => delete suppressedCascadeWrites[k]);
       refreshZoneCache();
       if (zoneCacheTimer) clearInterval(zoneCacheTimer);
       zoneCacheTimer = setInterval(refreshZoneCache, 60000); // keep cache fresh
@@ -2472,17 +2548,11 @@ function startHAListener() {
         }
       });
       if (seeded > 0) console.log(`[HA-Overwatch] Seeded triggered state for ${seeded} zone sensors`);
-      setTimeout(() => {
-        haStateHydrated = true;
-        cascadeSuppressedUntil = 0;
-        console.log("[HA-Overwatch] HA state hydrated; guarded switch cascade/aggregation enabled.");
-      }, 3000);
       return;
     }
     if (msg.type === "event" && msg.event?.event_type === "state_changed") {
       const { entity_id, new_state } = msg.event.data || {};
       if (!entity_id || !new_state) return;
-      const old_state = msg.event.data?.old_state || null;
       // Keep full state cache up to date
       serverHaStates[entity_id] = new_state;
       const inZone = !!sensorToZones[entity_id]?.length;
@@ -2490,11 +2560,9 @@ function startHAListener() {
         console.log(`[HA-Overwatch] state_changed: ${entity_id} → ${new_state.state} (zone sensor)`);
       }
       onStateChanged(entity_id, new_state.state || "");
-
-      if (entity_id.startsWith('switch.overwatch_')) {
-        maybeCascadeExplicitParentSwitch(entity_id, old_state, new_state);
-        recomputeAffectedDerivedParents(entity_id);
-      }
+      // Do not cascade switch state changes from HA state_changed events.
+      // Parent cascades are handled inside switch.py async_turn_on/off only.
+      // HA reload/restored-state events must be treated as state only.
     }
 
     // Log a heartbeat every 50 events so we can confirm events are flowing
@@ -2509,24 +2577,11 @@ function startHAListener() {
     }
   }
 
-  function markSuppressedCascadeWrite(entityId, on, reason = 'internal') {
-    suppressedCascadeWrites[entityId] = {
-      state: on ? 'on' : 'off',
-      until: Date.now() + SUPPRESSED_WRITE_MS,
-      reason,
-    };
-  }
-
-  function isSuppressedCascadeEvent(entityId, state) {
-    const entry = suppressedCascadeWrites[entityId];
-    if (!entry) return false;
-    if (entry.until < Date.now()) { delete suppressedCascadeWrites[entityId]; return false; }
-    return entry.state === String(state || '').toLowerCase();
-  }
-
-  function callHASwitch(entityId, on, reason = 'internal') {
+  // Call a HA switch service via supervisor REST API (fire-and-forget)
+  function callHASwitch(entityId, on) {
     if (!process.env.SUPERVISOR_TOKEN) return;
-    markSuppressedCascadeWrite(entityId, on, reason);
+    // Update local cache immediately so next /ow/states poll reflects it
+    // Create a stub if entity not yet in cache (e.g. newly created floor entity)
     serverHaStates[entityId] = {
       ...(serverHaStates[entityId] || { entity_id: entityId, attributes: {} }),
       state: on ? 'on' : 'off',
@@ -2547,222 +2602,123 @@ function startHAListener() {
     req.end();
   }
 
-  function callHASwitchIfDifferent(entityId, on, reason = 'internal') {
-    const desired = on ? 'on' : 'off';
-    const current = (serverHaStates[entityId]?.state || '').toLowerCase();
-    if (current === desired) return false;
-    callHASwitch(entityId, on, reason);
-    return true;
-  }
+  // Cascade switch state changes server-side — mirrors what app.js does in the browser
+  // This ensures /ow/states is always consistent regardless of any browser being open
+  function cascadeSwitchState(entityId, state) {
+    // Only process overwatch switch entities — skip sensors, cameras, etc.
+    if (!entityId.startsWith('switch.overwatch_')) return;
+    const on = (state || '').toLowerCase() !== 'off';
 
-  function getZoneSwitchEntity(zone) {
-    return `switch.overwatch_zone_${nameSlug(zone.name) || zone.id}`;
-  }
-
-  function getCameraSwitchEntity(camId) {
-    const safe = camId.replace(/^camera\./, '').replace(/[^a-z0-9]+/g, '_');
-    return `switch.overwatch_camera_${safe}`;
-  }
-
-  function getFloorZones(floor, allZones, allFloors) {
-    const isFirstFloor = allFloors.length === 0 || allFloors[0].id === floor.id;
-    return allZones.filter(z => z.floor_id === floor.id || (!z.floor_id && isFirstFloor));
-  }
-
-  function allSwitchesOn(entityIds) {
-    if (!entityIds.length) return false;
-    return entityIds.every(entityId => (serverHaStates[entityId]?.state || '').toLowerCase() === 'on');
-  }
-
-  function setDerivedParentSwitch(entityId, on) {
-    callHASwitchIfDifferent(entityId, on, 'derived_parent_sync');
-  }
-
-  function isParentSwitch(entityId) {
-    return entityId === 'switch.overwatch_zone_master'
-      || entityId.startsWith('switch.overwatch_zone_group_')
-      || entityId.startsWith('switch.overwatch_zone_floor_')
-      || entityId === 'switch.overwatch_camera_all'
-      || entityId.startsWith('switch.overwatch_camera_group_')
-      || entityId.startsWith('switch.overwatch_camera_zone_')
-      || entityId.startsWith('switch.overwatch_camera_floor_');
-  }
-
-  function maybeCascadeExplicitParentSwitch(entityId, oldStateObj, newStateObj) {
-    if (!entityId.startsWith('switch.overwatch_')) return false;
-    const oldState = (oldStateObj?.state || '').toLowerCase();
-    const newState = (newStateObj?.state || '').toLowerCase();
-    if (!oldState || !newState || oldState === newState) return false;
-    if (['unknown', 'unavailable'].includes(oldState) || ['unknown', 'unavailable'].includes(newState)) return false;
-    if (!haStateHydrated || Date.now() < cascadeSuppressedUntil) return false;
-    if (isSuppressedCascadeEvent(entityId, newState)) return false;
-    if (!isParentSwitch(entityId)) return false;
-
-    cascadeParentToChildren(entityId, newState !== 'off');
-    return true;
-  }
-
-  function cascadeParentToChildren(entityId, on) {
-    const allZones = loadZones();
-    const allGroups = loadGroups();
-    const allFloors = loadFloors();
-
+    // Zone master → all groups + zones
     if (entityId === 'switch.overwatch_zone_master') {
-      console.log(`[HA-Overwatch] Explicit cascade: zone master → ${on ? 'on' : 'off'}`);
-      allZones.forEach(z => callHASwitchIfDifferent(getZoneSwitchEntity(z), on, 'explicit_parent_cascade'));
-      allGroups.forEach(g => callHASwitchIfDifferent(`switch.overwatch_zone_group_${nameSlug(g.name) || g.id}`, on, 'derived_parent_sync'));
-      allFloors.forEach(f => callHASwitchIfDifferent(`switch.overwatch_zone_floor_${f.id}`, on, 'derived_parent_sync'));
+      console.log(`[HA-Overwatch] Cascade: zone master → ${on ? 'on' : 'off'}`);
+      const allZones  = loadZones();
+      const allGroups = loadGroups();
+      allGroups.forEach(g => callHASwitch(`switch.overwatch_zone_group_${nameSlug(g.name) || g.id}`, on));
+      allZones.forEach(z  => callHASwitch(`switch.overwatch_zone_${nameSlug(z.name) || z.id}`, on));
       return;
     }
 
+    // Zone group → member zones
     if (entityId.startsWith('switch.overwatch_zone_group_')) {
       const slug = entityId.replace('switch.overwatch_zone_group_', '');
+      const allGroups = loadGroups();
+      const allZones  = loadZones();
       const group = allGroups.find(g => (nameSlug(g.name) || g.id) === slug);
-      if (!group) return;
-      console.log(`[HA-Overwatch] Explicit cascade: zone group ${slug} → ${on ? 'on' : 'off'}`);
-      (group.zone_ids || []).forEach(zid => {
-        const z = allZones.find(z => z.id === zid);
-        if (z) callHASwitchIfDifferent(getZoneSwitchEntity(z), on, 'explicit_parent_cascade');
-      });
+      if (group) {
+        console.log(`[HA-Overwatch] Cascade: zone group ${slug} → ${on ? 'on' : 'off'}`);
+        (group.zone_ids || []).forEach(zid => {
+          const z = allZones.find(z => z.id === zid);
+          if (z) callHASwitch(`switch.overwatch_zone_${nameSlug(z.name) || z.id}`, on);
+        });
+      }
       return;
     }
 
-    if (entityId.startsWith('switch.overwatch_zone_floor_')) {
-      const fid = entityId.replace('switch.overwatch_zone_floor_', '');
-      const floor = allFloors.find(f => f.id === fid);
-      if (!floor) return;
-      console.log(`[HA-Overwatch] Explicit cascade: zone floor ${fid} → ${on ? 'on' : 'off'}`);
-      getFloorZones(floor, allZones, allFloors).forEach(z => callHASwitchIfDifferent(getZoneSwitchEntity(z), on, 'explicit_parent_cascade'));
-      return;
-    }
-
+    // Camera all → all camera zones + cameras
     if (entityId === 'switch.overwatch_camera_all') {
-      console.log(`[HA-Overwatch] Explicit cascade: camera all → ${on ? 'on' : 'off'}`);
+      console.log(`[HA-Overwatch] Cascade: camera all → ${on ? 'on' : 'off'}`);
+      const allZones = loadZones();
       allZones.forEach(z => {
         if ((z.cameras || []).length > 0) {
-          callHASwitchIfDifferent(`switch.overwatch_camera_zone_${nameSlug(z.name) || z.id}`, on, 'derived_parent_sync');
-          (z.cameras || []).forEach(camId => callHASwitchIfDifferent(getCameraSwitchEntity(camId), on, 'explicit_parent_cascade'));
+          callHASwitch(`switch.overwatch_camera_zone_${nameSlug(z.name) || z.id}`, on);
+          (z.cameras || []).forEach(camId => {
+            const safe = camId.replace(/^camera\./, '').replace(/[^a-z0-9]+/g, '_');
+            callHASwitch(`switch.overwatch_camera_${safe}`, on);
+          });
         }
       });
       return;
     }
 
+    // Camera group → member camera zones + cameras
     if (entityId.startsWith('switch.overwatch_camera_group_')) {
       const slug = entityId.replace('switch.overwatch_camera_group_', '');
+      const allGroups = loadGroups();
+      const allZones  = loadZones();
       const group = allGroups.find(g => (nameSlug(g.name) || g.id) === slug);
-      if (!group) return;
-      console.log(`[HA-Overwatch] Explicit cascade: camera group ${slug} → ${on ? 'on' : 'off'}`);
-      (group.zone_ids || []).forEach(zid => {
-        const z = allZones.find(z => z.id === zid);
-        if (z && (z.cameras || []).length > 0) {
-          callHASwitchIfDifferent(`switch.overwatch_camera_zone_${nameSlug(z.name) || z.id}`, on, 'derived_parent_sync');
-          (z.cameras || []).forEach(camId => callHASwitchIfDifferent(getCameraSwitchEntity(camId), on, 'explicit_parent_cascade'));
-        }
-      });
+      if (group) {
+        console.log(`[HA-Overwatch] Cascade: camera group ${slug} → ${on ? 'on' : 'off'}`);
+        (group.zone_ids || []).forEach(zid => {
+          const z = allZones.find(z => z.id === zid);
+          if (z && (z.cameras || []).length > 0) {
+            callHASwitch(`switch.overwatch_camera_zone_${nameSlug(z.name) || z.id}`, on);
+            (z.cameras || []).forEach(camId => {
+              const safe = camId.replace(/^camera\./, '').replace(/[^a-z0-9]+/g, '_');
+              callHASwitch(`switch.overwatch_camera_${safe}`, on);
+            });
+          }
+        });
+      }
       return;
     }
 
+    // Camera zone → member cameras
     if (entityId.startsWith('switch.overwatch_camera_zone_')) {
       const slug = entityId.replace('switch.overwatch_camera_zone_', '');
+      const allZones = loadZones();
       const zone = allZones.find(z => (nameSlug(z.name) || z.id) === slug);
-      if (!zone) return;
-      console.log(`[HA-Overwatch] Explicit cascade: camera zone ${slug} → ${on ? 'on' : 'off'}`);
-      (zone.cameras || []).forEach(camId => callHASwitchIfDifferent(getCameraSwitchEntity(camId), on, 'explicit_parent_cascade'));
+      if (zone && (zone.cameras || []).length > 0) {
+        console.log(`[HA-Overwatch] Cascade: camera zone ${slug} → ${on ? 'on' : 'off'}`);
+        (zone.cameras || []).forEach(camId => {
+          const safe = camId.replace(/^camera\./, '').replace(/[^a-z0-9]+/g, '_');
+          callHASwitch(`switch.overwatch_camera_${safe}`, on);
+        });
+      }
       return;
     }
 
+    // Zone floor → all zones on that floor
+    if (entityId.startsWith('switch.overwatch_zone_floor_')) {
+      const fid = entityId.replace('switch.overwatch_zone_floor_', '');
+      const allZones  = loadZones();
+      const allFloors = loadFloors();
+      const isFirstFloor = allFloors.length === 0 || allFloors[0].id === fid;
+      // Zones with no floor_id belong to the first floor
+      const floorZones = allZones.filter(z => z.floor_id === fid || (!z.floor_id && isFirstFloor));
+      console.log(`[HA-Overwatch] Zone floor cascade: fid=${fid}, allZones=${allZones.length}, matched=${floorZones.length}`);
+      floorZones.forEach(z => callHASwitch(`switch.overwatch_zone_${nameSlug(z.name) || z.id}`, on));
+      return;
+    }
+
+    // Camera floor → all camera zones + cameras on that floor
     if (entityId.startsWith('switch.overwatch_camera_floor_')) {
       const fid = entityId.replace('switch.overwatch_camera_floor_', '');
-      const floor = allFloors.find(f => f.id === fid);
-      if (!floor) return;
-      console.log(`[HA-Overwatch] Explicit cascade: camera floor ${fid} → ${on ? 'on' : 'off'}`);
-      getFloorZones(floor, allZones, allFloors).forEach(z => {
-        if ((z.cameras || []).length > 0) {
-          callHASwitchIfDifferent(`switch.overwatch_camera_zone_${nameSlug(z.name) || z.id}`, on, 'derived_parent_sync');
-          (z.cameras || []).forEach(camId => callHASwitchIfDifferent(getCameraSwitchEntity(camId), on, 'explicit_parent_cascade'));
-        }
-      });
-    }
-  }
-
-  function recomputeAffectedDerivedParents(entityId) {
-    if (!haStateHydrated || Date.now() < cascadeSuppressedUntil) return;
-    if (isSuppressedCascadeEvent(entityId, serverHaStates[entityId]?.state || '')) {
-      // Internal child writes still may need aggregation once HA reports them, so continue below.
-    }
-
-    const allZones = loadZones();
-    const allGroups = loadGroups();
-    const allFloors = loadFloors();
-
-    function recomputeZoneParentsForZone(zone) {
-      if (!zone) return;
-      allGroups.forEach(g => {
-        if (!(g.zone_ids || []).includes(zone.id)) return;
-        const childIds = (g.zone_ids || [])
-          .map(zid => allZones.find(z => z.id === zid))
-          .filter(Boolean)
-          .map(getZoneSwitchEntity);
-        setDerivedParentSwitch(`switch.overwatch_zone_group_${nameSlug(g.name) || g.id}`, allSwitchesOn(childIds));
-      });
-      allFloors.forEach(f => {
-        const floorZones = getFloorZones(f, allZones, allFloors);
-        if (!floorZones.some(z => z.id === zone.id)) return;
-        setDerivedParentSwitch(`switch.overwatch_zone_floor_${f.id}`, allSwitchesOn(floorZones.map(getZoneSwitchEntity)));
-      });
-      // Do not derive switch.overwatch_zone_master from children. Master is a command switch, not an aggregate switch.
-    }
-
-    function recomputeCameraParentsForZone(zone) {
-      if (!zone || !(zone.cameras || []).length) return;
-      const zoneCamIds = (zone.cameras || []).map(getCameraSwitchEntity);
-      setDerivedParentSwitch(`switch.overwatch_camera_zone_${nameSlug(zone.name) || zone.id}`, allSwitchesOn(zoneCamIds));
-
-      allGroups.forEach(g => {
-        if (!(g.zone_ids || []).includes(zone.id)) return;
-        const camIds = [];
-        (g.zone_ids || []).forEach(zid => {
-          const z = allZones.find(z => z.id === zid);
-          if (z) (z.cameras || []).forEach(camId => camIds.push(getCameraSwitchEntity(camId)));
+      const allZones  = loadZones();
+      const allFloors = loadFloors();
+      const isFirstFloor = allFloors.length === 0 || allFloors[0].id === fid;
+      // Zones with no floor_id belong to the first floor
+      const floorZones = allZones.filter(z =>
+        (z.floor_id === fid || (!z.floor_id && isFirstFloor)) && (z.cameras || []).length > 0);
+      console.log(`[HA-Overwatch] Camera floor cascade: fid=${fid}, allZones=${allZones.length}, matched=${floorZones.length}`);
+      floorZones.forEach(z => {
+        callHASwitch(`switch.overwatch_camera_zone_${nameSlug(z.name) || z.id}`, on);
+        (z.cameras || []).forEach(camId => {
+          const safe = camId.replace(/^camera\./, '').replace(/[^a-z0-9]+/g, '_');
+          callHASwitch(`switch.overwatch_camera_${safe}`, on);
         });
-        setDerivedParentSwitch(`switch.overwatch_camera_group_${nameSlug(g.name) || g.id}`, allSwitchesOn(camIds));
       });
-
-      allFloors.forEach(f => {
-        const floorZones = getFloorZones(f, allZones, allFloors);
-        if (!floorZones.some(z => z.id === zone.id)) return;
-        const camIds = [];
-        floorZones.forEach(z => (z.cameras || []).forEach(camId => camIds.push(getCameraSwitchEntity(camId))));
-        setDerivedParentSwitch(`switch.overwatch_camera_floor_${f.id}`, allSwitchesOn(camIds));
-      });
-
-      const allCamIds = [];
-      allZones.forEach(z => (z.cameras || []).forEach(camId => allCamIds.push(getCameraSwitchEntity(camId))));
-      setDerivedParentSwitch('switch.overwatch_camera_all', allSwitchesOn(allCamIds));
-    }
-
-    if (entityId.startsWith('switch.overwatch_zone_')
-        && !entityId.startsWith('switch.overwatch_zone_group_')
-        && !entityId.startsWith('switch.overwatch_zone_floor_')
-        && entityId !== 'switch.overwatch_zone_master') {
-      const slug = entityId.replace('switch.overwatch_zone_', '');
-      recomputeZoneParentsForZone(allZones.find(z => (nameSlug(z.name) || z.id) === slug));
       return;
-    }
-
-    if (entityId.startsWith('switch.overwatch_camera_')
-        && !entityId.startsWith('switch.overwatch_camera_group_')
-        && !entityId.startsWith('switch.overwatch_camera_zone_')
-        && !entityId.startsWith('switch.overwatch_camera_floor_')
-        && entityId !== 'switch.overwatch_camera_all') {
-      const zone = allZones.find(z => (z.cameras || []).some(camId => getCameraSwitchEntity(camId) === entityId));
-      recomputeCameraParentsForZone(zone);
-      return;
-    }
-
-    if (entityId.startsWith('switch.overwatch_camera_zone_')) {
-      const slug = entityId.replace('switch.overwatch_camera_zone_', '');
-      recomputeCameraParentsForZone(allZones.find(z => (nameSlug(z.name) || z.id) === slug));
     }
   }
 
