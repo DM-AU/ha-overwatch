@@ -298,7 +298,10 @@ function alarmSelectedZones(alarm, zones, groups, floors) {
   const selectedGroupIds = new Set((groupIds || []).map(String));
   groups.forEach(group => {
     if (!setHasAny(groupCanonicalIds(group), selectedGroupIds)) return;
-    (group.zone_ids || []).forEach(zid => addZone(zones.find(z => z.id === zid || zoneCanonicalIds(z).has(String(zid)))));
+    (group.zone_ids || []).forEach(zid => {
+      const zone = zones.find(z => z.id === zid || zoneCanonicalIds(z).has(String(zid)));
+      addZone(zone);
+    });
   });
 
   const selectedFloorIds = new Set((floorIds || []).map(String));
@@ -1646,7 +1649,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
-PLATFORMS = [Platform.SWITCH, Platform.BINARY_SENSOR, Platform.SENSOR]
+PLATFORMS = [Platform.SWITCH, Platform.BINARY_SENSOR]
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
@@ -1667,14 +1670,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     triggered_coordinator = TriggeredCoordinator(hass, url)
     await triggered_coordinator.async_config_entry_first_refresh()
 
-    # Alarm effective-state coordinator — polls /ow/alarms/effective for rich sensor state
-    alarm_effective_coordinator = AlarmEffectiveCoordinator(hass, url)
-    await alarm_effective_coordinator.async_config_entry_first_refresh()
-
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {
         "zone_coordinator":     zone_coordinator,
         "triggered_coordinator": triggered_coordinator,
-        "alarm_effective_coordinator": alarm_effective_coordinator,
     }
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
@@ -1730,26 +1728,6 @@ class TriggeredCoordinator(DataUpdateCoordinator):
                     return await resp.json(content_type=None)
         except aiohttp.ClientError:
             return {}
-
-class AlarmEffectiveCoordinator(DataUpdateCoordinator):
-    """Polls /ow/alarms/effective for alarm profile effective states."""
-
-    def __init__(self, hass: HomeAssistant, url: str) -> None:
-        super().__init__(hass, _LOGGER, name="HA Overwatch Alarm Effective State",
-            update_interval=timedelta(seconds=10))
-        self.url = url
-
-    async def _async_update_data(self) -> dict:
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(f"{self.url}/ow/alarms/effective",
-                    timeout=aiohttp.ClientTimeout(total=5)) as resp:
-                    if resp.status != 200:
-                        return {"alarms": []}
-                    return await resp.json(content_type=None)
-        except aiohttp.ClientError:
-            return {"alarms": []}
-
 `,
   "const.py": `"""Constants for HA Overwatch integration."""
 DOMAIN = "ha_overwatch"
@@ -2029,97 +2007,6 @@ class OverwatchCameraSwitch(OWSwitch):
             name=f"Camera: {cam.get('name', cid)}",
             icon="mdi:cctv")
 `,
-  "sensor.py": `"""Sensor platform for HA Overwatch alarm effective states."""
-from __future__ import annotations
-import logging
-from homeassistant.components.sensor import SensorEntity
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
-from homeassistant.helpers import entity_registry as er
-from homeassistant.helpers.entity import DeviceInfo
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
-from .const import DOMAIN
-from . import AlarmEffectiveCoordinator
-
-_LOGGER = logging.getLogger(__name__)
-
-
-async def async_setup_entry(
-    hass: HomeAssistant, entry: ConfigEntry,
-    async_add_entities: AddEntitiesCallback,
-) -> None:
-    coordinator: AlarmEffectiveCoordinator = hass.data[DOMAIN][entry.entry_id]["alarm_effective_coordinator"]
-    alarms = coordinator.data.get("alarms", []) if coordinator.data else []
-    entities = [OverwatchAlarmEffectiveStateSensor(coordinator, alarm) for alarm in alarms]
-    async_add_entities(entities)
-
-    registry = er.async_get(hass)
-    for ent in entities:
-        registry.async_get_or_create(
-            domain="sensor",
-            platform=DOMAIN,
-            unique_id=ent.unique_id,
-            suggested_object_id=ent.suggested_object_id,
-        )
-
-
-def _dev(coordinator: AlarmEffectiveCoordinator) -> DeviceInfo:
-    return DeviceInfo(
-        identifiers={(DOMAIN, "overwatch")},
-        name="HA Overwatch",
-        manufacturer="HA Overwatch",
-        model="Floor Plan Dashboard",
-        configuration_url=coordinator.url,
-    )
-
-
-class OverwatchAlarmEffectiveStateSensor(CoordinatorEntity, SensorEntity):
-    """Reports one alarm profile's effective state and metadata."""
-
-    _attr_icon = "mdi:shield-check"
-    _attr_should_poll = False
-
-    def __init__(self, coordinator: AlarmEffectiveCoordinator, alarm: dict) -> None:
-        super().__init__(coordinator)
-        aid = alarm["id"]
-        name = alarm.get("name", aid)
-        self._aid = aid
-        self._attr_unique_id = f"overwatch_alarm_{aid}_effective_state"
-        self._attr_name = f"Alarm Effective State: {name}"
-        self._attr_device_info = _dev(coordinator)
-        self._attr_entity_registry_enabled_default = True
-        self.entity_id = f"sensor.overwatch_alarm_{aid}_effective_state"
-        self.suggested_object_id = f"overwatch_alarm_{aid}_effective_state"
-
-    @property
-    def alarm_data(self) -> dict:
-        for alarm in (self.coordinator.data or {}).get("alarms", []):
-            if alarm.get("id") == self._aid:
-                return alarm
-        return {}
-
-    @property
-    def native_value(self) -> str:
-        return self.alarm_data.get("state", "unknown")
-
-    @property
-    def extra_state_attributes(self) -> dict:
-        alarm = self.alarm_data
-        return {
-            "alarm_id": alarm.get("id", self._aid),
-            "alarm_raw_id": alarm.get("raw_id"),
-            "alarm_name": alarm.get("name"),
-            "role": alarm.get("role"),
-            "builtin": alarm.get("builtin"),
-            "selected_zones": alarm.get("selected_zones", 0),
-            "active_zones": alarm.get("active_zones", 0),
-            "suppressed_zones": alarm.get("suppressed_zones", 0),
-            "suppression_reasons": alarm.get("suppression_reasons", []),
-            "generated_at": (self.coordinator.data or {}).get("generated_at"),
-        }
-`
-,
   "binary_sensor.py": `"""Binary sensor platform for HA Overwatch.
 
 Reads triggered state from TriggeredCoordinator which polls /ow/triggered every 2s.
