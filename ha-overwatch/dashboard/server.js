@@ -1,4 +1,4 @@
-// HA-Overwatch 0.05.07-alarm-sensors1: read-only HA alarm effective-state sensors; no cascade changes.
+// HA-Overwatch 0.05.09-alarm-effective-slug-priority: read-only HA alarm sensors + canonical slug state lookup; no cascade changes.
 /* ============================================================
  * HA-Overwatch — server.js
  *
@@ -313,19 +313,27 @@ function setHasAny(set, values) {
 }
 
 function alarmSwitchEntityIds(alarm) {
-  const ids = new Set();
-  if (alarm?.id) ids.add(`switch.overwatch_alarm_${alarm.id}`);
+  // Frontend ow-alarms.js uses alarm name slug for the HA switch entity.
+  // Prioritise that canonical entity first so stale raw-id entities cannot override it.
+  const ids = [];
+  const add = entityId => { if (entityId && !ids.includes(entityId)) ids.push(entityId); };
   const slug = nameSlug(alarm?.name) || alarm?.id;
-  if (slug) ids.add(`switch.overwatch_alarm_${slug}`);
-  return [...ids];
+  add(slug ? `switch.overwatch_alarm_${slug}` : null);
+  add(alarm?.id ? `switch.overwatch_alarm_${alarm.id}` : null);
+  add(alarm?.raw_id ? `switch.overwatch_alarm_${alarm.raw_id}` : null);
+  return ids;
 }
 
 function zoneSwitchEntityIds(zone) {
-  const ids = new Set();
-  if (zone?.id) ids.add(`switch.overwatch_zone_${zone.id}`);
+  // Frontend app.js uses zone name slug for the HA switch entity.
+  // Prioritise that canonical entity first so stale raw-id entities cannot mask manual disarm.
+  const ids = [];
+  const add = entityId => { if (entityId && !ids.includes(entityId)) ids.push(entityId); };
   const slug = nameSlug(zone?.name) || zone?.id;
-  if (slug) ids.add(`switch.overwatch_zone_${slug}`);
-  return [...ids];
+  add(slug ? `switch.overwatch_zone_${slug}` : null);
+  add(zone?.id ? `switch.overwatch_zone_${zone.id}` : null);
+  add(zone?.raw_id ? `switch.overwatch_zone_${zone.raw_id}` : null);
+  return ids;
 }
 
 function zonesForFloorId(zones, floors, floorId) {
@@ -2302,7 +2310,7 @@ class OverwatchAlarmEffectiveSensor(CoordinatorEntity, SensorEntity):
   "manifest.json": `{
   "domain": "ha_overwatch",
   "name": "HA Overwatch",
-  "version": "1.14.2",
+  "version": "1.14.3",
   "documentation": "https://github.com/DM-AU/ha-overwatch",
   "issue_tracker": "https://github.com/DM-AU/ha-overwatch/issues",
   "codeowners": [],
