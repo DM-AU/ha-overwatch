@@ -1,4 +1,4 @@
-// HA-Overwatch v1.15.1 emergency rollback: all HA parent cascade disabled; alarm baseline preserved.
+// HA-Overwatch v1.15.2: internal HA switch graph; no HA service-call cascade; no app changes required.
 /* ============================================================
  * HA-Overwatch — server.js
  *
@@ -1695,23 +1695,29 @@ def _dev(coordinator: ZoneCoordinator) -> DeviceInfo:
     )
 
 
+# v1.15.2: internal in-memory switch graph.
+# Parent switches update child switch entities directly without calling HA switch services.
+# This avoids recursive parent -> parent -> child service-call storms.
+_OW_SWITCH_ENTITIES: dict[str, "OWSwitch"] = {}
+
+
 class OWSwitch(CoordinatorEntity, SwitchEntity, RestoreEntity):
     """Base switch — state lives in HA, restored across restarts.
-    
-    entity_id is set explicitly so it is always predictable regardless
-    of device name or HA naming conventions.
+
+    Parent/child propagation is internal to this platform. Parent switches never call
+    switch.turn_on/off for other Overwatch parent switches, so HA cannot recurse.
     """
     _attr_should_poll = False
 
     def __init__(self, coordinator, entity_id: str, unique_id: str, name: str, icon: str = "mdi:shield"):
         super().__init__(coordinator)
-        # Set entity_id explicitly — this overrides HA's auto-generation
         self.entity_id = entity_id
         self._attr_unique_id = unique_id
         self._attr_name = name
         self._attr_icon = icon
         self._attr_device_info = _dev(coordinator)
         self._is_on = True
+        _OW_SWITCH_ENTITIES[unique_id] = self
 
     @property
     def is_on(self) -> bool:
@@ -1719,21 +1725,146 @@ class OWSwitch(CoordinatorEntity, SwitchEntity, RestoreEntity):
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
+        _OW_SWITCH_ENTITIES[self._attr_unique_id] = self
         if (state := await self.async_get_last_state()) is not None:
             self._is_on = state.state != "off"
 
-    async def async_turn_on(self, **kwargs) -> None:
-        self._is_on = True
+    async def _set_state(self, on: bool) -> None:
+        if self._is_on == on:
+            return
+        self._is_on = on
         self.async_write_ha_state()
 
+    async def async_turn_on(self, **kwargs) -> None:
+        await self._set_state(True)
+        await self._propagate(True)
+
     async def async_turn_off(self, **kwargs) -> None:
-        self._is_on = False
-        self.async_write_ha_state()
+        await self._set_state(False)
+        await self._propagate(False)
+
+    async def _propagate(self, on: bool) -> None:
+        await recompute_parents(self.coordinator.data or {})
 
     @callback
     def _handle_coordinator_update(self) -> None:
-        # Do not republish state on coordinator refresh — state is authoritative in HA
+        # Do not republish state on coordinator refresh — state is authoritative in HA.
         pass
+
+    @property
+    def ow_data(self) -> dict:
+        return self.coordinator.data or {}
+
+
+# ---------- unique_id helpers ----------
+def _safe_id(value: str) -> str:
+    value = (value or "").replace("camera.", "", 1).lower()
+    out = []
+    last_us = False
+    for ch in value:
+        if ch.isalnum():
+            out.append(ch)
+            last_us = False
+        else:
+            if not last_us:
+                out.append("_")
+                last_us = True
+    return "".join(out).strip("_")
+
+
+def _zone_uid(zone: dict) -> str:
+    return f"overwatch_zone_{zone['id']}"
+
+
+def _zone_group_uid(group: dict) -> str:
+    return f"overwatch_zone_group_{group['id']}"
+
+
+def _zone_floor_uid(floor: dict) -> str:
+    return f"overwatch_zone_floor_{floor['id']}"
+
+
+def _camera_uid(cam_id: str) -> str:
+    return f"overwatch_camera_{_safe_id(cam_id)}"
+
+
+def _camera_zone_uid(zone: dict) -> str:
+    return f"overwatch_camera_zone_{zone['id']}"
+
+
+def _camera_group_uid(group: dict) -> str:
+    return f"overwatch_camera_group_{group['id']}"
+
+
+def _camera_floor_uid(floor: dict) -> str:
+    return f"overwatch_camera_floor_{floor['id']}"
+
+
+def _get(uid: str):
+    return _OW_SWITCH_ENTITIES.get(uid)
+
+
+async def _set_uid(uid: str, on: bool) -> None:
+    ent = _get(uid)
+    if ent:
+        await ent._set_state(on)
+
+
+async def _set_many(uids: list[str], on: bool) -> None:
+    for uid in sorted(set(uids)):
+        await _set_uid(uid, on)
+
+
+def _floor_zones(data: dict, floor_id: str) -> list[dict]:
+    zones = data.get("zones", [])
+    floors = data.get("floors", [])
+    is_first_floor = len(floors) == 0 or floors[0].get("id") == floor_id
+    return [z for z in zones if z.get("floor_id") == floor_id or (not z.get("floor_id") and is_first_floor)]
+
+
+def _all_on(uids: list[str]) -> bool:
+    ents = [_get(uid) for uid in uids]
+    ents = [e for e in ents if e is not None]
+    return bool(ents) and all(e.is_on for e in ents)
+
+
+async def recompute_parents(data: dict) -> None:
+    """Child -> parent aggregation. No cascade is triggered by these internal writes."""
+    zones = data.get("zones", [])
+    groups = data.get("groups", [])
+    camera_groups = data.get("camera_groups", [])
+    floors = data.get("floors", [])
+
+    for group in groups:
+        zone_uids = [_zone_uid(z) for z in zones if z.get("id") in (group.get("zone_ids") or [])]
+        await _set_uid(_zone_group_uid(group), _all_on(zone_uids))
+
+    for floor in floors:
+        zone_uids = [_zone_uid(z) for z in _floor_zones(data, floor["id"])]
+        await _set_uid(_zone_floor_uid(floor), _all_on(zone_uids))
+
+    for zone in zones:
+        if zone.get("cameras"):
+            cam_uids = [_camera_uid(cam_id) for cam_id in zone.get("cameras", [])]
+            await _set_uid(_camera_zone_uid(zone), _all_on(cam_uids))
+
+    for group in camera_groups:
+        cam_uids = []
+        for zone in zones:
+            if zone.get("id") in (group.get("zone_ids") or []):
+                cam_uids.extend(_camera_uid(cam_id) for cam_id in zone.get("cameras", []))
+        await _set_uid(_camera_group_uid(group), _all_on(cam_uids))
+
+    for floor in floors:
+        cam_uids = []
+        for zone in _floor_zones(data, floor["id"]):
+            cam_uids.extend(_camera_uid(cam_id) for cam_id in zone.get("cameras", []))
+        await _set_uid(_camera_floor_uid(floor), _all_on(cam_uids))
+
+    all_cam_uids = []
+    for zone in zones:
+        all_cam_uids.extend(_camera_uid(cam_id) for cam_id in zone.get("cameras", []))
+    await _set_uid("overwatch_camera_all", _all_on(all_cam_uids))
 
 
 class OverwatchMasterSwitch(OWSwitch):
@@ -1743,6 +1874,11 @@ class OverwatchMasterSwitch(OWSwitch):
             unique_id="overwatch_zone_master",
             name="Overwatch Zone Master",
             icon="mdi:shield-home")
+
+    async def _propagate(self, on: bool) -> None:
+        data = self.ow_data
+        await _set_many([_zone_uid(z) for z in data.get("zones", [])], on)
+        await recompute_parents(data)
 
 
 class OverwatchAlarmSwitch(OWSwitch):
@@ -1757,42 +1893,63 @@ class OverwatchAlarmSwitch(OWSwitch):
 
 class OverwatchGroupSwitch(OWSwitch):
     def __init__(self, c, g):
-        gid = g["id"]
+        self._group_id = g["id"]
         super().__init__(c,
-            entity_id=f"switch.overwatch_zone_group_{gid}",
-            unique_id=f"overwatch_zone_group_{gid}",
-            name=f"Zone Group: {g.get('name', gid)}",
+            entity_id=f"switch.overwatch_zone_group_{g['id']}",
+            unique_id=f"overwatch_zone_group_{g['id']}",
+            name=f"Zone Group: {g.get('name', g['id'])}",
             icon="mdi:layers")
+
+    async def _propagate(self, on: bool) -> None:
+        data = self.ow_data
+        group = next((g for g in data.get("groups", []) if g.get("id") == self._group_id), None)
+        if group:
+            zones = data.get("zones", [])
+            await _set_many([_zone_uid(z) for z in zones if z.get("id") in (group.get("zone_ids") or [])], on)
+        await recompute_parents(data)
 
 
 class OverwatchZoneSwitch(OWSwitch):
     def __init__(self, c, z):
-        zid = z["id"]
+        self._zone_id = z["id"]
         super().__init__(c,
-            entity_id=f"switch.overwatch_zone_{zid}",
-            unique_id=f"overwatch_zone_{zid}",
-            name=f"Zone: {z.get('name', zid)}",
+            entity_id=f"switch.overwatch_zone_{z['id']}",
+            unique_id=f"overwatch_zone_{z['id']}",
+            name=f"Zone: {z.get('name', z['id'])}",
             icon="mdi:map-marker-radius")
 
 
 class OverwatchZoneFloorSwitch(OWSwitch):
     def __init__(self, c, f):
-        fid = f["id"]
+        self._floor_id = f["id"]
         super().__init__(c,
-            entity_id=f"switch.overwatch_zone_floor_{fid}",
-            unique_id=f"overwatch_zone_floor_{fid}",
-            name=f"Zone Floor: {f.get('name', fid)}",
+            entity_id=f"switch.overwatch_zone_floor_{f['id']}",
+            unique_id=f"overwatch_zone_floor_{f['id']}",
+            name=f"Zone Floor: {f.get('name', f['id'])}",
             icon="mdi:floor-plan")
+
+    async def _propagate(self, on: bool) -> None:
+        data = self.ow_data
+        await _set_many([_zone_uid(z) for z in _floor_zones(data, self._floor_id)], on)
+        await recompute_parents(data)
 
 
 class OverwatchCameraFloorSwitch(OWSwitch):
     def __init__(self, c, f):
-        fid = f["id"]
+        self._floor_id = f["id"]
         super().__init__(c,
-            entity_id=f"switch.overwatch_camera_floor_{fid}",
-            unique_id=f"overwatch_camera_floor_{fid}",
-            name=f"Camera Floor: {f.get('name', fid)}",
+            entity_id=f"switch.overwatch_camera_floor_{f['id']}",
+            unique_id=f"overwatch_camera_floor_{f['id']}",
+            name=f"Camera Floor: {f.get('name', f['id'])}",
             icon="mdi:cctv")
+
+    async def _propagate(self, on: bool) -> None:
+        data = self.ow_data
+        cam_uids = []
+        for zone in _floor_zones(data, self._floor_id):
+            cam_uids.extend(_camera_uid(cam_id) for cam_id in zone.get("cameras", []))
+        await _set_many(cam_uids, on)
+        await recompute_parents(data)
 
 
 class OverwatchCameraAllSwitch(OWSwitch):
@@ -1803,32 +1960,56 @@ class OverwatchCameraAllSwitch(OWSwitch):
             name="Camera All",
             icon="mdi:cctv")
 
+    async def _propagate(self, on: bool) -> None:
+        data = self.ow_data
+        cam_uids = []
+        for zone in data.get("zones", []):
+            cam_uids.extend(_camera_uid(cam_id) for cam_id in zone.get("cameras", []))
+        await _set_many(cam_uids, on)
+        await recompute_parents(data)
+
 
 class OverwatchCameraGroupSwitch(OWSwitch):
     def __init__(self, c, g):
-        gid = g["id"]
+        self._group_id = g["id"]
         super().__init__(c,
-            entity_id=f"switch.overwatch_camera_group_{gid}",
-            unique_id=f"overwatch_camera_group_{gid}",
-            name=f"Camera Group: {g.get('name', gid)}",
+            entity_id=f"switch.overwatch_camera_group_{g['id']}",
+            unique_id=f"overwatch_camera_group_{g['id']}",
+            name=f"Camera Group: {g.get('name', g['id'])}",
             icon="mdi:cctv")
+
+    async def _propagate(self, on: bool) -> None:
+        data = self.ow_data
+        group = next((g for g in data.get("camera_groups", []) if g.get("id") == self._group_id), None)
+        cam_uids = []
+        if group:
+            for zone in data.get("zones", []):
+                if zone.get("id") in (group.get("zone_ids") or []):
+                    cam_uids.extend(_camera_uid(cam_id) for cam_id in zone.get("cameras", []))
+        await _set_many(cam_uids, on)
+        await recompute_parents(data)
 
 
 class OverwatchCameraZoneSwitch(OWSwitch):
     def __init__(self, c, z):
-        zid = z["id"]
+        self._zone_id = z["id"]
         super().__init__(c,
-            entity_id=f"switch.overwatch_camera_zone_{zid}",
-            unique_id=f"overwatch_camera_zone_{zid}",
-            name=f"Camera Zone: {z.get('name', zid)}",
+            entity_id=f"switch.overwatch_camera_zone_{z['id']}",
+            unique_id=f"overwatch_camera_zone_{z['id']}",
+            name=f"Camera Zone: {z.get('name', z['id'])}",
             icon="mdi:cctv")
+
+    async def _propagate(self, on: bool) -> None:
+        data = self.ow_data
+        zone = next((z for z in data.get("zones", []) if z.get("id") == self._zone_id), None)
+        await _set_many([_camera_uid(cam_id) for cam_id in (zone or {}).get("cameras", [])], on)
+        await recompute_parents(data)
 
 
 class OverwatchCameraSwitch(OWSwitch):
     def __init__(self, c, cam):
         cid = cam["id"]
-        bare = cid[len("camera."):] if cid.startswith("camera.") else cid
-        safe = bare.replace(".", "_").replace("-", "_")
+        safe = _safe_id(cid)
         super().__init__(c,
             entity_id=f"switch.overwatch_camera_{safe}",
             unique_id=f"overwatch_camera_{safe}",
@@ -1981,7 +2162,7 @@ class OverwatchZoneTriggered(OWSensor):
   "manifest.json": `{
   "domain": "ha_overwatch",
   "name": "HA Overwatch",
-  "version": "1.15.1",
+  "version": "1.15.2",
   "documentation": "https://github.com/DM-AU/ha-overwatch",
   "issue_tracker": "https://github.com/DM-AU/ha-overwatch/issues",
   "codeowners": [],
@@ -2266,8 +2447,8 @@ function startHAListener() {
         console.log(`[HA-Overwatch] state_changed: ${entity_id} → ${new_state.state} (zone sensor)`);
       }
       onStateChanged(entity_id, new_state.state || "");
-      // Emergency rollback: do not cascade switch state changes from HA state_changed events.
-      // HA reload/restored-state events must be treated as state only.
+      // Do not cascade switch state changes from HA state_changed events.
+      // HA switch parent/child logic is handled internally in switch.py without HA service-call recursion.
     }
 
     // Log a heartbeat every 50 events so we can confirm events are flowing
