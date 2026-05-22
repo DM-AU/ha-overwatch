@@ -2357,11 +2357,6 @@ function startHAListener() {
   let   cachedZones    = [];  // refreshed every 60s and on auth_ok
   let   sensorToZones  = {};  // entityId -> [zone, ...] for fast lookup
   let   zoneCacheTimer = null; // tracked so we don't stack intervals on reconnect
-  let   haStateHydrated = false;
-  let   cascadeSuppressedUntil = 0;
-  const lastCascadeEvent = {}; // entity_id -> { state, ts }
-  const CASCADE_GRACE_MS = 15000;
-  const CASCADE_DEDUPE_MS = 1200;
 
   function refreshZoneCache() {
     cachedZones   = loadZones();
@@ -2384,9 +2379,6 @@ function startHAListener() {
       return;
     }
     if (msg.type === "auth_ok") {
-      haStateHydrated = false;
-      cascadeSuppressedUntil = Date.now() + CASCADE_GRACE_MS;
-      Object.keys(lastCascadeEvent).forEach(k => delete lastCascadeEvent[k]);
       refreshZoneCache();
       if (zoneCacheTimer) clearInterval(zoneCacheTimer);
       zoneCacheTimer = setInterval(refreshZoneCache, 60000); // keep cache fresh
@@ -2434,11 +2426,6 @@ function startHAListener() {
         }
       });
       if (seeded > 0) console.log(`[HA-Overwatch] Seeded triggered state for ${seeded} zone sensors`);
-      setTimeout(() => {
-        haStateHydrated = true;
-        cascadeSuppressedUntil = 0;
-        console.log("[HA-Overwatch] Switch cascade guard released after HA state hydration.");
-      }, 3000);
       return;
     }
     if (msg.type === "event" && msg.event?.event_type === "state_changed") {
@@ -2451,9 +2438,9 @@ function startHAListener() {
         console.log(`[HA-Overwatch] state_changed: ${entity_id} → ${new_state.state} (zone sensor)`);
       }
       onStateChanged(entity_id, new_state.state || "");
-      // Cascade switch state changes server-side so /ow/states stays consistent
-      // without relying on any browser being connected
-      cascadeSwitchState(entity_id, new_state.state || "");
+      // Do not cascade switch state changes from HA state_changed events.
+      // HA integration reload/restored-state events are not reliable user intent and can cause toggle storms.
+      // Cascading is handled by explicit dashboard actions; server-side event cascading is intentionally disabled.
     }
 
     // Log a heartbeat every 50 events so we can confirm events are flowing
@@ -2498,23 +2485,7 @@ function startHAListener() {
   function cascadeSwitchState(entityId, state) {
     // Only process overwatch switch entities — skip sensors, cameras, etc.
     if (!entityId.startsWith('switch.overwatch_')) return;
-
-    const stateKey = (state || '').toLowerCase();
-    const now = Date.now();
-
-    // HA integration reload/restored-state events can replay many switch states.
-    // Those are not user intent and must not cascade into hundreds of service calls.
-    if (!haStateHydrated || now < cascadeSuppressedUntil) {
-      return;
-    }
-
-    const last = lastCascadeEvent[entityId];
-    if (last && last.state === stateKey && (now - last.ts) < CASCADE_DEDUPE_MS) {
-      return;
-    }
-    lastCascadeEvent[entityId] = { state: stateKey, ts: now };
-
-    const on = stateKey !== 'off';
+    const on = (state || '').toLowerCase() !== 'off';
 
     // Zone master → all groups + zones
     if (entityId === 'switch.overwatch_zone_master') {
