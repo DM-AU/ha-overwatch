@@ -1,3 +1,4 @@
+// HA-Overwatch v0.05.07-app-hotfix: HA state_changed events update UI only; browser must not cascade HA parent switches.
 /* ─── CONFIG DEFAULTS ─────────────────────────────────────── */
 let uiConfig = {
   floorplan: "img/floorplan.png",
@@ -2628,7 +2629,8 @@ function connectHA() {
         haStates[data.entity_id] = data.new_state;
 
         // Sync masterEnabled when the HA master switch changes.
-        // HA-origin state_changed events are state updates only; parent fan-out is handled by switch.py async_turn_on/off.
+        // HA-origin state_changed events update local/UI state only.
+        // Browser fan-out is disabled here to prevent reload/restore storms.
         if (data.entity_id === "switch.overwatch_zone_master") {
           const newMaster = (data.new_state.state || "").toLowerCase() !== "off";
           if (masterEnabled !== newMaster) {
@@ -2638,7 +2640,7 @@ function connectHA() {
         }
 
         // Re-render when any overwatch switch changes.
-        // This updates OW from HA without cascading HA-origin events back into HA.
+        // This keeps OW synced to HA without issuing HA service calls from HA-origin events.
         if (data.entity_id.startsWith("switch.overwatch_")) {
           updateStatusDropdownInPlace();
           renderZones();
