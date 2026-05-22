@@ -1,18 +1,7 @@
 /* ================================================================
  * HA-Overwatch — ow-alarms.js
- * v0.05.02 hotfix: Alarm Manager foundation, correct /modules path.
- *
- * Scope:
- * - Admin-only overlay opened from sidebar button #alarmsBtn.
- * - Persists alarm definitions to /ow/alarms -> config/alarms.json.
- * - Uses HA switch entities: switch.overwatch_alarm_<slug>.
- * - Displays effective state: armed_full / armed_partial / disarmed.
- * - Partial = armed alarm has member zones suppressed by another disarmed alarm
- *   or by manual zone switch OFF.
- *
- * Deliberately NOT included here:
- * - Active zone enforcement/reconciliation. That belongs in 0.05.03+ once
- *   overlap handling is locked.
+ * v0.05.03 hotfix: alarm UI labels, wildcard member display/editing,
+ * and dynamic status refresh while the Alarm Manager list is open.
  * ================================================================ */
 (function () {
   'use strict';
@@ -22,6 +11,7 @@
   let alarms = [];
   let draft = null;
   let editingId = null;
+  let refreshTimer = null;
 
   function ow() { return window.OW || {}; }
   function apiPath(p) { return ow().apiPath ? ow().apiPath(p) : p; }
@@ -37,6 +27,17 @@
   function zoneSwitchId(z) { return `switch.overwatch_zone_${slug(z?.name) || z?.id}`; }
   function alarmSwitchId(a) { return `switch.overwatch_alarm_${slug(a?.name) || a?.id}`; }
   function canToggle() { try { return typeof window.canArmDisarm === 'function' ? window.canArmDisarm() : false; } catch { return false; } }
+
+  function arrayHasWildcard(arr) { return Array.isArray(arr) && arr.includes('*'); }
+  function membersHaveWildcard(m) {
+    return arrayHasWildcard(m?.floor_ids) || arrayHasWildcard(m?.group_ids) || arrayHasWildcard(m?.zone_ids);
+  }
+  function clearWildcard(m) {
+    if (!m) return;
+    m.floor_ids = (m.floor_ids || []).filter(x => x !== '*');
+    m.group_ids = (m.group_ids || []).filter(x => x !== '*');
+    m.zone_ids = (m.zone_ids || []).filter(x => x !== '*');
+  }
 
   function haSwitchOn(entityId) {
     const st = haStates()[entityId];
@@ -115,7 +116,7 @@
 
   function resolveAlarmZones(a) {
     const m = a.members || {};
-    if ((m.floor_ids || []).includes('*') || (m.group_ids || []).includes('*') || (m.zone_ids || []).includes('*')) return zones().slice();
+    if (membersHaveWildcard(m)) return zones().slice();
     const out = new Map();
     (m.floor_ids || []).forEach(fid => zonesForFloor(fid).forEach(z => out.set(z.id, z)));
     (m.group_ids || []).forEach(gid => zonesForGroup(gid).forEach(z => out.set(z.id, z)));
@@ -160,18 +161,33 @@
     document.head.appendChild(s);
   }
 
+  function startDynamicRefresh() {
+    stopDynamicRefresh();
+    refreshTimer = setInterval(() => {
+      if (!openState || !panel || draft) return;
+      renderList(false);
+    }, 1000);
+  }
+
+  function stopDynamicRefresh() {
+    if (refreshTimer) clearInterval(refreshTimer);
+    refreshTimer = null;
+  }
+
   async function open() {
     if (!isAdmin()) return;
     mount();
     await loadAlarms();
     openState = true;
     document.getElementById('alarmsBtn')?.classList.add('active');
-    renderList();
+    renderList(true);
+    startDynamicRefresh();
     requestAnimationFrame(() => { panel.style.opacity = '1'; panel.style.pointerEvents = 'all'; });
   }
 
   function close() {
     openState = false; draft = null; editingId = null;
+    stopDynamicRefresh();
     document.getElementById('alarmsBtn')?.classList.remove('active');
     if (panel) { panel.style.opacity = '0'; panel.style.pointerEvents = 'none'; setTimeout(() => { panel?.remove(); panel = null; }, 180); }
   }
@@ -179,23 +195,26 @@
   function toggle() { openState ? close() : open(); }
 
   function pill(status) {
-    if (status === 'armed_full') return '<span class="owa-pill" style="background:rgba(50,215,75,.15);border-color:rgba(50,215,75,.35);color:#32d74b">armed_full</span>';
-    if (status === 'armed_partial') return '<span class="owa-pill" style="background:rgba(255,149,0,.15);border-color:rgba(255,149,0,.35);color:#ff9500">armed_partial</span>';
-    return '<span class="owa-pill" style="background:rgba(255,255,255,.05);color:#777">disarmed</span>';
+    if (status === 'armed_full') return '<span class="owa-pill" style="background:rgba(50,215,75,.15);border-color:rgba(50,215,75,.35);color:#32d74b">Armed</span>';
+    if (status === 'armed_partial') return '<span class="owa-pill" style="background:rgba(255,149,0,.15);border-color:rgba(255,149,0,.35);color:#ff9500">Armed Partial</span>';
+    return '<span class="owa-pill" style="background:rgba(255,255,255,.05);color:#777">Disarmed</span>';
   }
 
-  function renderList() {
+  function renderList(resetScroll) {
+    const scrollTop = !resetScroll && panel?.querySelector('[data-owa-list]') ? panel.querySelector('[data-owa-list]').scrollTop : 0;
     panel.innerHTML = `
       <div style="display:flex;align-items:center;justify-content:space-between;padding:16px 20px 14px;border-bottom:1px solid rgba(255,255,255,.07)">
         <div style="display:flex;align-items:center;gap:12px"><span style="font-weight:700;font-size:15px">Alarm Manager</span><span class="owa-muted">${alarms.length} alarms</span><span style="font-size:10px;color:#ff9500">Admin only</span></div>
         <div style="display:flex;gap:8px"><button id="owaNew" class="owa-btn primary">+ New</button><button id="owaClose" class="owa-btn">✕ Close</button></div>
       </div>
-      <div style="flex:1;overflow:auto;padding:14px 20px 20px">${alarms.map(cardHtml).join('') || '<div class="owa-muted">No alarms configured.</div>'}</div>`;
+      <div data-owa-list style="flex:1;overflow:auto;padding:14px 20px 20px">${alarms.map(cardHtml).join('') || '<div class="owa-muted">No alarms configured.</div>'}</div>`;
     panel.querySelector('#owaClose').onclick = close;
     panel.querySelector('#owaNew').onclick = () => { editingId = 'new'; draft = { id: uid(), name: 'New Alarm', role: 'custom', builtin: false, locked: false, default_armed: false, members: { floor_ids: [], group_ids: [], zone_ids: [] } }; renderEditor(); };
     panel.querySelectorAll('[data-edit]').forEach(el => el.onclick = () => { const a = alarms.find(x => x.id === el.dataset.edit); if (!a) return; editingId = a.id; draft = JSON.parse(JSON.stringify(a)); renderEditor(); });
-    panel.querySelectorAll('[data-toggle]').forEach(btn => btn.onclick = e => { e.stopPropagation(); const a = alarms.find(x => x.id === btn.dataset.toggle); if (!a || !canToggle()) return; window.owCallSwitch?.(alarmSwitchId(a), !alarmArmed(a)); setTimeout(renderList, 250); });
-    panel.querySelectorAll('[data-delete]').forEach(btn => btn.onclick = async e => { e.stopPropagation(); const a = alarms.find(x => x.id === btn.dataset.delete); if (!a || a.builtin) return; if (!confirm(`Delete ${a.name}?`)) return; alarms = alarms.filter(x => x.id !== a.id); await saveAlarms(); renderList(); });
+    panel.querySelectorAll('[data-toggle]').forEach(btn => btn.onclick = e => { e.stopPropagation(); const a = alarms.find(x => x.id === btn.dataset.toggle); if (!a || !canToggle()) return; window.owCallSwitch?.(alarmSwitchId(a), !alarmArmed(a)); setTimeout(() => renderList(false), 250); });
+    panel.querySelectorAll('[data-delete]').forEach(btn => btn.onclick = async e => { e.stopPropagation(); const a = alarms.find(x => x.id === btn.dataset.delete); if (!a || a.builtin) return; if (!confirm(`Delete ${a.name}?`)) return; alarms = alarms.filter(x => x.id !== a.id); await saveAlarms(); renderList(true); });
+    const list = panel.querySelector('[data-owa-list]');
+    if (list && !resetScroll) list.scrollTop = scrollTop;
   }
 
   function cardHtml(a) {
@@ -206,11 +225,31 @@
   }
 
   function renderEditor() {
-    panel.innerHTML = `<div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px 12px;border-bottom:1px solid rgba(255,255,255,.07)"><div style="display:flex;gap:10px;align-items:center"><button id="owaBack" class="owa-btn">← Back</button><b>${editingId === 'new' ? 'New Alarm' : 'Edit Alarm'}</b></div><button id="owaSave" class="owa-btn primary">💾 Save</button></div><div style="flex:1;overflow:auto;padding:16px 18px 40px"><label class="owa-muted">Alarm Name</label><input id="owaName" class="owa-input" value="${esc(draft.name)}" ${draft.locked ? 'disabled' : ''}><div class="owa-muted" style="margin-top:6px">HA entity: ${esc(alarmSwitchId(draft))}</div><h3 style="font-size:13px;margin:18px 0 6px">Members</h3><div class="owa-muted" style="margin-bottom:8px">Parent selection auto-includes future child zones.</div><div id="owaTree" class="owa-tree"></div></div>`;
-    panel.querySelector('#owaBack').onclick = () => { draft = null; editingId = null; renderList(); };
+    stopDynamicRefresh();
+    panel.innerHTML = `<div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px 12px;border-bottom:1px solid rgba(255,255,255,.07)"><div style="display:flex;gap:10px;align-items:center"><button id="owaBack" class="owa-btn">← Back</button><b>${editingId === 'new' ? 'New Alarm' : 'Edit Alarm'}</b></div><button id="owaSave" class="owa-btn primary">💾 Save</button></div><div style="flex:1;overflow:auto;padding:16px 18px 40px"><label class="owa-muted">Alarm Name</label><input id="owaName" class="owa-input" value="${esc(draft.name)}" ${draft.locked ? 'disabled' : ''}><div class="owa-muted" style="margin-top:6px">HA entity: ${esc(alarmSwitchId(draft))}</div><h3 style="font-size:13px;margin:18px 0 6px">Members</h3><div class="owa-muted" style="margin-bottom:8px">Parent selection auto-includes future child zones. Away wildcard defaults to all zones until changed.</div><div id="owaTree" class="owa-tree"></div></div>`;
+    panel.querySelector('#owaBack').onclick = () => { draft = null; editingId = null; renderList(true); startDynamicRefresh(); };
     panel.querySelector('#owaName').oninput = e => { draft.name = e.target.value; };
     renderTree(panel.querySelector('#owaTree'));
-    panel.querySelector('#owaSave').onclick = async () => { if (!(draft.name || '').trim()) return alert('Enter an alarm name.'); if (editingId === 'new') alarms.push(draft); else { const i = alarms.findIndex(a => a.id === editingId); if (i >= 0) alarms[i] = draft; } await saveAlarms(); await loadAlarms(); draft = null; editingId = null; renderList(); };
+    panel.querySelector('#owaSave').onclick = async () => { if (!(draft.name || '').trim()) return alert('Enter an alarm name.'); if (editingId === 'new') alarms.push(draft); else { const i = alarms.findIndex(a => a.id === editingId); if (i >= 0) alarms[i] = draft; } await saveAlarms(); await loadAlarms(); draft = null; editingId = null; renderList(true); startDynamicRefresh(); };
+  }
+
+  function isFloorChecked(f) {
+    const m = draft.members;
+    return membersHaveWildcard(m) || (m.floor_ids || []).includes(f.id);
+  }
+
+  function isGroupChecked(g) {
+    const m = draft.members;
+    if (membersHaveWildcard(m) || (m.group_ids || []).includes(g.id)) return true;
+    return groups().some(parent => parent.id === g.id && (parent.zone_ids || []).every(zid => (m.zone_ids || []).includes(zid)));
+  }
+
+  function isZoneChecked(z) {
+    const m = draft.members;
+    if (membersHaveWildcard(m) || (m.zone_ids || []).includes(z.id)) return true;
+    if ((m.floor_ids || []).some(fid => zonesForFloor(fid).some(fz => fz.id === z.id))) return true;
+    if ((m.group_ids || []).some(gid => zonesForGroup(gid).some(gz => gz.id === z.id))) return true;
+    return false;
   }
 
   function renderTree(host) {
@@ -219,21 +258,25 @@
     const first = floors()[0]?.id;
     let html = '';
     floors().forEach(f => {
-      html += row('floor', f.id, f.name || f.id, m.floor_ids.includes(f.id), 0, true);
+      html += row('floor', f.id, f.name || f.id, isFloorChecked(f), 0);
       groups().forEach(g => {
         const gz = zonesForGroup(g.id).filter(z => (z.floor_id || first) === f.id);
         if (!gz.length) return;
-        html += row('group', g.id, g.name || g.id, m.group_ids.includes(g.id), 18, true);
-        gz.forEach(z => html += row('zone', z.id, z.name || z.id, m.zone_ids.includes(z.id), 36));
+        html += row('group', g.id, g.name || g.id, isGroupChecked(g), 18);
+        gz.forEach(z => html += row('zone', z.id, z.name || z.id, isZoneChecked(z), 36));
       });
-      zonesForFloor(f.id).filter(z => !grouped.has(z.id)).forEach(z => html += row('zone', z.id, z.name || z.id, m.zone_ids.includes(z.id), 36));
+      zonesForFloor(f.id).filter(z => !grouped.has(z.id)).forEach(z => html += row('zone', z.id, z.name || z.id, isZoneChecked(z), 36));
     });
-    if (!floors().length) zones().forEach(z => html += row('zone', z.id, z.name || z.id, m.zone_ids.includes(z.id), 0));
+    if (!floors().length) zones().forEach(z => html += row('zone', z.id, z.name || z.id, isZoneChecked(z), 0));
     host.innerHTML = html || '<div class="owa-muted">No zones configured.</div>';
     host.querySelectorAll('input[data-type]').forEach(cb => cb.onchange = () => {
-      const arr = cb.dataset.type === 'floor' ? m.floor_ids : cb.dataset.type === 'group' ? m.group_ids : m.zone_ids;
-      if (cb.checked && !arr.includes(cb.dataset.id)) arr.push(cb.dataset.id);
-      if (!cb.checked) { const i = arr.indexOf(cb.dataset.id); if (i >= 0) arr.splice(i, 1); }
+      clearWildcard(m); // any edit converts Away from wildcard-all to explicit user selection
+      const type = cb.dataset.type;
+      const id = cb.dataset.id;
+      const arr = type === 'floor' ? m.floor_ids : type === 'group' ? m.group_ids : m.zone_ids;
+      if (cb.checked && !arr.includes(id)) arr.push(id);
+      if (!cb.checked) { const i = arr.indexOf(id); if (i >= 0) arr.splice(i, 1); }
+      renderTree(host); // update inherited check display immediately
     });
   }
 
