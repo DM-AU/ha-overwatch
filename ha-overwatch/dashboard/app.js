@@ -1051,17 +1051,9 @@ function detectEntityType(entityId) {
 function isAlarmArmed() {
   const alarmEntity = uiConfig.alarm_entity;
   const checkId = alarmEntity || Object.keys(haStates).find(id => id.startsWith("alarm_control_panel."));
-  if (!checkId) {
-    return typeof masterSwitchEnabled === "function"
-      ? masterSwitchEnabled() && zones.some(zoneSwitchEnabledIgnoringMaster)
-      : masterEnabled;
-  }
+  if (!checkId) return false;
   const st = haStates[checkId];
-  if (!st) {
-    return typeof masterSwitchEnabled === "function"
-      ? masterSwitchEnabled() && zones.some(zoneSwitchEnabledIgnoringMaster)
-      : masterEnabled;
-  }
+  if (!st) return false;
   const s = (st.state || "").toLowerCase();
   const inverted = !!uiConfig.alarm_entity_inverted;
   // Standard alarm panel states — not affected by inversion
@@ -1071,130 +1063,6 @@ function isAlarmArmed() {
   // Generic on/off entity — inversion swaps the meaning
   if (inverted) return s === "off";  // off = armed when inverted
   return s === "on";                  // on = armed normally
-}
-
-// v0.05.02 — effective Overwatch monitoring state.
-// This is separate from Home Assistant's alarm_control_panel state.
-// It resolves whether Overwatch is monitoring all configured zones, some zones, or none.
-function zoneSwitchEnabledIgnoringMaster(zone) {
-  if (!zone) return false;
-  if (!zoneUseServerState()) {
-    return localStorage.getItem(ZONE_LOCAL_PREFIX + zone.id) !== 'false';
-  }
-  const switchState = haStates[`switch.overwatch_zone_${zoneSlug(zone)}`];
-  return switchState ? switchState.state !== "off" : zone.enabled !== false;
-}
-
-function masterSwitchEnabled() {
-  if (!zoneUseServerState()) {
-    return localStorage.getItem(ZONE_LOCAL_MASTER) !== 'false';
-  }
-  const masterSwitch = haStates["switch.overwatch_zone_master"];
-  return masterSwitch ? masterSwitch.state !== "off" : masterEnabled;
-}
-
-function getEffectiveMonitoringState() {
-  const monitoredZones = zones.filter(Boolean); // hidden is visual-only and must not affect alarm state
-  const masterOn = masterSwitchEnabled();
-  const anyTriggered = monitoredZones.some(z => getZoneState(z) === "triggered");
-  const anyFault = monitoredZones.some(z => getZoneState(z) === "fault");
-
-  if (!masterOn || monitoredZones.length === 0) {
-    return {
-      state: "disarmed",
-      label: "Disarmed",
-      colour: "#32d74b",
-      armedCount: 0,
-      disarmedCount: monitoredZones.length,
-      total: monitoredZones.length,
-      anyTriggered,
-      anyFault
-    };
-  }
-
-  const armedCount = monitoredZones.filter(zoneSwitchEnabledIgnoringMaster).length;
-  const disarmedCount = monitoredZones.length - armedCount;
-
-  if (anyTriggered) {
-    return {
-      state: "triggered",
-      label: "Triggered",
-      colour: "#ff3b30",
-      armedCount,
-      disarmedCount,
-      total: monitoredZones.length,
-      anyTriggered,
-      anyFault
-    };
-  }
-
-  if (armedCount === 0) {
-    return {
-      state: "disarmed",
-      label: "Disarmed",
-      colour: "#32d74b",
-      armedCount,
-      disarmedCount,
-      total: monitoredZones.length,
-      anyTriggered,
-      anyFault
-    };
-  }
-
-  if (disarmedCount > 0 || anyFault) {
-    return {
-      state: "armed_partial",
-      label: "Armed Partial",
-      colour: "#ff9500",
-      armedCount,
-      disarmedCount,
-      total: monitoredZones.length,
-      anyTriggered,
-      anyFault
-    };
-  }
-
-  return {
-    state: "armed_full",
-    label: "Armed Full",
-    colour: "#ff3b30",
-    armedCount,
-    disarmedCount,
-    total: monitoredZones.length,
-    anyTriggered,
-    anyFault
-  };
-}
-
-function refreshMonitoringStatusBar() {
-  const statusEl = document.getElementById("statusText");
-  const dotEl = document.getElementById("statusDot");
-  const eff = getEffectiveMonitoringState();
-
-  if (statusEl) {
-    const detail = eff.total > 0 ? ` (${eff.armedCount}/${eff.total})` : "";
-    statusEl.textContent = eff.label + detail;
-  }
-
-  if (dotEl) {
-    dotEl.className = "status-dot";
-    dotEl.classList.add(`ow-${eff.state}`);
-    if (eff.state === "triggered") dotEl.classList.add("triggered");
-  }
-
-  const masterDot = document.getElementById("masterStateDot");
-  if (masterDot) {
-    masterDot.style.background = eff.colour;
-    masterDot.style.opacity = eff.state === "disarmed" ? "0.85" : "1";
-    masterDot.classList.toggle("flashing", eff.state === "triggered");
-  }
-
-  const masterState = document.getElementById("masterStateLabel");
-  if (masterState) {
-    masterState.textContent = eff.label.toLowerCase().replace(" ", "_");
-    masterState.style.color = eff.colour;
-    masterState.style.opacity = "0.85";
-  }
 }
 
 function entityTypeColour(type) {
@@ -1284,7 +1152,6 @@ function setMasterEnabled(val) {
   }
   updateStatusDropdownInPlace();
   renderZones();
-  refreshMonitoringStatusBar();
   logEvent("info", val ? "Master alarm enabled." : "Master alarm disabled.", "system");
 }
 
@@ -1298,7 +1165,6 @@ function setZoneEnabled(zoneId, val) {
     updateStatusDropdownInPlace();
     renderZones();
   }
-  refreshMonitoringStatusBar();
   logEvent(
     "info",
     val ? `Zone enabled: ${zone.name || zone.id}` : `Zone disabled: ${zone.name || zone.id}`,
@@ -1708,7 +1574,6 @@ setInterval(() => {
         dotEl.classList.remove("triggered");
       }
     }
-    refreshMonitoringStatusBar();
   }
 }, 700);
 
@@ -2762,108 +2627,25 @@ function connectHA() {
         const prev = haStates[data.entity_id];
         haStates[data.entity_id] = data.new_state;
 
-        // Sync masterEnabled when the HA master switch changes
+        // Sync masterEnabled when the HA master switch changes.
+        // Do NOT cascade HA state_changed events back into HA service calls.
+        // Integration reload/restore events are not reliable user intent and caused switch storms.
+        // Cascading must only happen from explicit dashboard/UI actions.
         if (data.entity_id === "switch.overwatch_zone_master") {
           const newMaster = (data.new_state.state || "").toLowerCase() !== "off";
           if (masterEnabled !== newMaster) {
             masterEnabled = newMaster;
             localStorage.setItem("masterEnabled", masterEnabled);
           }
-          // Cascade master to all zones and groups
-          const on = newMaster;
-          for (const g of groups) owCallSwitch(`switch.overwatch_zone_group_${groupSlug(g)}`, on);
-          for (const z of zones)  owCallSwitch(`switch.overwatch_zone_${zoneSlug(z)}`, on);
         }
 
-        // When a ZONE group switch changes in HA, cascade to member zones
-        if (data.entity_id.startsWith("switch.overwatch_zone_group_")) {
-          const groupSwitchId = data.entity_id; // e.g. switch.overwatch_zone_group_house
-          const on = (data.new_state.state || "").toLowerCase() !== "off";
-          // Find which group this is
-          const matchGroup = groups.find(g =>
-            `switch.overwatch_zone_group_${groupSlug(g)}` === groupSwitchId);
-          if (matchGroup) {
-            (matchGroup.zone_ids || []).forEach(zid => {
-              const z = zones.find(z => z.id === zid);
-              if (z) owCallSwitch(`switch.overwatch_zone_${zoneSlug(z)}`, on);
-            });
-          }
-        }
-
-        // When a CAMERA group switch changes in HA, cascade to member zones and cameras
-        if (data.entity_id.startsWith("switch.overwatch_camera_group_")) {
-          const on = (data.new_state.state || "").toLowerCase() !== "off";
-          const matchGroup = groups.find(g =>
-            `switch.overwatch_camera_group_${groupSlug(g)}` === data.entity_id);
-          if (matchGroup) {
-            (matchGroup.zone_ids || []).forEach(zid => {
-              const z = zones.find(z => z.id === zid);
-              if (z && (z.cameras || []).length > 0) {
-                owCallSwitch(`switch.overwatch_camera_zone_${nameSlug(z.name) || z.id}`, on);
-                (z.cameras || []).forEach(camId => {
-                  const safe = camId.replace(/^camera\./, '').replace(/[^a-z0-9]+/g, '_');
-                  owCallSwitch(`switch.overwatch_camera_${safe}`, on);
-                });
-              }
-            });
-          }
-        }
-
-        // When a CAMERA zone switch changes in HA, cascade to member cameras
-        if (data.entity_id.startsWith("switch.overwatch_camera_zone_")) {
-          const on = (data.new_state.state || "").toLowerCase() !== "off";
-          const slug = data.entity_id.replace("switch.overwatch_camera_zone_", "");
-          const matchZone = zones.find(z => (nameSlug(z.name) || z.id) === slug);
-          if (matchZone) {
-            (matchZone.cameras || []).forEach(camId => {
-              const safe = camId.replace(/^camera\./, '').replace(/[^a-z0-9]+/g, '_');
-              owCallSwitch(`switch.overwatch_camera_${safe}`, on);
-            });
-          }
-        }
-
-        // When a ZONE floor switch changes, cascade to all zones on that floor
-        if (data.entity_id.startsWith("switch.overwatch_zone_floor_")) {
-          const on = (data.new_state.state || "").toLowerCase() !== "off";
-          const fid = data.entity_id.replace("switch.overwatch_zone_floor_", "");
-          const isFirstFloor1 = floors.length === 0 || floors[0].id === fid;
-          zones.filter(z => z.floor_id === fid || (!z.floor_id && isFirstFloor1)).forEach(z => {
-            owCallSwitch(`switch.overwatch_zone_${zoneSlug(z)}`, on);
-          });
-        }
-
-        // When a CAMERA floor switch changes, cascade to zones + cameras on that floor
-        if (data.entity_id.startsWith("switch.overwatch_camera_floor_")) {
-          const on = (data.new_state.state || "").toLowerCase() !== "off";
-          const fid = data.entity_id.replace("switch.overwatch_camera_floor_", "");
-          const isFirstFloor2 = floors.length === 0 || floors[0].id === fid;
-          zones.filter(z => (z.floor_id === fid || (!z.floor_id && isFirstFloor2)) && (z.cameras || []).length > 0).forEach(z => {
-            owCallSwitch(`switch.overwatch_camera_zone_${nameSlug(z.name) || z.id}`, on);
-            (z.cameras || []).forEach(camId => {
-              const safe = camId.replace(/^camera\./, '').replace(/[^a-z0-9]+/g, '_');
-              owCallSwitch(`switch.overwatch_camera_${safe}`, on);
-            });
-          });
-        }
-
-        // When camera_all changes in HA, cascade to all zones and cameras
-        if (data.entity_id === "switch.overwatch_camera_all") {
-          const on = (data.new_state.state || "").toLowerCase() !== "off";
-          zones.forEach(z => {
-            if ((z.cameras || []).length > 0) {
-              owCallSwitch(`switch.overwatch_camera_zone_${nameSlug(z.name) || z.id}`, on);
-              (z.cameras || []).forEach(camId => {
-                const safe = camId.replace(/^camera\./, '').replace(/[^a-z0-9]+/g, '_');
-                owCallSwitch(`switch.overwatch_camera_${safe}`, on);
-              });
-            }
-          });
-        }
+        // HA-origin switch updates are state updates only.
+        // Browser-side fan-out for zone/camera group, floor, zone, and all switches is intentionally disabled.
+        // The dashboard already performs fan-out when the user explicitly toggles controls.
 
         // Re-render when any overwatch switch changes
         if (data.entity_id.startsWith("switch.overwatch_")) {
           updateStatusDropdownInPlace();
-          refreshMonitoringStatusBar();
           renderZones();
           // Re-render camera status bar when a camera switch changes
           if (window.renderCameraStatusBar &&
@@ -2991,7 +2773,6 @@ function startDirectModePoller() {
           if (masterSwitch) masterEnabled = masterSwitch.state !== "off";
           // Re-render zone status dropdown so toggles reflect latest haStates
           updateStatusDropdownInPlace();
-          refreshMonitoringStatusBar();
           // Keep the open zone popup live in Direct Mode (/ow/states polling).
           refreshZonePopupIfOpen();
           // Re-render camera status bar and grid so toggle states reflect latest haStates
@@ -3181,8 +2962,6 @@ function updateStatusFromAlarm(entityId, newState) {
   }
 
   // Issue 27: log alarm state changes — only when state actually changes
-  refreshMonitoringStatusBar();
-
   if (rawState !== lastLoggedAlarmState) {
     lastLoggedAlarmState = rawState;
 
@@ -3367,12 +3146,11 @@ function updateStatusDropdownInPlace() {
   // Master toggle
   const masterChk = body.querySelector("#masterToggleChk");
   if (masterChk) {
-    masterChk.checked  = masterSwitchEnabled();
+    masterChk.checked  = masterEnabled;
     const mLocked = !canArmDisarm();
     masterChk.disabled = mLocked;
     if (masterChk.closest('label')) masterChk.closest('label').style.opacity = mLocked ? '0.4' : '';
   }
-  refreshMonitoringStatusBar();
 
   // Per-zone: toggle, eye, dot, state label
   body.querySelectorAll(".zone-enabled-chk[data-zone-id]").forEach(chk => {
@@ -3593,16 +3371,14 @@ function renderStatusDropdown() {
     .filter(z => !groupedZoneIds.has(z.id))
     .sort((a, b) => (a.name||a.id).localeCompare(b.name||b.id));
   const sortedGroups = [...groups].sort((a, b) => (a.name||"").localeCompare(b.name||""));
-  const masterMon = getEffectiveMonitoringState();
-  const masterStateText = masterMon.label.toLowerCase().replace(" ", "_");
 
   body.innerHTML = `
     <div class="status-dd-zones">
       <div class="status-dd-master">
         <span style="width:10px;flex-shrink:0;"></span>
-        <div id="masterStateDot" class="zone-list-dot${masterMon.state === 'triggered' ? ' flashing' : ''}" style="background:${masterMon.colour};width:8px;height:8px;border-radius:50%;flex-shrink:0;opacity:${masterMon.state === 'disarmed' ? 0.85 : 1};"></div>
+        <div style="width:8px;height:8px;flex-shrink:0;"></div>
         <span style="flex:1;font-size:11px;font-weight:600;color:#aaa;">Master</span>
-        <span id="masterStateLabel" class="status-dd-state" style="color:${masterMon.colour};opacity:0.85;">${masterStateText}</span>
+        <span class="status-dd-state" style="opacity:0;user-select:none;">——</span>
         <button class="zone-eye-btn" id="masterEyeBtn"
           style="background:none;border:none;padding:0 2px;cursor:pointer;color:${allHidden ? 'rgba(255,255,255,0.25)' : 'rgba(255,255,255,0.65)'};line-height:0;flex-shrink:0;"
         >${allHidden ? eyeClosed : eyeOpen}</button>
@@ -3721,10 +3497,7 @@ function bindStatusBar() {
     e.stopPropagation();
     const isOpen = dropdown.style.display !== "none";
     dropdown.style.display = isOpen ? "none" : "block";
-    if (!isOpen) {
-      renderStatusDropdown();
-      refreshMonitoringStatusBar();
-    }
+    if (!isOpen) renderStatusDropdown();
   });
 
   document.addEventListener("pointerdown", e => {
@@ -4008,7 +3781,6 @@ async function init() {
   // initFloorplan() called after loadFloors() so the saved floor image is used
   bindZonesButton();
   bindStatusBar();
-  refreshMonitoringStatusBar();
   applyStatusVisibility(); // apply hide prefs after DOM is ready
   bindSearchUI();
 
