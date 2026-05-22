@@ -1697,8 +1697,8 @@ def _dev(coordinator: ZoneCoordinator) -> DeviceInfo:
 class OWSwitch(CoordinatorEntity, SwitchEntity, RestoreEntity):
     """Base switch — state lives in HA, restored across restarts.
 
-    Parent switches fan out only from async_turn_on/off. Restore/reload state changes do not call
-    async_turn_on/off, so they do not cascade.
+    Parent fan-out is executed only from explicit HA service calls to async_turn_on/off.
+    Restore/reload state changes do not call async_turn_on/off and therefore do not fan out.
     """
     _attr_should_poll = False
 
@@ -1742,16 +1742,12 @@ class OWSwitch(CoordinatorEntity, SwitchEntity, RestoreEntity):
     def ow_data(self) -> dict:
         return self.coordinator.data or {}
 
-    @staticmethod
-    def _camera_safe(cam_id: str) -> str:
-        # Match dashboard/server camera switch ID generation.
-        return re_sub_non_alnum(cam_id.replace("camera.", "", 1).lower())
-
-    async def _call_child_switches(self, entity_ids: list[str], on: bool) -> None:
+    async def _call_switches(self, entity_ids: list[str], on: bool) -> None:
         entity_ids = sorted({eid for eid in entity_ids if eid and eid != self.entity_id})
         if not entity_ids:
+            _LOGGER.info("Overwatch HA cascade from %s -> %s: no child entities", self.entity_id, "on" if on else "off")
             return
-        _LOGGER.info("Overwatch cascade from %s -> %s: %s", self.entity_id, "on" if on else "off", ", ".join(entity_ids))
+        _LOGGER.warning("Overwatch HA cascade from %s -> %s: %s", self.entity_id, "on" if on else "off", ", ".join(entity_ids))
         await self.hass.services.async_call(
             "switch",
             "turn_on" if on else "turn_off",
@@ -1759,33 +1755,58 @@ class OWSwitch(CoordinatorEntity, SwitchEntity, RestoreEntity):
             blocking=False,
         )
 
+    @staticmethod
+    def _safe_id(value: str) -> str:
+        value = (value or "").replace("camera.", "", 1).lower()
+        out = []
+        last_us = False
+        for ch in value:
+            if ch.isalnum():
+                out.append(ch)
+                last_us = False
+            elif not last_us:
+                out.append("_")
+                last_us = True
+        return "".join(out).strip("_")
+
     def _floor_zones(self, floor_id: str) -> list[dict]:
         zones = self.ow_data.get("zones", [])
         floors = self.ow_data.get("floors", [])
         is_first_floor = len(floors) == 0 or floors[0].get("id") == floor_id
         return [z for z in zones if z.get("floor_id") == floor_id or (not z.get("floor_id") and is_first_floor)]
 
-
-def re_sub_non_alnum(value: str) -> str:
-    out = []
-    last_us = False
-    for ch in value:
-        if ch.isalnum():
-            out.append(ch)
-            last_us = False
-        else:
-            if not last_us:
-                out.append("_")
-                last_us = True
-    return "".join(out).strip("_")
+    def _groups_for_zones(self, zones: list[dict], camera: bool = False) -> list[dict]:
+        zone_ids = {z.get("id") for z in zones}
+        group_key = "camera_groups" if camera else "groups"
+        return [g for g in self.ow_data.get(group_key, []) if zone_ids.intersection(set(g.get("zone_ids") or []))]
 
 
-def zone_switch_entity(zone: dict) -> str:
+def _zone_switch(zone: dict) -> str:
     return f"switch.overwatch_zone_{zone['id']}"
 
 
-def camera_switch_entity(cam_id: str) -> str:
-    return f"switch.overwatch_camera_{re_sub_non_alnum(cam_id.replace('camera.', '', 1).lower())}"
+def _zone_group_switch(group: dict) -> str:
+    return f"switch.overwatch_zone_group_{group['id']}"
+
+
+def _zone_floor_switch(floor: dict) -> str:
+    return f"switch.overwatch_zone_floor_{floor['id']}"
+
+
+def _camera_switch(cam_id: str) -> str:
+    return f"switch.overwatch_camera_{OWSwitch._safe_id(cam_id)}"
+
+
+def _camera_zone_switch(zone: dict) -> str:
+    return f"switch.overwatch_camera_zone_{zone['id']}"
+
+
+def _camera_group_switch(group: dict) -> str:
+    return f"switch.overwatch_camera_group_{group['id']}"
+
+
+def _camera_floor_switch(floor: dict) -> str:
+    return f"switch.overwatch_camera_floor_{floor['id']}"
 
 
 class OverwatchMasterSwitch(OWSwitch):
@@ -1797,7 +1818,16 @@ class OverwatchMasterSwitch(OWSwitch):
             icon="mdi:shield-home")
 
     async def _cascade(self, on: bool) -> None:
-        await self._call_child_switches([zone_switch_entity(z) for z in self.ow_data.get("zones", [])], on)
+        zones = self.ow_data.get("zones", [])
+        groups = self.ow_data.get("groups", [])
+        floors = self.ow_data.get("floors", [])
+        # Include child zones and parent group/floor switches so HA and OW parent toggles visibly follow master.
+        await self._call_switches(
+            [_zone_switch(z) for z in zones]
+            + [_zone_group_switch(g) for g in groups]
+            + [_zone_floor_switch(f) for f in floors],
+            on,
+        )
 
 
 class OverwatchAlarmSwitch(OWSwitch):
@@ -1820,13 +1850,13 @@ class OverwatchGroupSwitch(OWSwitch):
             icon="mdi:layers")
 
     async def _cascade(self, on: bool) -> None:
-        data = self.ow_data
-        group = next((g for g in data.get("groups", []) if g.get("id") == self._group_id), None)
+        group = next((g for g in self.ow_data.get("groups", []) if g.get("id") == self._group_id), None)
         if not group:
             return
-        zones = data.get("zones", [])
-        children = [zone_switch_entity(z) for z in zones if z.get("id") in (group.get("zone_ids") or [])]
-        await self._call_child_switches(children, on)
+        zones = [z for z in self.ow_data.get("zones", []) if z.get("id") in (group.get("zone_ids") or [])]
+        floors = self.ow_data.get("floors", [])
+        affected_floors = [f for f in floors if any(z in self._floor_zones(f.get("id")) for z in zones)]
+        await self._call_switches([_zone_switch(z) for z in zones] + [_zone_floor_switch(f) for f in affected_floors], on)
 
 
 class OverwatchZoneSwitch(OWSwitch):
@@ -1849,7 +1879,9 @@ class OverwatchZoneFloorSwitch(OWSwitch):
             icon="mdi:floor-plan")
 
     async def _cascade(self, on: bool) -> None:
-        await self._call_child_switches([zone_switch_entity(z) for z in self._floor_zones(self._floor_id)], on)
+        zones = self._floor_zones(self._floor_id)
+        groups = self._groups_for_zones(zones, camera=False)
+        await self._call_switches([_zone_switch(z) for z in zones] + [_zone_group_switch(g) for g in groups], on)
 
 
 class OverwatchCameraFloorSwitch(OWSwitch):
@@ -1862,10 +1894,13 @@ class OverwatchCameraFloorSwitch(OWSwitch):
             icon="mdi:cctv")
 
     async def _cascade(self, on: bool) -> None:
-        children = []
-        for z in self._floor_zones(self._floor_id):
-            children.extend(camera_switch_entity(cam_id) for cam_id in z.get("cameras", []))
-        await self._call_child_switches(children, on)
+        zones = [z for z in self._floor_zones(self._floor_id) if z.get("cameras")]
+        groups = self._groups_for_zones(zones, camera=True)
+        camera_entities = []
+        for z in zones:
+            camera_entities.append(_camera_zone_switch(z))
+            camera_entities.extend(_camera_switch(cam_id) for cam_id in z.get("cameras", []))
+        await self._call_switches(camera_entities + [_camera_group_switch(g) for g in groups], on)
 
 
 class OverwatchCameraAllSwitch(OWSwitch):
@@ -1877,10 +1912,19 @@ class OverwatchCameraAllSwitch(OWSwitch):
             icon="mdi:cctv")
 
     async def _cascade(self, on: bool) -> None:
-        children = []
-        for z in self.ow_data.get("zones", []):
-            children.extend(camera_switch_entity(cam_id) for cam_id in z.get("cameras", []))
-        await self._call_child_switches(children, on)
+        zones = [z for z in self.ow_data.get("zones", []) if z.get("cameras")]
+        groups = self.ow_data.get("camera_groups", [])
+        floors = self.ow_data.get("floors", [])
+        camera_entities = []
+        for z in zones:
+            camera_entities.append(_camera_zone_switch(z))
+            camera_entities.extend(_camera_switch(cam_id) for cam_id in z.get("cameras", []))
+        await self._call_switches(
+            camera_entities
+            + [_camera_group_switch(g) for g in groups]
+            + [_camera_floor_switch(f) for f in floors],
+            on,
+        )
 
 
 class OverwatchCameraGroupSwitch(OWSwitch):
@@ -1893,15 +1937,17 @@ class OverwatchCameraGroupSwitch(OWSwitch):
             icon="mdi:cctv")
 
     async def _cascade(self, on: bool) -> None:
-        data = self.ow_data
-        group = next((g for g in data.get("groups", []) if g.get("id") == self._group_id), None)
+        group = next((g for g in self.ow_data.get("camera_groups", []) if g.get("id") == self._group_id), None)
         if not group:
             return
-        children = []
-        for z in data.get("zones", []):
-            if z.get("id") in (group.get("zone_ids") or []):
-                children.extend(camera_switch_entity(cam_id) for cam_id in z.get("cameras", []))
-        await self._call_child_switches(children, on)
+        zones = [z for z in self.ow_data.get("zones", []) if z.get("id") in (group.get("zone_ids") or []) and z.get("cameras")]
+        floors = self.ow_data.get("floors", [])
+        affected_floors = [f for f in floors if any(z in self._floor_zones(f.get("id")) for z in zones)]
+        camera_entities = []
+        for z in zones:
+            camera_entities.append(_camera_zone_switch(z))
+            camera_entities.extend(_camera_switch(cam_id) for cam_id in z.get("cameras", []))
+        await self._call_switches(camera_entities + [_camera_floor_switch(f) for f in affected_floors], on)
 
 
 class OverwatchCameraZoneSwitch(OWSwitch):
@@ -1917,13 +1963,20 @@ class OverwatchCameraZoneSwitch(OWSwitch):
         zone = next((z for z in self.ow_data.get("zones", []) if z.get("id") == self._zone_id), None)
         if not zone:
             return
-        await self._call_child_switches([camera_switch_entity(cam_id) for cam_id in zone.get("cameras", [])], on)
+        groups = self._groups_for_zones([zone], camera=True)
+        floors = [f for f in self.ow_data.get("floors", []) if zone in self._floor_zones(f.get("id"))]
+        await self._call_switches(
+            [_camera_switch(cam_id) for cam_id in zone.get("cameras", [])]
+            + [_camera_group_switch(g) for g in groups]
+            + [_camera_floor_switch(f) for f in floors],
+            on,
+        )
 
 
 class OverwatchCameraSwitch(OWSwitch):
     def __init__(self, c, cam):
         cid = cam["id"]
-        safe = re_sub_non_alnum(cid.replace("camera.", "", 1).lower())
+        safe = self._safe_id(cid)
         super().__init__(c,
             entity_id=f"switch.overwatch_camera_{safe}",
             unique_id=f"overwatch_camera_{safe}",
@@ -2076,7 +2129,7 @@ class OverwatchZoneTriggered(OWSensor):
   "manifest.json": `{
   "domain": "ha_overwatch",
   "name": "HA Overwatch",
-  "version": "1.14.9",
+  "version": "1.15.0",
   "documentation": "https://github.com/DM-AU/ha-overwatch",
   "issue_tracker": "https://github.com/DM-AU/ha-overwatch/issues",
   "codeowners": [],
@@ -2362,8 +2415,7 @@ function startHAListener() {
       }
       onStateChanged(entity_id, new_state.state || "");
       // Do not cascade switch state changes from HA state_changed events.
-      // HA reload/restored-state events must be treated as state only.
-      // HA parent fan-out is handled by switch.py async_turn_on/off.
+      // HA parent fan-out is handled only by switch.py async_turn_on/off.
     }
 
     // Log a heartbeat every 50 events so we can confirm events are flowing
