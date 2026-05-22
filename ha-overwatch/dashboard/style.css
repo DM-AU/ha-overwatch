@@ -2594,3 +2594,43 @@ body.sidebar-collapsed.sidebar-left .view-toggle-widget {
 }
 
 /* split-panel-map #main already has overflow:hidden from .split-panel */
+
+/* ─── v0.05.02 Alarm State Colours ───────────────────────────
+   Red = armed / active monitoring.
+   Green = disarmed / inactive monitoring.
+   Amber = partial / degraded monitoring.
+*/
+.status-dot.ow-disarmed { background: #32d74b; }
+.status-dot.ow-armed_full { background: #ff3b30; }
+.status-dot.ow-armed_partial { background: #ff9500; }
+.status-dot.ow-triggered { background: #ff3b30; animation: pulse-dot 0.8s infinite; }
+
+.zone-toggle-track::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 3px;
+  width: 16px;
+  height: 16px;
+  background: #32d74b;
+  border-radius: 50%;
+  transition: transform 0.2s, background 0.2s;
+}
+
+.zone-toggle-track {
+  background: rgba(50, 215, 75, 0.24);
+}
+
+.zone-toggle-switch input:checked + .zone-toggle-track {
+  background: rgba(255, 59, 48, 0.32);
+}
+
+.zone-toggle-switch input:checked + .zone-toggle-track::after {
+  background: #ff3b30;
+  transform: translateX(18px);
+}
+
+.zone-toggle-switch input:disabled + .zone-toggle-track {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
