@@ -1,3 +1,4 @@
+// HA-Overwatch 0.05.06-server-hotfix1: ghost entity filtering + alarm/trigger endpoints; no HA cascade changes.
 /* ============================================================
  * HA-Overwatch — server.js
  *
@@ -138,7 +139,7 @@ function loadZones() {
 }
 
 function parseZoneYaml(text) {
-  const z = { enabled: true, sensors: [], cameras: [], lights: [], sirens: [] };
+  const z = { enabled: true, sensors: [], cameras: [], lights: [], sirens: [], ha_excluded_entities: [] };
   let section = "";
   for (const raw of text.split("\n")) {
     const line = raw.trim();
@@ -148,6 +149,7 @@ function parseZoneYaml(text) {
     if (line === "cameras:") { section = "cameras"; continue; }
     if (line === "lights:")  { section = "lights";  continue; }
     if (line === "sirens:")  { section = "sirens";  continue; }
+    if (line === "ha_excluded_entities:") { section = "ha_excluded_entities"; continue; }
     if (line === "points:")  { section = "points";  continue; }
     // List items
     if (line.startsWith("- ") && section) {
@@ -156,6 +158,7 @@ function parseZoneYaml(text) {
       else if (section === "cameras") z.cameras.push(val);
       else if (section === "lights")  z.lights.push(val);
       else if (section === "sirens")  z.sirens.push(val);
+      else if (section === "ha_excluded_entities") z.ha_excluded_entities.push(val);
       continue;
     }
     // Key: value pairs reset the section
@@ -170,6 +173,11 @@ function parseZoneYaml(text) {
     else if (key === "enabled")  z.enabled  = val !== "false";
     else if (key === "floor_id") z.floor_id = val;
   }
+  const excluded = new Set((z.ha_excluded_entities || []).map(String));
+  z.sensors = (z.sensors || []).filter(entityId => !excluded.has(String(entityId)));
+  z.cameras = (z.cameras || []).filter(entityId => !excluded.has(String(entityId)));
+  z.lights  = (z.lights  || []).filter(entityId => !excluded.has(String(entityId)));
+  z.sirens  = (z.sirens  || []).filter(entityId => !excluded.has(String(entityId)));
   return z;
 }
 
@@ -242,6 +250,200 @@ function saveAlarms(alarms) {
   fs.writeFileSync(p, JSON.stringify(Array.isArray(alarms) ? alarms : [], null, 2), "utf8");
   bumpDataVersion();
 }
+
+// ── Ghost-safe triggered-state and alarm effective-state helpers ─────────
+function isTriggeredStateValue(state) {
+  return ["on", "open", "opening", "detected", "home", "triggered", "motion", "unlocked"].includes(String(state || "").toLowerCase());
+}
+
+function buildTriggeredSnapshot() {
+  const out = {};
+  for (const zone of loadZones()) {
+    const slug = nameSlug(zone.name) || zone.id;
+    out[slug] = (zone.sensors || []).some(entityId => {
+      const st = serverHaStates[entityId];
+      return st ? isTriggeredStateValue(st.state) : false;
+    });
+  }
+  return out;
+}
+
+function buildTriggeredDetailSnapshot() {
+  const out = {};
+  for (const zone of loadZones()) {
+    const slug = nameSlug(zone.name) || zone.id;
+    const sensors = (zone.sensors || []).map(entityId => {
+      const st = serverHaStates[entityId];
+      return {
+        entity_id: entityId,
+        state: st ? st.state : "unknown",
+        triggered: st ? isTriggeredStateValue(st.state) : false,
+        last_changed: st ? st.last_changed : null,
+        last_updated: st ? st.last_updated : null,
+      };
+    });
+    out[slug] = {
+      zone_id: zone.id,
+      zone_name: zone.name || zone.id,
+      triggered: sensors.some(s => s.triggered),
+      sensors,
+    };
+  }
+  return out;
+}
+
+function stateEntityOnAny(entityIds, fallback = false) {
+  for (const entityId of entityIds || []) {
+    const st = serverHaStates[entityId];
+    if (!st || st.state == null) continue;
+    const s = String(st.state).toLowerCase();
+    return !(s === "off" || s === "false" || s === "0" || s === "unavailable" || s === "unknown");
+  }
+  return !!fallback;
+}
+
+function canonicalIds(obj) {
+  const slug = nameSlug(obj?.name) || obj?.id;
+  return new Set([obj?.id, obj?.raw_id, slug].filter(Boolean).map(String));
+}
+
+function setHasAny(set, values) {
+  for (const v of values || []) if (set.has(String(v))) return true;
+  return false;
+}
+
+function alarmSwitchEntityIds(alarm) {
+  const ids = new Set();
+  if (alarm?.id) ids.add(`switch.overwatch_alarm_${alarm.id}`);
+  const slug = nameSlug(alarm?.name) || alarm?.id;
+  if (slug) ids.add(`switch.overwatch_alarm_${slug}`);
+  return [...ids];
+}
+
+function zoneSwitchEntityIds(zone) {
+  const ids = new Set();
+  if (zone?.id) ids.add(`switch.overwatch_zone_${zone.id}`);
+  const slug = nameSlug(zone?.name) || zone?.id;
+  if (slug) ids.add(`switch.overwatch_zone_${slug}`);
+  return [...ids];
+}
+
+function zonesForFloorId(zones, floors, floorId) {
+  const isFirstFloor = floors.length === 0 || floors[0]?.id === floorId;
+  return zones.filter(z => z.floor_id === floorId || (!z.floor_id && isFirstFloor));
+}
+
+function alarmSelectedZones(alarm, zones, groups, floors) {
+  const members = alarm.members || {};
+  const zoneIds = members.zone_ids || [];
+  const groupIds = members.group_ids || [];
+  const floorIds = members.floor_ids || [];
+  const includeAllZones = zoneIds.includes("*") || groupIds.includes("*") || floorIds.includes("*");
+  const selected = new Map();
+  const addZone = zone => { if (zone && zone.id) selected.set(zone.id, zone); };
+
+  if (includeAllZones) {
+    zones.forEach(addZone);
+    return [...selected.values()];
+  }
+
+  zones.forEach(zone => {
+    if (setHasAny(canonicalIds(zone), zoneIds)) addZone(zone);
+  });
+
+  groups.forEach(group => {
+    if (!setHasAny(canonicalIds(group), groupIds)) return;
+    (group.zone_ids || []).forEach(zid => {
+      const zone = zones.find(z => z.id === zid || canonicalIds(z).has(String(zid)));
+      addZone(zone);
+    });
+  });
+
+  floors.forEach(floor => {
+    if (!setHasAny(canonicalIds(floor), floorIds)) return;
+    zonesForFloorId(zones, floors, floor.id).forEach(addZone);
+  });
+
+  return [...selected.values()];
+}
+
+function buildAlarmEffectiveState() {
+  const zones = loadZones();
+  const groups = loadGroups();
+  const floors = loadFloors();
+  const alarms = loadAlarms();
+
+  const selectedByAlarm = new Map();
+  const armedByAlarm = new Map();
+
+  alarms.forEach(alarm => {
+    selectedByAlarm.set(alarm.id, alarmSelectedZones(alarm, zones, groups, floors));
+    armedByAlarm.set(alarm.id, stateEntityOnAny(alarmSwitchEntityIds(alarm), alarm.default_armed === true));
+  });
+
+  return {
+    alarms: alarms.map(alarm => {
+      const selectedZones = selectedByAlarm.get(alarm.id) || [];
+      const isArmed = armedByAlarm.get(alarm.id) === true;
+      const suppressedZoneIds = new Set();
+      const suppressionReasons = [];
+
+      if (isArmed) {
+        selectedZones.forEach(zone => {
+          const zoneArmed = stateEntityOnAny(zoneSwitchEntityIds(zone), zone.enabled !== false);
+          if (!zoneArmed) {
+            suppressedZoneIds.add(zone.id);
+            suppressionReasons.push({
+              zone_id: nameSlug(zone.name) || zone.id,
+              zone_raw_id: zone.id,
+              zone_name: zone.name || zone.id,
+              reason: "manual_zone_disarm",
+              source: zoneSwitchEntityIds(zone)[0],
+            });
+          }
+        });
+
+        alarms.forEach(other => {
+          if (other.id === alarm.id || armedByAlarm.get(other.id) === true) return;
+          const otherSelectedIds = new Set((selectedByAlarm.get(other.id) || []).map(z => z.id));
+          selectedZones.forEach(zone => {
+            if (!otherSelectedIds.has(zone.id) || suppressedZoneIds.has(zone.id)) return;
+            suppressedZoneIds.add(zone.id);
+            suppressionReasons.push({
+              zone_id: nameSlug(zone.name) || zone.id,
+              zone_raw_id: zone.id,
+              zone_name: zone.name || zone.id,
+              reason: "overlap_disarmed_alarm",
+              source_alarm: nameSlug(other.name) || other.id,
+              source_alarm_raw_id: other.id,
+              source_alarm_name: other.name || other.id,
+            });
+          });
+        });
+      }
+
+      const selectedCount = selectedZones.length;
+      const suppressedCount = isArmed ? suppressedZoneIds.size : 0;
+      const activeCount = isArmed ? Math.max(0, selectedCount - suppressedCount) : 0;
+      const state = !isArmed ? "disarmed" : (suppressedCount > 0 ? "armed_partial" : "armed_full");
+
+      return {
+        id: nameSlug(alarm.name) || alarm.id,
+        raw_id: alarm.id,
+        name: alarm.name || alarm.id,
+        role: alarm.role || null,
+        builtin: !!alarm.builtin,
+        state,
+        selected_zones: selectedCount,
+        active_zones: activeCount,
+        suppressed_zones: suppressedCount,
+        suppression_reasons: suppressionReasons,
+      };
+    }),
+    generated_at: new Date().toISOString(),
+  };
+}
+
 
 /* ─── GROUPS ──────────────────────────────────────────────── */
 function loadGroups() {
@@ -687,6 +889,12 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (pathname === "/ow/alarms/effective" && req.method === "GET") {
+    try { json(res, buildAlarmEffectiveState()); }
+    catch (e) { err(res, e.message, 500); }
+    return;
+  }
+
   /* ── /ow/cam-pinned ──────────────────────────────────────── */
   if (pathname === "/ow/cam-pinned" && req.method === "GET") {
     const f = path.join(DATA_DIR, "config", "cam_pinned.json");
@@ -767,22 +975,15 @@ const server = http.createServer(async (req, res) => {
 
   /* ── /ow/triggered — coordinator polls for zone triggered states ── */
   if (pathname === "/ow/triggered" && req.method === "GET") {
-    // v1.3 fix: always return every configured zone, not only zones that have
-    // changed since listener startup. Direct :8099 dashboards rely on a stable
-    // complete key set; missing keys caused zones/doors/lights to look stale.
-    let allZones = [];
-    try { allZones = typeof loadZones === "function" ? loadZones() : []; } catch {}
-    const out = {};
-    for (const zone of allZones) {
-      const slug = nameSlug(zone.name) || zone.id;
-      out[slug] = !!globalTriggeredZones[slug];
-    }
-    // Preserve transient/renamed keys for already-open browsers, but configured
-    // zones above are authoritative.
-    Object.keys(globalTriggeredZones || {}).forEach(k => {
-      if (!(k in out)) out[k] = !!globalTriggeredZones[k];
-    });
-    json(res, out);
+    try { json(res, buildTriggeredSnapshot()); }
+    catch (e) { err(res, e.message, 500); }
+    return;
+  }
+
+  /* ── /ow/triggered-detail — debug why a zone is considered triggered ── */
+  if (pathname === "/ow/triggered-detail" && req.method === "GET") {
+    try { json(res, buildTriggeredDetailSnapshot()); }
+    catch (e) { err(res, e.message, 500); }
     return;
   }
 
@@ -1980,7 +2181,7 @@ class OverwatchZoneTriggered(OWSensor):
   "manifest.json": `{
   "domain": "ha_overwatch",
   "name": "HA Overwatch",
-  "version": "1.14.0",
+  "version": "1.14.1",
   "documentation": "https://github.com/DM-AU/ha-overwatch",
   "issue_tracker": "https://github.com/DM-AU/ha-overwatch/issues",
   "codeowners": [],
@@ -2451,6 +2652,9 @@ function startHAListener() {
   }
 
   function pushBinarySensor(zone, isTriggered) {
+    // Disabled in 0.05.06-server-hotfix1: generated binary_sensor entities poll /ow/triggered.
+    // Direct /api/states pushes can leave stale triggered states after entity exclusions/reloads.
+    return;
     if (!process.env.SUPERVISOR_TOKEN) return;
     const slug     = nameSlug(zone.name) || zone.id;
     const entityId = `binary_sensor.overwatch_zone_${slug}_triggered`;
