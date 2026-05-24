@@ -1,5 +1,5 @@
 /* ================================================================
- * HA-Overwatch — automations.js  v4
+ * HA-Overwatch — automations.js  v0.05.12
  * Admin-only Automation Editor.
  * HA is source of truth — reads/writes directly via server proxy.
  * ================================================================ */
@@ -574,10 +574,12 @@ function renderEditor() {
   _panelEl.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px 12px;border-bottom:1px solid rgba(255,255,255,0.07);flex-shrink:0;">
       <div style="display:flex;align-items:center;gap:10px;">
-        <button id="owAutoBackBtn" style="${btnStyle('rgba(255,255,255,0.06)','rgba(255,255,255,0.04)',true)}">← Back</button>
         <span style="font-size:14px;font-weight:600;">${isNew?'New Automation':'Edit Automation'}</span>
       </div>
-      <button id="owAutoSaveBtn" style="${btnStyle('#0064d2','rgba(0,100,210,0.18)')}">💾 Save &amp; Push to HA</button>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <button id="owAutoSaveBtn" style="${btnStyle('#0064d2','rgba(0,100,210,0.18)')}">💾 Save &amp; Push to HA</button>
+        <button id="owAutoBackBtn" style="${btnStyle('rgba(255,255,255,0.06)','rgba(255,255,255,0.04)',true)}">← Back</button>
+      </div>
     </div>
     <div id="owAutoScrollBody" style="flex:1;overflow-y:auto;padding:0 18px 40px;">
       <div style="padding:16px 0 12px;border-bottom:1px solid rgba(255,255,255,0.05);">
