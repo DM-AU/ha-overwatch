@@ -1,6 +1,6 @@
 /* ================================================================
  * HA-Overwatch — ow-alarms.js
- * v0.05.13: Alarm description + trigger type filters (person/animal/motion/door/window/vehicle/smoke/gas).
+ * v0.05.14: Trigger filters reposition + empty-selection warning (no trigger).
  *
  * Scope:
  * - Frontend-only.
@@ -8,7 +8,6 @@
  * - Retains effective alarm state preview and corrected security colours.
  * - Red = Armed, Amber = Armed Partial, Green = Disarmed.
  * - Adds response profile configuration using Automation Editor-style grouped selectors.
- * - Adds per-alarm description and trigger type filters.
  * - No trigger execution yet.
  * ================================================================ */
 (function () {
@@ -55,24 +54,18 @@
 
   const TRIGGER_FILTER_KEYS = ['person','animal','motion','door','window','vehicle','smoke','gas'];
   const TRIGGER_FILTER_LABELS = { person:'Person', animal:'Animal', motion:'Motion', door:'Door', window:'Window', vehicle:'Vehicle', smoke:'Smoke', gas:'Gas / CO' };
-  function defaultTriggerFilters() {
-    const out = {}; TRIGGER_FILTER_KEYS.forEach(k => out[k] = true);
-    return out;
-  }
+  function defaultTriggerFilters() { const out = {}; TRIGGER_FILTER_KEYS.forEach(k => out[k] = true); return out; }
   function normaliseTriggerFilters(filters) {
     const f = (filters && typeof filters === 'object') ? filters : {};
     const out = {};
     TRIGGER_FILTER_KEYS.forEach(k => {
       if (typeof f[k] === 'boolean') out[k] = f[k];
-      else if (typeof f[k] === 'string') out[k] = (f[k].toLowerCase() === 'true' || f[k] === '1' || f[k].toLowerCase() === 'on');
+      else if (typeof f[k] === 'string') out[k] = (String(f[k]).toLowerCase() === 'true' || f[k] === '1' || String(f[k]).toLowerCase() === 'on');
       else out[k] = true;
     });
     return out;
   }
-  function ensureTriggerFilters(a) {
-    a.trigger_filters = normaliseTriggerFilters(a.trigger_filters || a.filters || null);
-    return a.trigger_filters;
-  }
+  function ensureTriggerFilters(a) { a.trigger_filters = normaliseTriggerFilters(a.trigger_filters || a.filters || null); return a.trigger_filters; }
 
 const emptyResponseAction = () => ({ enabled:false, entities:[], targets:[] });
   const emptyResponseSet = () => ({ notify: emptyResponseAction(), sirens: emptyResponseAction(), lights: emptyResponseAction(), cameras: emptyResponseAction(), scripts: emptyResponseAction(), automations: emptyResponseAction() });
@@ -239,7 +232,8 @@ const emptyResponseAction = () => ({ enabled:false, entities:[], targets:[] });
     if (document.getElementById('ow-alarms-style')) return;
     const s = document.createElement('style');
     s.id = 'ow-alarms-style';
-    s.textContent = `.owa-btn{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);color:#aaa;border-radius:8px;padding:7px 12px;cursor:pointer;font-size:12px;font-weight:600}.owa-btn.primary{background:#0064d2;color:#fff}.owa-btn:disabled{opacity:.35;cursor:default}.owa-card{display:flex;align-items:flex-start;gap:12px;background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.08);border-radius:10px;padding:12px;margin:0 0 8px;cursor:pointer}.owa-card:hover{background:rgba(255,255,255,.055)}.owa-input,.owa-select{box-sizing:border-box;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);border-radius:7px;color:#fff;padding:8px 10px;outline:none}.owa-input{width:100%}.owa-select{font-size:12px;padding:7px 9px}.owa-select option{background:#111;color:#eee}.owa-muted{font-size:11px;color:#555}.owa-tree{background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.08);border-radius:10px;padding:8px;max-height:44vh;overflow:auto}.owa-row{display:flex;align-items:center;gap:8px;padding:4px 4px}.owa-row span{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.owa-exp{width:22px;height:22px;border:0;background:transparent;color:#aaa;cursor:pointer}.owa-exp.leaf{visibility:hidden}.owa-pill{font-size:10px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;border-radius:999px;padding:3px 8px;border:1px solid rgba(255,255,255,.12)}.owa-counts{display:flex;gap:8px;flex-wrap:wrap;margin-top:6px}.owa-count{font-size:10px;color:#d8d8d8;background:rgba(255,255,255,.045);border:1px solid rgba(255,255,255,.075);border-radius:999px;padding:3px 7px}.owa-count.selected{background:rgba(0,122,255,.20);border-color:rgba(0,122,255,.42);color:#b9dcff}.owa-count.active{background:rgba(52,199,89,.20);border-color:rgba(52,199,89,.42);color:#c7f5d3}.owa-count.suppressed{background:rgba(255,149,0,.20);border-color:rgba(255,149,0,.46);color:#ffd49a}.owa-response-tree{background:rgba(255,255,255,.025);border-left:3px solid rgba(52,199,89,.85);border-radius:9px;padding:8px 10px;margin-top:8px}.owa-response-row{display:flex;align-items:center;gap:8px;padding:5px 0}.owa-response-row.depth1{padding-left:18px}.owa-response-row.depth2{padding-left:36px}.owa-response-row.depth3{padding-left:54px}.owa-response-row .tag{font-size:9px;border-radius:4px;padding:1px 4px;margin-left:4px;background:rgba(0,122,255,.25);color:#87c7ff}.owa-response-row .tag.triggered{background:rgba(255,59,48,.28);color:#ff9d9a}.owa-response-other{margin-top:8px}.owa-entity-list{display:flex;flex-wrap:wrap;gap:6px;margin-top:7px}.owa-entity-pill{display:inline-flex;align-items:center;gap:6px;max-width:100%;font-size:11px;color:#d6d6d6;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.11);border-radius:999px;padding:4px 8px}.owa-entity-pill button{border:0;background:transparent;color:#aaa;cursor:pointer;padding:0;font-size:12px}.owa-supp{margin-top:8px;padding:8px 10px;background:rgba(255,149,0,.07);border:1px solid rgba(255,149,0,.16);border-radius:8px;color:#c8a166;font-size:11px}.owa-supp ul{margin:5px 0 0 16px;padding:0}.owa-supp li{margin:2px 0}.owa-section{background:rgba(255,255,255,.025);border:1px solid rgba(255,255,255,.07);border-radius:10px;padding:10px;margin-top:12px}.owa-sortbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.owa-sortlabel{font-size:11px;color:#777}`;
+    s.textContent = `.owa-btn{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);color:#aaa;border-radius:8px;padding:7px 12px;cursor:pointer;font-size:12px;font-weight:600}.owa-btn.primary{background:#0064d2;color:#fff}.owa-btn:disabled{opacity:.35;cursor:default}.owa-card{display:flex;align-items:flex-start;gap:12px;background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.08);border-radius:10px;padding:12px;margin:0 0 8px;cursor:pointer}.owa-card:hover{background:rgba(255,255,255,.055)}.owa-input,.owa-select{box-sizing:border-box;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);border-radius:7px;color:#fff;padding:8px 10px;outline:none}.owa-input{width:100%}.owa-select{font-size:12px;padding:7px 9px}.owa-select option{background:#111;color:#eee}.owa-muted{font-size:11px;color:#555}.owa-tree{background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.08);border-radius:10px;padding:8px;max-height:44vh;overflow:auto}.owa-row{display:flex;align-items:center;gap:8px;padding:4px 4px}.owa-row span{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.owa-exp{width:22px;height:22px;border:0;background:transparent;color:#aaa;cursor:pointer}.owa-exp.leaf{visibility:hidden}.owa-pill{font-size:10px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;border-radius:999px;padding:3px 8px;border:1px solid rgba(255,255,255,.12)}.owa-counts{display:flex;gap:8px;flex-wrap:wrap;margin-top:6px}.owa-count{font-size:10px;color:#d8d8d8;background:rgba(255,255,255,.045);border:1px solid rgba(255,255,255,.075);border-radius:999px;padding:3px 7px}.owa-count.selected{background:rgba(0,122,255,.20);border-color:rgba(0,122,255,.42);color:#b9dcff}.owa-count.active{background:rgba(52,199,89,.20);border-color:rgba(52,199,89,.42);color:#c7f5d3}.owa-count.suppressed{background:rgba(255,149,0,.20);border-color:rgba(255,149,0,.46);color:#ffd49a}.owa-response-tree{background:rgba(255,255,255,.025);border-left:3px solid rgba(52,199,89,.85);border-radius:9px;padding:8px 10px;margin-top:8px}.owa-response-row{display:flex;align-items:center;gap:8px;padding:5px 0}.owa-response-row.depth1{padding-left:18px}.owa-response-row.depth2{padding-left:36px}.owa-response-row.depth3{padding-left:54px}.owa-response-row .tag{font-size:9px;border-radius:4px;padding:1px 4px;margin-left:4px;background:rgba(0,122,255,.25);color:#87c7ff}.owa-response-row .tag.triggered{background:rgba(255,59,48,.28);color:#ff9d9a}.owa-response-other{margin-top:8px}.owa-entity-list{display:flex;flex-wrap:wrap;gap:6px;margin-top:7px}.owa-entity-pill{display:inline-flex;align-items:center;gap:6px;max-width:100%;font-size:11px;color:#d6d6d6;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.11);border-radius:999px;padding:4px 8px}.owa-entity-pill button{border:0;background:transparent;color:#aaa;cursor:pointer;padding:0;font-size:12px}.owa-warn{margin-top:10px;padding:9px 11px;background:rgba(255,59,48,.10);border:1px solid rgba(255,59,48,.22);border-radius:8px;color:#ff9d9a;font-size:11px}.owa-warn b{color:#ff6b6b}
+.owa-supp{margin-top:8px;padding:8px 10px;background:rgba(255,149,0,.07);border:1px solid rgba(255,149,0,.16);border-radius:8px;color:#c8a166;font-size:11px}.owa-supp ul{margin:5px 0 0 16px;padding:0}.owa-supp li{margin:2px 0}.owa-section{background:rgba(255,255,255,.025);border:1px solid rgba(255,255,255,.07);border-radius:10px;padding:10px;margin-top:12px}.owa-sortbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.owa-sortlabel{font-size:11px;color:#777}`;
     document.head.appendChild(s);
   }
 
@@ -379,14 +373,14 @@ const emptyResponseAction = () => ({ enabled:false, entities:[], targets:[] });
     ensureResponses(draft);
     ensureTriggerFilters(draft);
     const eff = draftEffectivePreview();
-    panel.innerHTML = `<div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px 12px;border-bottom:1px solid rgba(255,255,255,.07)"><div style="display:flex;gap:10px;align-items:center"><b>${editingId === 'new' ? 'New Alarm' : 'Edit Alarm'}</b>${eff ? pill(eff.state) : ''}</div><div style="display:flex;gap:8px;align-items:center"><button id="owaSave" class="owa-btn primary">💾 Save</button><button id="owaBack" class="owa-btn">← Back</button></div></div><div style="flex:1;overflow:auto;padding:16px 18px 40px"><label class="owa-muted">Alarm Name</label><input id="owaName" class="owa-input" value="${esc(draft.name)}"><label class="owa-muted" style="margin-top:12px">Description</label><textarea id="owaDesc" class="owa-input" rows="2" placeholder="Optional description" style="resize:vertical;min-height:52px">${esc(draft.description || '')}</textarea><h3 style="font-size:13px;margin:18px 0 6px">Trigger Filters</h3><div class="owa-muted" style="margin-bottom:8px">Alarm will only trigger when the triggering entity type matches a checked filter. Defaults to all enabled.</div><div class="owa-section" id="owaTrigFilters" style="display:flex;flex-wrap:wrap;gap:10px">${TRIGGER_FILTER_KEYS.map(k => `<label style="display:flex;gap:8px;align-items:center;min-width:140px"><input type="checkbox" data-trigfilter="${k}" ${ensureTriggerFilters(draft)[k] ? 'checked' : ''}> ${esc(TRIGGER_FILTER_LABELS[k] || k)}</label>`).join('')} </div><div class="owa-muted" style="margin-top:6px">HA entity: ${esc(alarmSwitchId(draft))}</div>${eff ? effectiveDetailHtml(eff) : ''}<h3 style="font-size:13px;margin:18px 0 6px">Members</h3><div class="owa-muted" style="margin-bottom:8px">Floors/groups are batch selectors only. Selecting a parent writes explicit zones so members can be unticked afterwards.</div><div id="owaTree" class="owa-tree"></div>${responseProfileHtml()}</div>`;
+    panel.innerHTML = `<div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px 12px;border-bottom:1px solid rgba(255,255,255,.07)"><div style="display:flex;gap:10px;align-items:center"><b>${editingId === 'new' ? 'New Alarm' : 'Edit Alarm'}</b>${eff ? pill(eff.state) : ''}</div><div style="display:flex;gap:8px;align-items:center"><button id="owaSave" class="owa-btn primary">💾 Save</button><button id="owaBack" class="owa-btn">← Back</button></div></div><div style="flex:1;overflow:auto;padding:16px 18px 40px"><label class="owa-muted">Alarm Name</label><input id="owaName" class="owa-input" value="${esc(draft.name)}"><label class="owa-muted" style="margin-top:12px">Description</label><textarea id="owaDesc" class="owa-input" rows="2" placeholder="Optional description" style="resize:vertical;min-height:52px">${esc(draft.description || '')}</textarea><div class="owa-muted" style="margin-top:6px">HA entity: ${esc(alarmSwitchId(draft))}</div>${eff ? effectiveDetailHtml(eff) : ''}${triggerFiltersHtml()}<h3 style="font-size:13px;margin:18px 0 6px">Members</h3><div class="owa-muted" style="margin-bottom:8px">Floors/groups are batch selectors only. Selecting a parent writes explicit zones so members can be unticked afterwards.</div><div id="owaTree" class="owa-tree"></div>${responseProfileHtml()}</div>`;
     panel.querySelector('#owaBack').onclick = () => { draft = null; editingId = null; renderList(true); startDynamicRefresh(); };
     panel.querySelector('#owaName').oninput = e => { draft.name = e.target.value; };
     const descEl = panel.querySelector('#owaDesc');
     if (descEl) descEl.oninput = e => { draft.description = e.target.value; };
-    panel.querySelectorAll('[data-trigfilter]').forEach(cb => cb.onchange = () => { const k = cb.dataset.trigfilter; ensureTriggerFilters(draft)[k] = !!cb.checked; });
     renderTree(panel.querySelector('#owaTree'));
     wireResponseControls();
+    panel.querySelectorAll('[data-trigfilter]').forEach(cb => cb.onchange = () => { const k = cb.dataset.trigfilter; ensureTriggerFilters(draft)[k] = !!cb.checked; const warn = panel.querySelector('.owa-warn'); const any = TRIGGER_FILTER_KEYS.some(x => ensureTriggerFilters(draft)[x]); if (warn) warn.style.display = any ? 'none' : ''; else if (!any) { const host = panel.querySelector('#owaTrigFilters'); if (host) host.insertAdjacentHTML('afterend', '<div class="owa-warn"><b>Warning:</b> No trigger filters are enabled. This alarm will never enter a triggered state until at least one filter is selected.</div>'); } });
     panel.querySelector('#owaSave').onclick = async () => {
       if (!(draft.name || '').trim()) return alert('Enter an alarm name.');
       draft.configured = true;
@@ -502,7 +496,19 @@ const emptyResponseAction = () => ({ enabled:false, entities:[], targets:[] });
     draft.responses = normaliseResponses(r);
   }
 
-  function effectiveDetailHtml(eff) {
+  
+  function triggerFiltersHtml() {
+    const f = ensureTriggerFilters(draft);
+    const any = TRIGGER_FILTER_KEYS.some(k => f[k]);
+    const warn = !any ? `<div class="owa-warn"><b>Warning:</b> No trigger filters are enabled. This alarm will never enter a triggered state until at least one filter is selected.</div>` : '';
+    return `<h3 style="font-size:13px;margin:18px 0 6px">Trigger Filters</h3>` +
+      `<div class="owa-muted" style="margin-bottom:8px">Alarm will only trigger when the triggering entity type matches a checked filter. If none are selected, it will never trigger.</div>` +
+      `<div class="owa-section" id="owaTrigFilters" style="display:flex;flex-wrap:wrap;gap:10px">` +
+      `${TRIGGER_FILTER_KEYS.map(k => `<label style="display:flex;gap:8px;align-items:center;min-width:140px"><input type="checkbox" data-trigfilter="${k}" ${f[k] ? 'checked' : ''}> ${esc(TRIGGER_FILTER_LABELS[k] || k)}</label>`).join('')}` +
+      `</div>` + warn;
+  }
+
+function effectiveDetailHtml(eff) {
     const active = eff.activeZoneIds.slice(0, 8).map(id => esc(zoneName(id))).join(', ');
     return `<div class="owa-section"><div style="font-weight:700;margin-bottom:6px">Effective state</div><div class="owa-counts"><span class="owa-count selected">Selected ${eff.selectedZoneIds.length}</span><span class="owa-count active">Active ${eff.activeZoneIds.length}</span><span class="owa-count suppressed">Suppressed ${eff.suppressedZoneIds.length}</span></div>${active ? `<div class="owa-muted" style="margin-top:8px">Active: ${active}${eff.activeZoneIds.length > 8 ? '…' : ''}</div>` : ''}${suppressionSummaryHtml(eff, 12)}</div>`;
   }
