@@ -1,4 +1,4 @@
-// HA-Overwatch 0.05.17-alarm-triggered-function-fix: add missing buildAlarmTriggeredState + endpoint; preserve alarm triggered HA binary sensor component; no cascade changes.
+// HA-Overwatch 0.05.18-alarm-triggered-entity-setup-fix: use triggered coordinator data for alarm triggered binary sensor creation; add setup logging; no cascade changes.
 /* ============================================================
  * HA-Overwatch — server.js
  *
@@ -453,7 +453,7 @@ function buildAlarmEffectiveState() {
 }
 
 
-// ── Alarm triggered-state evaluation (0.05.17) ─────────────────────────────
+// ── Alarm triggered-state evaluation (0.05.18) ─────────────────────────────
 const ALARM_TRIGGER_FILTER_KEYS = ["person","animal","motion","door","window","vehicle","smoke","gas"];
 
 function normaliseAlarmTriggerFilters(filters) {
@@ -2247,15 +2247,13 @@ class OverwatchCameraSwitch(OWSwitch):
 `,
   "binary_sensor.py": `"""Binary sensor platform for HA Overwatch.
 
-Reads triggered state from TriggeredCoordinator which polls /ow/triggered every 2s.
-State is computed server-side from actual HA sensor state_changed events.
+Reads zone trigger state from /ow/triggered and alarm trigger state from /ow/alarms/triggered.
 """
 from __future__ import annotations
 import logging
 from homeassistant.components.binary_sensor import BinarySensorDeviceClass, BinarySensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -2263,56 +2261,6 @@ from .const import DOMAIN
 from . import TriggeredCoordinator, ZoneCoordinator, AlarmTriggeredCoordinator
 
 _LOGGER = logging.getLogger(__name__)
-
-
-async def async_setup_entry(
-    hass: HomeAssistant, entry: ConfigEntry,
-    async_add_entities: AddEntitiesCallback,
-) -> None:
-    data               = hass.data[DOMAIN][entry.entry_id]
-    zone_coordinator   = data["zone_coordinator"]
-    trig_coordinator   = data["triggered_coordinator"]
-    alarm_eff_coordinator = data.get("alarm_effective_coordinator")
-    alarm_trig_coordinator = data.get("alarm_triggered_coordinator")
-
-    known_unique_ids: set[str] = set()
-
-    def _build_sensors(zones_data: dict) -> list:
-        entities = [OverwatchMasterTriggered(trig_coordinator, zone_coordinator)]
-        for g in zones_data.get("groups", []):
-            entities.append(OverwatchGroupTriggered(trig_coordinator, g))
-        for z in zones_data.get("zones", []):
-            entities.append(OverwatchZoneTriggered(trig_coordinator, z))
-        return entities
-
-    def _sync_sensors() -> None:
-        """Called on every zone coordinator update — adds new and removes deleted binary sensors."""
-        zones_data = zone_coordinator.data or {}
-        all_sensors = _build_sensors(zones_data)
-        current_unique_ids = {s._attr_unique_id for s in all_sensors}
-
-        # Add new sensors
-        new_sensors = [s for s in all_sensors if s._attr_unique_id not in known_unique_ids]
-        if new_sensors:
-            _LOGGER.info("Overwatch: adding %d new binary sensor entities dynamically", len(new_sensors))
-            for s in new_sensors:
-                known_unique_ids.add(s._attr_unique_id)
-            async_add_entities(new_sensors, update_before_add=False)
-
-        # Remove deleted sensor entities
-        protected = {"overwatch_zone_master_triggered"}
-        removed = known_unique_ids - current_unique_ids - protected
-        if removed:
-            registry = er.async_get(hass)
-            for uid in removed:
-                entity_id = registry.async_get_entity_id("binary_sensor", "ha_overwatch", uid)
-                if entity_id:
-                    registry.async_remove(entity_id)
-                    _LOGGER.info("Overwatch: removed deleted binary sensor entity %s (uid=%s)", entity_id, uid)
-            known_unique_ids.difference_update(removed)
-
-    _sync_sensors()
-    entry.async_on_unload(zone_coordinator.async_add_listener(_sync_sensors))
 
 
 def _dev(url: str) -> DeviceInfo:
@@ -2324,35 +2272,50 @@ def _dev(url: str) -> DeviceInfo:
         configuration_url=url,
     )
 
-    if alarm_eff_coordinator and alarm_trig_coordinator:
-        alarms = (alarm_eff_coordinator.data or {}).get("alarms", [])
-        async_add_entities([OverwatchAlarmTriggeredArmed(alarm_trig_coordinator, a) for a in alarms])
-        async_add_entities([OverwatchAlarmTriggeredDisarmed(alarm_trig_coordinator, a) for a in alarms])
+
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
+    data = hass.data[DOMAIN][entry.entry_id]
+    zone_coordinator: ZoneCoordinator = data["zone_coordinator"]
+    trig_coordinator: TriggeredCoordinator = data["triggered_coordinator"]
+    alarm_trig_coordinator: AlarmTriggeredCoordinator | None = data.get("alarm_triggered_coordinator")
+
+    zone_data = zone_coordinator.data or {}
+    groups = zone_data.get("groups", [])
+    zones = zone_data.get("zones", [])
+
+    entities = [OverwatchMasterTriggered(trig_coordinator, zone_coordinator)]
+    entities.extend(OverwatchGroupTriggered(trig_coordinator, g) for g in groups)
+    entities.extend(OverwatchZoneTriggered(trig_coordinator, z) for z in zones)
+
+    if alarm_trig_coordinator:
+        alarms = (alarm_trig_coordinator.data or {}).get("alarms", [])
+        _LOGGER.warning("HA Overwatch adding %s alarm triggered binary sensors from %s alarms", len(alarms) * 2, len(alarms))
+        entities.extend(OverwatchAlarmTriggeredArmed(alarm_trig_coordinator, a) for a in alarms)
+        entities.extend(OverwatchAlarmTriggeredDisarmed(alarm_trig_coordinator, a) for a in alarms)
+    else:
+        _LOGGER.warning("HA Overwatch alarm_trig_coordinator missing; alarm triggered binary sensors not added")
+
+    async_add_entities(entities)
+
 
 class OWSensor(CoordinatorEntity, BinarySensorEntity):
     _attr_device_class = BinarySensorDeviceClass.MOTION
-    _attr_should_poll  = False
+    _attr_should_poll = False
 
-    def __init__(self, coordinator: TriggeredCoordinator, entity_id: str,
-                 unique_id: str, name: str, url: str = ""):
-        super().__init__(coordinator)
-        self.entity_id        = entity_id
-        self._attr_unique_id  = unique_id
-        self._attr_name       = name
-        self._attr_icon       = "mdi:shield-alert"
+    def __init__(self, coord, entity_id: str, unique_id: str, name: str, url: str) -> None:
+        super().__init__(coord)
+        self._attr_unique_id = unique_id
+        self._attr_name = name
+        self.entity_id = entity_id
         self._attr_device_info = _dev(url)
-
-    @property
-    def triggered_data(self) -> dict:
-        return self.coordinator.data or {}
-
-    @property
-    def is_on(self) -> bool:
-        return False
 
 
 class OverwatchMasterTriggered(OWSensor):
-    def __init__(self, trig: TriggeredCoordinator, zone_coord: ZoneCoordinator):
+    def __init__(self, trig: TriggeredCoordinator, zone_coord: ZoneCoordinator) -> None:
         super().__init__(trig,
             entity_id="binary_sensor.overwatch_zone_master_triggered",
             unique_id="overwatch_zone_master_triggered",
@@ -2362,11 +2325,12 @@ class OverwatchMasterTriggered(OWSensor):
 
     @property
     def is_on(self) -> bool:
-        return any(v for v in self.triggered_data.values())
+        data = self.coordinator.data or {}
+        return any(bool(v) for v in data.values())
 
 
 class OverwatchGroupTriggered(OWSensor):
-    def __init__(self, trig: TriggeredCoordinator, g: dict):
+    def __init__(self, trig: TriggeredCoordinator, g: dict) -> None:
         gid = g["id"]
         super().__init__(trig,
             entity_id=f"binary_sensor.overwatch_zone_group_{gid}_triggered",
@@ -2377,26 +2341,30 @@ class OverwatchGroupTriggered(OWSensor):
 
     @property
     def is_on(self) -> bool:
-        return any(self.triggered_data.get(zid, False) for zid in self._zone_ids)
+        data = self.coordinator.data or {}
+        return any(bool(data.get(zid)) for zid in self._zone_ids)
 
 
 class OverwatchZoneTriggered(OWSensor):
-    def __init__(self, trig: TriggeredCoordinator, z: dict):
+    def __init__(self, trig: TriggeredCoordinator, z: dict) -> None:
         zid = z["id"]
+        sid = z.get("slug") or z.get("id")
         super().__init__(trig,
-            entity_id=f"binary_sensor.overwatch_zone_{zid}_triggered",
-            unique_id=f"overwatch_zone_{zid}_triggered",
+            entity_id=f"binary_sensor.overwatch_zone_{sid}_triggered",
+            unique_id=f"overwatch_zone_{sid}_triggered",
             name=f"Zone Triggered: {z.get('name', zid)}",
             url=trig.url)
-        self._zid = zid
+        self._zid = sid
 
     @property
     def is_on(self) -> bool:
-        return bool(self.triggered_data.get(self._zid, False))
+        data = self.coordinator.data or {}
+        return bool(data.get(self._zid))
 
 
 class OverwatchAlarmTriggeredBase(CoordinatorEntity, BinarySensorEntity):
     _attr_should_poll = False
+    _attr_device_class = BinarySensorDeviceClass.MOTION
 
     def __init__(self, coord: AlarmTriggeredCoordinator, alarm: dict, suffix: str, name_suffix: str) -> None:
         super().__init__(coord)
@@ -2405,6 +2373,7 @@ class OverwatchAlarmTriggeredBase(CoordinatorEntity, BinarySensorEntity):
         self.entity_id = f"binary_sensor.overwatch_alarm_{aid}_{suffix}"
         self._attr_unique_id = f"overwatch_alarm_{aid}_{suffix}"
         self._attr_name = f"Alarm: {alarm.get('name') or aid} {name_suffix}"
+        self._attr_device_info = _dev(coord.url)
 
     def _alarm_state(self) -> dict:
         for a in (self.coordinator.data or {}).get("alarms", []):
@@ -2412,27 +2381,36 @@ class OverwatchAlarmTriggeredBase(CoordinatorEntity, BinarySensorEntity):
                 return a
         return {}
 
-class OverwatchAlarmTriggeredArmed(OverwatchAlarmTriggeredBase):
-    def __init__(self, coord: AlarmTriggeredCoordinator, alarm: dict) -> None:
-        super().__init__(coord, alarm, "triggered_armed", "Triggered Armed")
-    @property
-    def is_on(self) -> bool:
-        return bool(self._alarm_state().get("triggered_armed"))
     @property
     def extra_state_attributes(self) -> dict:
         a = self._alarm_state()
-        return {"alarm_id": a.get("id"), "raw_id": a.get("raw_id"), "warn_no_filters": a.get("warn_no_filters", False), "filters": a.get("filters", {}), "triggered_zones": a.get("triggered_zones", []), "state": a.get("state"), "generated_at": (self.coordinator.data or {}).get("generated_at")}
+        return {
+            "alarm_id": a.get("id"),
+            "raw_id": a.get("raw_id"),
+            "warn_no_filters": a.get("warn_no_filters", False),
+            "filters": a.get("filters", {}),
+            "triggered_zones": a.get("triggered_zones", []),
+            "state": a.get("state"),
+            "generated_at": (self.coordinator.data or {}).get("generated_at"),
+        }
+
+
+class OverwatchAlarmTriggeredArmed(OverwatchAlarmTriggeredBase):
+    def __init__(self, coord: AlarmTriggeredCoordinator, alarm: dict) -> None:
+        super().__init__(coord, alarm, "triggered_armed", "Triggered Armed")
+
+    @property
+    def is_on(self) -> bool:
+        return bool(self._alarm_state().get("triggered_armed"))
+
 
 class OverwatchAlarmTriggeredDisarmed(OverwatchAlarmTriggeredBase):
     def __init__(self, coord: AlarmTriggeredCoordinator, alarm: dict) -> None:
         super().__init__(coord, alarm, "triggered_disarmed", "Triggered Disarmed")
+
     @property
     def is_on(self) -> bool:
         return bool(self._alarm_state().get("triggered_disarmed"))
-    @property
-    def extra_state_attributes(self) -> dict:
-        a = self._alarm_state()
-        return {"alarm_id": a.get("id"), "raw_id": a.get("raw_id"), "warn_no_filters": a.get("warn_no_filters", False), "filters": a.get("filters", {}), "triggered_zones": a.get("triggered_zones", []), "state": a.get("state"), "generated_at": (self.coordinator.data or {}).get("generated_at")}
 `,
   "sensor.py": `"""Sensor platform for HA Overwatch alarm effective states.
 
@@ -2528,7 +2506,7 @@ class OverwatchAlarmEffectiveSensor(CoordinatorEntity, SensorEntity):
   "manifest.json": `{
   "domain": "ha_overwatch",
   "name": "HA Overwatch",
-  "version": "1.14.5",
+  "version": "1.14.6",
   "documentation": "https://github.com/DM-AU/ha-overwatch",
   "issue_tracker": "https://github.com/DM-AU/ha-overwatch/issues",
   "codeowners": [],
