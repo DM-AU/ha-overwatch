@@ -1,4 +1,4 @@
-// HA-Overwatch 0.05.16-alarm-triggered-endpoint-fix: fix /ow/alarms/triggered routing (was nested); keep 0.05.15 triggered state + HA binary sensors; no cascade changes: read-only HA alarm sensors + canonical slug state lookup; no cascade changes.
+// HA-Overwatch 0.05.17-alarm-triggered-function-fix: add missing buildAlarmTriggeredState + endpoint; preserve alarm triggered HA binary sensor component; no cascade changes.
 /* ============================================================
  * HA-Overwatch — server.js
  *
@@ -446,6 +446,144 @@ function buildAlarmEffectiveState() {
         active_zones: activeCount,
         suppressed_zones: suppressedCount,
         suppression_reasons: suppressionReasons,
+      };
+    }),
+    generated_at: new Date().toISOString(),
+  };
+}
+
+
+// ── Alarm triggered-state evaluation (0.05.17) ─────────────────────────────
+const ALARM_TRIGGER_FILTER_KEYS = ["person","animal","motion","door","window","vehicle","smoke","gas"];
+
+function normaliseAlarmTriggerFilters(filters) {
+  const f = (filters && typeof filters === "object") ? filters : {};
+  const out = {};
+  ALARM_TRIGGER_FILTER_KEYS.forEach(k => {
+    const v = f[k];
+    if (typeof v === "boolean") out[k] = v;
+    else if (typeof v === "string") out[k] = ["true", "1", "on", "yes"].includes(v.toLowerCase());
+    else out[k] = true;
+  });
+  return out;
+}
+
+function classifyAlarmTriggerType(entityId, st) {
+  const id = String(entityId || "").toLowerCase();
+  const friendly = String(st?.attributes?.friendly_name || "").toLowerCase();
+  const dc = String(st?.attributes?.device_class || "").toLowerCase();
+  const combined = `${id} ${friendly}`;
+
+  if (id.startsWith("person.")) return "person";
+  if (["door", "garage_door", "gate", "opening"].includes(dc)) return "door";
+  if (dc === "window") return "window";
+  if (dc === "smoke") return "smoke";
+  if (["gas", "carbon_monoxide", "co"].includes(dc)) return "gas";
+  if (["motion", "occupancy", "presence"].includes(dc)) return "motion";
+
+  if (combined.includes("vehicle") || combined.includes("car")) return "vehicle";
+  if (combined.includes("person") || combined.includes("human")) return "person";
+  if (combined.includes("animal") || combined.includes("dog") || combined.includes("cat")) return "animal";
+  if (combined.includes("door")) return "door";
+  if (combined.includes("window")) return "window";
+  if (combined.includes("smoke")) return "smoke";
+  if (combined.includes("gas") || combined.includes("carbon monoxide") || combined.includes("co ")) return "gas";
+  if (combined.includes("motion") || combined.includes("occupancy") || combined.includes("presence")) return "motion";
+
+  return null;
+}
+
+function zoneAlarmTriggerMatches(zone, allowedTypes) {
+  const matches = [];
+  for (const entityId of (zone?.sensors || [])) {
+    const st = serverHaStates[entityId];
+    if (!st || !isTriggeredStateValue(st.state)) continue;
+    const type = classifyAlarmTriggerType(entityId, st);
+    if (!type) continue;
+    if (allowedTypes && allowedTypes.size && !allowedTypes.has(type)) continue;
+    matches.push({
+      entity_id: entityId,
+      type,
+      state: st.state,
+      name: st?.attributes?.friendly_name || null,
+      last_changed: st?.last_changed || null,
+      last_updated: st?.last_updated || null,
+    });
+  }
+  return matches;
+}
+
+function buildAlarmTriggeredState() {
+  const zones = loadZones();
+  const groups = loadGroups();
+  const floors = loadFloors();
+  const alarms = loadAlarms();
+
+  const selectedByAlarm = new Map();
+  const armedByAlarm = new Map();
+
+  alarms.forEach(alarm => {
+    selectedByAlarm.set(alarm.id, alarmSelectedZones(alarm, zones, groups, floors));
+    armedByAlarm.set(alarm.id, stateEntityOnAny(alarmSwitchEntityIds(alarm), alarm.default_armed === true));
+  });
+
+  const selectedIdsByAlarm = new Map();
+  alarms.forEach(alarm => selectedIdsByAlarm.set(alarm.id, new Set((selectedByAlarm.get(alarm.id) || []).map(z => z.id))));
+
+  return {
+    alarms: alarms.map(alarm => {
+      const selectedZones = selectedByAlarm.get(alarm.id) || [];
+      const isArmed = armedByAlarm.get(alarm.id) === true;
+      const filters = normaliseAlarmTriggerFilters(alarm.trigger_filters || alarm.filters || null);
+      const enabledTypes = new Set(ALARM_TRIGGER_FILTER_KEYS.filter(k => filters[k]));
+      const warn_no_filters = enabledTypes.size === 0;
+
+      const suppressedZoneIds = new Set();
+      if (isArmed) {
+        selectedZones.forEach(zone => {
+          const zoneArmed = stateEntityOnAny(zoneSwitchEntityIds(zone), zone.enabled !== false);
+          if (!zoneArmed) suppressedZoneIds.add(zone.id);
+        });
+        alarms.forEach(other => {
+          if (other.id === alarm.id || armedByAlarm.get(other.id) === true) return;
+          const otherSelectedIds = selectedIdsByAlarm.get(other.id) || new Set();
+          selectedZones.forEach(zone => { if (otherSelectedIds.has(zone.id)) suppressedZoneIds.add(zone.id); });
+        });
+      }
+
+      const zonesToCheck = isArmed ? selectedZones.filter(z => !suppressedZoneIds.has(z.id)) : selectedZones;
+      let triggered_armed = false;
+      let triggered_disarmed = false;
+      const triggered_zones = [];
+
+      if (!warn_no_filters) {
+        for (const zone of zonesToCheck) {
+          const matches = zoneAlarmTriggerMatches(zone, enabledTypes);
+          if (!matches.length) continue;
+          triggered_zones.push({
+            zone_id: nameSlug(zone.name) || zone.id,
+            zone_raw_id: zone.id,
+            zone_name: zone.name || zone.id,
+            matches,
+          });
+          if (isArmed) triggered_armed = true;
+          else triggered_disarmed = true;
+        }
+      }
+
+      const state = triggered_armed ? "triggered_armed" : (triggered_disarmed ? "triggered_disarmed" : "clear");
+      return {
+        id: nameSlug(alarm.name) || alarm.id,
+        raw_id: alarm.id,
+        name: alarm.name || alarm.id,
+        role: alarm.role || null,
+        builtin: !!alarm.builtin,
+        warn_no_filters,
+        filters,
+        triggered_armed,
+        triggered_disarmed,
+        state,
+        triggered_zones,
       };
     }),
     generated_at: new Date().toISOString(),
@@ -903,12 +1041,11 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  /* ── /ow/alarms/triggered — alarm triggered operational state ── */
-  if (pathname === "/ow/alarms/triggered" && req.method === "GET") {
-    try { json(res, buildAlarmTriggeredState()); }
-    catch (e) { err(res, e.message, 500); }
-    return;
-  }
+if (pathname === "/ow/alarms/triggered" && req.method === "GET") {
+try { json(res, buildAlarmTriggeredState()); }
+catch (e) { err(res, e.message, 500); }
+return;
+}
 
 
   /* ── /ow/cam-pinned ──────────────────────────────────────── */
@@ -1718,10 +1855,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     alarm_effective_coordinator = AlarmEffectiveCoordinator(hass, url)
     await alarm_effective_coordinator.async_config_entry_first_refresh()
 
+    alarm_triggered_coordinator = AlarmTriggeredCoordinator(hass, url)
+    await alarm_triggered_coordinator.async_config_entry_first_refresh()
+
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {
         "zone_coordinator":       zone_coordinator,
         "triggered_coordinator":  triggered_coordinator,
         "alarm_effective_coordinator": alarm_effective_coordinator,
+        "alarm_triggered_coordinator": alarm_triggered_coordinator,
     }
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
@@ -1792,6 +1933,29 @@ class AlarmEffectiveCoordinator(DataUpdateCoordinator):
             async with aiohttp.ClientSession() as session:
                 async with session.get(f"{self.url}/ow/alarms/effective",
                     timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    if resp.status != 200:
+                        return {"alarms": []}
+                    data = await resp.json(content_type=None)
+                    if not isinstance(data, dict):
+                        return {"alarms": []}
+                    if not isinstance(data.get("alarms"), list):
+                        data["alarms"] = []
+                    return data
+        except aiohttp.ClientError:
+            return {"alarms": []}
+
+
+class AlarmTriggeredCoordinator(DataUpdateCoordinator):
+    """Polls /ow/alarms/triggered for alarm triggered states."""
+
+    def __init__(self, hass: HomeAssistant, url: str) -> None:
+        super().__init__(hass, _LOGGER, name="HA Overwatch Alarm Triggered", update_interval=timedelta(seconds=5))
+        self.url = url
+
+    async def _async_update_data(self) -> dict:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{self.url}/ow/alarms/triggered", timeout=aiohttp.ClientTimeout(total=5)) as resp:
                     if resp.status != 200:
                         return {"alarms": []}
                     data = await resp.json(content_type=None)
@@ -2096,7 +2260,7 @@ from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import DOMAIN
-from . import TriggeredCoordinator, ZoneCoordinator
+from . import TriggeredCoordinator, ZoneCoordinator, AlarmTriggeredCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -2108,6 +2272,8 @@ async def async_setup_entry(
     data               = hass.data[DOMAIN][entry.entry_id]
     zone_coordinator   = data["zone_coordinator"]
     trig_coordinator   = data["triggered_coordinator"]
+    alarm_eff_coordinator = data.get("alarm_effective_coordinator")
+    alarm_trig_coordinator = data.get("alarm_triggered_coordinator")
 
     known_unique_ids: set[str] = set()
 
@@ -2158,6 +2324,10 @@ def _dev(url: str) -> DeviceInfo:
         configuration_url=url,
     )
 
+    if alarm_eff_coordinator and alarm_trig_coordinator:
+        alarms = (alarm_eff_coordinator.data or {}).get("alarms", [])
+        async_add_entities([OverwatchAlarmTriggeredArmed(alarm_trig_coordinator, a) for a in alarms])
+        async_add_entities([OverwatchAlarmTriggeredDisarmed(alarm_trig_coordinator, a) for a in alarms])
 
 class OWSensor(CoordinatorEntity, BinarySensorEntity):
     _attr_device_class = BinarySensorDeviceClass.MOTION
@@ -2223,6 +2393,46 @@ class OverwatchZoneTriggered(OWSensor):
     @property
     def is_on(self) -> bool:
         return bool(self.triggered_data.get(self._zid, False))
+
+
+class OverwatchAlarmTriggeredBase(CoordinatorEntity, BinarySensorEntity):
+    _attr_should_poll = False
+
+    def __init__(self, coord: AlarmTriggeredCoordinator, alarm: dict, suffix: str, name_suffix: str) -> None:
+        super().__init__(coord)
+        aid = str(alarm.get("id") or alarm.get("raw_id") or alarm.get("name") or "alarm")
+        self._alarm_id = aid
+        self.entity_id = f"binary_sensor.overwatch_alarm_{aid}_{suffix}"
+        self._attr_unique_id = f"overwatch_alarm_{aid}_{suffix}"
+        self._attr_name = f"Alarm: {alarm.get('name') or aid} {name_suffix}"
+
+    def _alarm_state(self) -> dict:
+        for a in (self.coordinator.data or {}).get("alarms", []):
+            if str(a.get("id") or a.get("raw_id") or "") == self._alarm_id:
+                return a
+        return {}
+
+class OverwatchAlarmTriggeredArmed(OverwatchAlarmTriggeredBase):
+    def __init__(self, coord: AlarmTriggeredCoordinator, alarm: dict) -> None:
+        super().__init__(coord, alarm, "triggered_armed", "Triggered Armed")
+    @property
+    def is_on(self) -> bool:
+        return bool(self._alarm_state().get("triggered_armed"))
+    @property
+    def extra_state_attributes(self) -> dict:
+        a = self._alarm_state()
+        return {"alarm_id": a.get("id"), "raw_id": a.get("raw_id"), "warn_no_filters": a.get("warn_no_filters", False), "filters": a.get("filters", {}), "triggered_zones": a.get("triggered_zones", []), "state": a.get("state"), "generated_at": (self.coordinator.data or {}).get("generated_at")}
+
+class OverwatchAlarmTriggeredDisarmed(OverwatchAlarmTriggeredBase):
+    def __init__(self, coord: AlarmTriggeredCoordinator, alarm: dict) -> None:
+        super().__init__(coord, alarm, "triggered_disarmed", "Triggered Disarmed")
+    @property
+    def is_on(self) -> bool:
+        return bool(self._alarm_state().get("triggered_disarmed"))
+    @property
+    def extra_state_attributes(self) -> dict:
+        a = self._alarm_state()
+        return {"alarm_id": a.get("id"), "raw_id": a.get("raw_id"), "warn_no_filters": a.get("warn_no_filters", False), "filters": a.get("filters", {}), "triggered_zones": a.get("triggered_zones", []), "state": a.get("state"), "generated_at": (self.coordinator.data or {}).get("generated_at")}
 `,
   "sensor.py": `"""Sensor platform for HA Overwatch alarm effective states.
 
@@ -2318,7 +2528,7 @@ class OverwatchAlarmEffectiveSensor(CoordinatorEntity, SensorEntity):
   "manifest.json": `{
   "domain": "ha_overwatch",
   "name": "HA Overwatch",
-  "version": "1.14.3",
+  "version": "1.14.5",
   "documentation": "https://github.com/DM-AU/ha-overwatch",
   "issue_tracker": "https://github.com/DM-AU/ha-overwatch/issues",
   "codeowners": [],
