@@ -1,6 +1,6 @@
 /* ================================================================
  * HA-Overwatch — ow-alarms.js
- * v0.05.12: Alarm response profile tree selector UX matching Automation Editor.
+ * v0.05.13: Alarm description + trigger type filters (person/animal/motion/door/window/vehicle/smoke/gas).
  *
  * Scope:
  * - Frontend-only.
@@ -8,6 +8,7 @@
  * - Retains effective alarm state preview and corrected security colours.
  * - Red = Armed, Amber = Armed Partial, Green = Disarmed.
  * - Adds response profile configuration using Automation Editor-style grouped selectors.
+ * - Adds per-alarm description and trigger type filters.
  * - No trigger execution yet.
  * ================================================================ */
 (function () {
@@ -51,6 +52,27 @@
   function setExplicitZoneIds(mem, ids) { mem.floor_ids = []; mem.group_ids = []; mem.zone_ids = [...new Set(ids)].filter(Boolean); }
   const allZoneIds = () => zones().map(z => z.id);
   const zoneName = id => zones().find(z => z.id === id)?.name || id;
+
+  const TRIGGER_FILTER_KEYS = ['person','animal','motion','door','window','vehicle','smoke','gas'];
+  const TRIGGER_FILTER_LABELS = { person:'Person', animal:'Animal', motion:'Motion', door:'Door', window:'Window', vehicle:'Vehicle', smoke:'Smoke', gas:'Gas / CO' };
+  function defaultTriggerFilters() {
+    const out = {}; TRIGGER_FILTER_KEYS.forEach(k => out[k] = true);
+    return out;
+  }
+  function normaliseTriggerFilters(filters) {
+    const f = (filters && typeof filters === 'object') ? filters : {};
+    const out = {};
+    TRIGGER_FILTER_KEYS.forEach(k => {
+      if (typeof f[k] === 'boolean') out[k] = f[k];
+      else if (typeof f[k] === 'string') out[k] = (f[k].toLowerCase() === 'true' || f[k] === '1' || f[k].toLowerCase() === 'on');
+      else out[k] = true;
+    });
+    return out;
+  }
+  function ensureTriggerFilters(a) {
+    a.trigger_filters = normaliseTriggerFilters(a.trigger_filters || a.filters || null);
+    return a.trigger_filters;
+  }
 
 const emptyResponseAction = () => ({ enabled:false, entities:[], targets:[] });
   const emptyResponseSet = () => ({ notify: emptyResponseAction(), sirens: emptyResponseAction(), lights: emptyResponseAction(), cameras: emptyResponseAction(), scripts: emptyResponseAction(), automations: emptyResponseAction() });
@@ -100,6 +122,8 @@ const emptyResponseAction = () => ({ enabled:false, entities:[], targets:[] });
       const mem = m(a);
       if (hasWildcard(mem)) setExplicitZoneIds(mem, allZoneIds());
       if ((a.role === 'home' || a.role === 'away') && !a.configured && !mem.floor_ids.length && !mem.group_ids.length && !mem.zone_ids.length) setExplicitZoneIds(mem, allZoneIds());
+      a.description = (a.description == null ? '' : String(a.description));
+      ensureTriggerFilters(a);
       ensureResponses(a);
     });
   }
@@ -320,7 +344,7 @@ const emptyResponseAction = () => ({ enabled:false, entities:[], targets:[] });
     panel.querySelector('#owaClose').onclick = close;
     panel.querySelector('#owaSortMode').onchange = e => { sortMode = e.target.value; persistSort(); renderList(true); };
     panel.querySelector('#owaSortReverse').onclick = () => { sortReverse = !sortReverse; persistSort(); renderList(false); };
-    panel.querySelector('#owaNew').onclick = () => { editingId = 'new'; draft = { id:uid(), name:'New Alarm', role:'custom', builtin:false, default_armed:false, configured:true, members:{ floor_ids:[], group_ids:[], zone_ids:[] } }; expanded.floors.clear(); expanded.groups.clear(); renderEditor(); };
+    panel.querySelector('#owaNew').onclick = () => { editingId = 'new'; draft = { id:uid(), name:'New Alarm', description:'', role:'custom', builtin:false, default_armed:false, configured:true, trigger_filters: defaultTriggerFilters(), members:{ floor_ids:[], group_ids:[], zone_ids:[] } }; expanded.floors.clear(); expanded.groups.clear(); renderEditor(); };
     panel.querySelectorAll('[data-edit]').forEach(el => el.onclick = () => { const a = alarms.find(x => x.id === el.dataset.edit); if (!a) return; editingId = a.id; draft = JSON.parse(JSON.stringify(a)); ensureDraftExplicit(); expanded.floors.clear(); expanded.groups.clear(); renderEditor(); });
     panel.querySelectorAll('[data-toggle]').forEach(btn => btn.onclick = e => { e.stopPropagation(); const a = alarms.find(x => x.id === btn.dataset.toggle); if (!a || !canToggle()) return; window.owCallSwitch?.(alarmSwitchId(a), !alarmArmed(a)); setTimeout(() => renderList(false), 250); });
     panel.querySelectorAll('[data-delete]').forEach(btn => btn.onclick = async e => { e.stopPropagation(); const a = alarms.find(x => x.id === btn.dataset.delete); if (!a || a.builtin) return; if (!confirm(`Delete ${a.name}?`)) return; alarms = alarms.filter(x => x.id !== a.id); await saveAlarms(); renderList(true); });
@@ -353,16 +377,22 @@ const emptyResponseAction = () => ({ enabled:false, entities:[], targets:[] });
   function renderEditor() {
     stopDynamicRefresh();
     ensureResponses(draft);
+    ensureTriggerFilters(draft);
     const eff = draftEffectivePreview();
-    panel.innerHTML = `<div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px 12px;border-bottom:1px solid rgba(255,255,255,.07)"><div style="display:flex;gap:10px;align-items:center"><b>${editingId === 'new' ? 'New Alarm' : 'Edit Alarm'}</b>${eff ? pill(eff.state) : ''}</div><div style="display:flex;gap:8px;align-items:center"><button id="owaSave" class="owa-btn primary">💾 Save</button><button id="owaBack" class="owa-btn">← Back</button></div></div><div style="flex:1;overflow:auto;padding:16px 18px 40px"><label class="owa-muted">Alarm Name</label><input id="owaName" class="owa-input" value="${esc(draft.name)}"><div class="owa-muted" style="margin-top:6px">HA entity: ${esc(alarmSwitchId(draft))}</div>${eff ? effectiveDetailHtml(eff) : ''}<h3 style="font-size:13px;margin:18px 0 6px">Members</h3><div class="owa-muted" style="margin-bottom:8px">Floors/groups are batch selectors only. Selecting a parent writes explicit zones so members can be unticked afterwards.</div><div id="owaTree" class="owa-tree"></div>${responseProfileHtml()}</div>`;
+    panel.innerHTML = `<div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px 12px;border-bottom:1px solid rgba(255,255,255,.07)"><div style="display:flex;gap:10px;align-items:center"><b>${editingId === 'new' ? 'New Alarm' : 'Edit Alarm'}</b>${eff ? pill(eff.state) : ''}</div><div style="display:flex;gap:8px;align-items:center"><button id="owaSave" class="owa-btn primary">💾 Save</button><button id="owaBack" class="owa-btn">← Back</button></div></div><div style="flex:1;overflow:auto;padding:16px 18px 40px"><label class="owa-muted">Alarm Name</label><input id="owaName" class="owa-input" value="${esc(draft.name)}"><label class="owa-muted" style="margin-top:12px">Description</label><textarea id="owaDesc" class="owa-input" rows="2" placeholder="Optional description" style="resize:vertical;min-height:52px">${esc(draft.description || '')}</textarea><h3 style="font-size:13px;margin:18px 0 6px">Trigger Filters</h3><div class="owa-muted" style="margin-bottom:8px">Alarm will only trigger when the triggering entity type matches a checked filter. Defaults to all enabled.</div><div class="owa-section" id="owaTrigFilters" style="display:flex;flex-wrap:wrap;gap:10px">${TRIGGER_FILTER_KEYS.map(k => `<label style="display:flex;gap:8px;align-items:center;min-width:140px"><input type="checkbox" data-trigfilter="${k}" ${ensureTriggerFilters(draft)[k] ? 'checked' : ''}> ${esc(TRIGGER_FILTER_LABELS[k] || k)}</label>`).join('')} </div><div class="owa-muted" style="margin-top:6px">HA entity: ${esc(alarmSwitchId(draft))}</div>${eff ? effectiveDetailHtml(eff) : ''}<h3 style="font-size:13px;margin:18px 0 6px">Members</h3><div class="owa-muted" style="margin-bottom:8px">Floors/groups are batch selectors only. Selecting a parent writes explicit zones so members can be unticked afterwards.</div><div id="owaTree" class="owa-tree"></div>${responseProfileHtml()}</div>`;
     panel.querySelector('#owaBack').onclick = () => { draft = null; editingId = null; renderList(true); startDynamicRefresh(); };
     panel.querySelector('#owaName').oninput = e => { draft.name = e.target.value; };
+    const descEl = panel.querySelector('#owaDesc');
+    if (descEl) descEl.oninput = e => { draft.description = e.target.value; };
+    panel.querySelectorAll('[data-trigfilter]').forEach(cb => cb.onchange = () => { const k = cb.dataset.trigfilter; ensureTriggerFilters(draft)[k] = !!cb.checked; });
     renderTree(panel.querySelector('#owaTree'));
     wireResponseControls();
     panel.querySelector('#owaSave').onclick = async () => {
       if (!(draft.name || '').trim()) return alert('Enter an alarm name.');
       draft.configured = true;
       readResponseDraft();
+      draft.description = String(draft.description || '').trim();
+      ensureTriggerFilters(draft);
       ensureDraftExplicit();
       if (editingId === 'new') alarms.push(draft); else { const i = alarms.findIndex(a => a.id === editingId); if (i >= 0) alarms[i] = draft; }
       await saveAlarms();
