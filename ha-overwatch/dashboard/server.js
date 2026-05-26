@@ -1,4 +1,4 @@
-// HA-Overwatch 0.05.19-managed-alarm-response-execution: generate managed HA alarm response automations including sirens; no cascade changes.
+// HA-Overwatch 0.05.20-alarm-response-sync-and-ux-base: managed HA alarm response automations incl sirens; missing delete is non-fatal; no cascade changes.
 /* ============================================================
  * HA-Overwatch — server.js
  *
@@ -1031,9 +1031,8 @@ const server = http.createServer(async (req, res) => {
       const alarms = Array.isArray(body) ? body : (body?.alarms || []);
       saveAlarms(alarms);
       let response_sync = null;
-      try {
-        response_sync = await syncAlarmResponseAutomations(alarms);
-      } catch (syncErr) {
+      try { response_sync = await syncAlarmResponseAutomations(alarms); }
+      catch (syncErr) {
         console.warn("[OW-AlarmResponse] sync after alarm save failed:", syncErr.message);
         response_sync = { ok: false, errors: [{ error: syncErr.message }] };
       }
@@ -3273,222 +3272,34 @@ function sendWsFrame(sock, text) {
 
 
 
-/* ── Managed alarm response automations (0.05.19) ────────────── */
+/* ── Managed alarm response automations (0.05.20) ────────────── */
 const ALARM_RESPONSE_SCOPES = ["triggered_armed", "triggered_disarmed"];
 const ALARM_RESPONSE_ACTION_KEYS = ["notify", "lights", "cameras", "scripts", "automations", "sirens"];
-
-function cleanList(value) {
-  return (Array.isArray(value) ? value : [])
-    .map(v => typeof v === "string" ? v : (v?.entity_id || v?.id || v?.name || ""))
-    .map(v => String(v || "").trim())
-    .filter(Boolean);
-}
-
-function alarmResponseAction(action) {
-  const a = (action && typeof action === "object") ? action : {};
-  return {
-    enabled: !!a.enabled,
-    entities: cleanList(a.entities),
-    targets: cleanList(a.targets),
-  };
-}
-
-function alarmResponseSet(alarm, scope) {
-  const responses = (alarm?.responses && typeof alarm.responses === "object") ? alarm.responses : {};
-  const raw = (responses[scope] && typeof responses[scope] === "object") ? responses[scope] : {};
-  const out = {};
-  ALARM_RESPONSE_ACTION_KEYS.forEach(k => { out[k] = alarmResponseAction(raw[k]); });
-  return out;
-}
-
-function alarmResponseAutomationId(alarm, scope) {
-  const slug = nameSlug(alarm?.name) || alarm?.id || "alarm";
-  return `ow_alarm_${slug}_${scope}_response`;
-}
-
-function alarmTriggerBinaryEntity(alarm, scope) {
-  const slug = nameSlug(alarm?.name) || alarm?.id || "alarm";
-  return `binary_sensor.overwatch_alarm_${slug}_${scope}`;
-}
-
-function asTargetValue(ids) {
-  const clean = cleanList(ids);
-  return clean.length === 1 ? clean[0] : clean;
-}
-
-function pushDomainServiceActions(actions, entityIds, fallbackDomain, service = "turn_on") {
-  const byDomain = new Map();
-  cleanList(entityIds).forEach(entityId => {
-    const domain = entityId.includes(".") ? entityId.split(".")[0] : fallbackDomain;
-    if (!byDomain.has(domain)) byDomain.set(domain, []);
-    byDomain.get(domain).push(entityId);
-  });
-  for (const [domain, ids] of byDomain.entries()) {
-    if (!ids.length) continue;
-    actions.push({ action: `${domain}.${service}`, target: { entity_id: asTargetValue(ids) } });
-  }
-}
-
-function cameraToOverwatchSwitch(entityId) {
-  const id = String(entityId || "").trim();
-  if (!id) return "";
-  if (id.startsWith("switch.overwatch_camera_")) return id;
-  if (!id.startsWith("camera.")) return id;
-  const bare = id.slice("camera.".length).replace(/[.-]/g, "_");
-  return `switch.overwatch_camera_${bare}`;
-}
-
+function cleanList(value) { return (Array.isArray(value) ? value : []).map(v => typeof v === "string" ? v : (v?.entity_id || v?.id || v?.name || "")).map(v => String(v || "").trim()).filter(Boolean); }
+function alarmResponseAction(action) { const a = (action && typeof action === "object") ? action : {}; return { enabled: !!a.enabled, entities: cleanList(a.entities), targets: cleanList(a.targets) }; }
+function alarmResponseSet(alarm, scope) { const responses = (alarm?.responses && typeof alarm.responses === "object") ? alarm.responses : {}; const raw = (responses[scope] && typeof responses[scope] === "object") ? responses[scope] : {}; const out = {}; ALARM_RESPONSE_ACTION_KEYS.forEach(k => { out[k] = alarmResponseAction(raw[k]); }); return out; }
+function alarmResponseAutomationId(alarm, scope) { const s = nameSlug(alarm?.name) || alarm?.id || "alarm"; return `ow_alarm_${s}_${scope}_response`; }
+function alarmTriggerBinaryEntity(alarm, scope) { const s = nameSlug(alarm?.name) || alarm?.id || "alarm"; return `binary_sensor.overwatch_alarm_${s}_${scope}`; }
+function asTargetValue(ids) { const clean = cleanList(ids); return clean.length === 1 ? clean[0] : clean; }
+function pushDomainServiceActions(actions, entityIds, fallbackDomain, service = "turn_on") { const byDomain = new Map(); cleanList(entityIds).forEach(entityId => { const domain = entityId.includes(".") ? entityId.split(".")[0] : fallbackDomain; if (!byDomain.has(domain)) byDomain.set(domain, []); byDomain.get(domain).push(entityId); }); for (const [domain, ids] of byDomain.entries()) { if (ids.length) actions.push({ action: `${domain}.${service}`, target: { entity_id: asTargetValue(ids) } }); } }
+function cameraToOverwatchSwitch(entityId) { const id = String(entityId || "").trim(); if (!id) return ""; if (id.startsWith("switch.overwatch_camera_")) return id; if (!id.startsWith("camera.")) return id; const bare = id.slice("camera.".length).replace(/[.-]/g, "_"); return `switch.overwatch_camera_${bare}`; }
 function buildAlarmResponseActions(alarm, scope) {
-  const set = alarmResponseSet(alarm, scope);
-  const actions = [];
-  const alarmName = alarm?.name || alarm?.id || "Alarm";
-
-  if (set.notify.enabled) {
-    const targets = set.notify.targets.length ? set.notify.targets : ["notify.notify"];
-    targets.forEach(target => {
-      const svc = String(target || "notify.notify").startsWith("notify.")
-        ? String(target).slice("notify.".length)
-        : String(target || "notify");
-      actions.push({
-        action: `notify.${svc}`,
-        data: {
-          title: `HA-Overwatch — ${alarmName}`,
-          message: scope === "triggered_armed"
-            ? `Alarm ${alarmName} triggered while armed.`
-            : `Alarm ${alarmName} triggered while disarmed.`,
-        },
-      });
-    });
-  }
-
-  if (set.lights.enabled) {
-    pushDomainServiceActions(actions, set.lights.entities, "light", "turn_on");
-  }
-
-  if (set.cameras.enabled) {
-    const switches = set.cameras.entities.map(cameraToOverwatchSwitch).filter(Boolean);
-    pushDomainServiceActions(actions, switches, "switch", "turn_on");
-  }
-
-  if (set.scripts.enabled) {
-    pushDomainServiceActions(actions, set.scripts.entities, "script", "turn_on");
-  }
-
-  if (set.automations.enabled) {
-    const ids = cleanList(set.automations.entities);
-    if (ids.length) actions.push({ action: "automation.trigger", target: { entity_id: asTargetValue(ids) }, data: { skip_condition: true } });
-  }
-
-  if (set.sirens.enabled) {
-    // Sirens are deliberately included in 0.05.19. They only execute when the sirens response checkbox is enabled.
-    pushDomainServiceActions(actions, set.sirens.entities, "siren", "turn_on");
-  }
-
+  const set = alarmResponseSet(alarm, scope); const actions = []; const alarmName = alarm?.name || alarm?.id || "Alarm";
+  if (set.notify.enabled) { const targets = set.notify.targets.length ? set.notify.targets : ["notify.notify"]; targets.forEach(target => { const svc = String(target || "notify.notify").startsWith("notify.") ? String(target).slice("notify.".length) : String(target || "notify"); actions.push({ action: `notify.${svc}`, data: { title: `HA-Overwatch — ${alarmName}`, message: scope === "triggered_armed" ? `Alarm ${alarmName} triggered while armed.` : `Alarm ${alarmName} triggered while disarmed.` } }); }); }
+  if (set.lights.enabled) pushDomainServiceActions(actions, set.lights.entities, "light", "turn_on");
+  if (set.cameras.enabled) pushDomainServiceActions(actions, set.cameras.entities.map(cameraToOverwatchSwitch).filter(Boolean), "switch", "turn_on");
+  if (set.scripts.enabled) pushDomainServiceActions(actions, set.scripts.entities, "script", "turn_on");
+  if (set.automations.enabled) { const ids = cleanList(set.automations.entities); if (ids.length) actions.push({ action: "automation.trigger", target: { entity_id: asTargetValue(ids) }, data: { skip_condition: true } }); }
+  if (set.sirens.enabled) pushDomainServiceActions(actions, set.sirens.entities, "siren", "turn_on");
   return actions;
 }
-
-function buildAlarmResponseAutomation(alarm, scope) {
-  const autoId = alarmResponseAutomationId(alarm, scope);
-  const alarmName = alarm?.name || alarm?.id || "Alarm";
-  const triggerEntity = alarmTriggerBinaryEntity(alarm, scope);
-  const actions = buildAlarmResponseActions(alarm, scope);
-  if (!actions.length) return null;
-  return {
-    id: autoId,
-    alias: `HA-Overwatch — Alarm ${alarmName} ${scope === "triggered_armed" ? "Triggered Armed" : "Triggered Disarmed"} Response`,
-    description: "Managed by HA-Overwatch alarm response profile",
-    variables: {
-      ow_id: autoId,
-      ow_name: `Alarm ${alarmName} ${scope} response`,
-      ow_managed: true,
-      ow_type: "alarm_response",
-      ow_alarm_id: alarm?.id || null,
-      ow_alarm_name: alarmName,
-      ow_trigger_scope: scope,
-    },
-    mode: "single",
-    triggers: [{ trigger: "state", entity_id: triggerEntity, to: "on" }],
-    conditions: [],
-    actions,
-  };
-}
-
-function getHARequestConfig() {
-  const cfg = getHAConfig(loadConfig());
-  if (!cfg.ha_url && !process.env.SUPERVISOR_TOKEN) throw new Error("HA not configured");
-  if (process.env.SUPERVISOR_TOKEN) {
-    return { lib: http, hostname: "supervisor", port: 80, basePath: "/core", token: process.env.SUPERVISOR_TOKEN };
-  }
-  const u = new URL(cfg.ha_url.replace(/\/$/, ""));
-  return { lib: u.protocol === "https:" ? https : http, hostname: u.hostname, port: parseInt(u.port) || (u.protocol === "https:" ? 443 : 80), basePath: "", token: cfg.ha_token };
-}
-
-function haApiRequest(method, apiPath, payload = null) {
-  const { lib, hostname, port, basePath, token } = getHARequestConfig();
-  const body = payload == null ? "" : JSON.stringify(payload);
-  return new Promise((resolve, reject) => {
-    const req = lib.request({
-      hostname,
-      port,
-      method,
-      path: `${basePath}${apiPath}`,
-      headers: {
-        "Authorization": `Bearer ${token}`,
-        "Content-Type": "application/json",
-        "Content-Length": Buffer.byteLength(body),
-      },
-    }, res => {
-      let data = "";
-      res.on("data", c => data += c);
-      res.on("end", () => resolve({ status: res.statusCode || 0, body: data }));
-    });
-    req.on("error", reject);
-    if (body) req.write(body);
-    req.end();
-  });
-}
-
-async function reloadHAAutomations() {
-  try { await haApiRequest("POST", "/api/services/automation/reload", null); }
-  catch (e) { console.warn("[OW-AlarmResponse] automation.reload failed:", e.message); }
-}
-
-async function pushManagedAlarmAutomation(haAuto) {
-  const res = await haApiRequest("POST", `/api/config/automation/config/${haAuto.id}`, haAuto);
-  if (res.status < 200 || res.status >= 300) throw new Error(`HA rejected ${haAuto.id}: ${res.status} ${res.body}`);
-  return { id: haAuto.id, status: res.status };
-}
-
-async function deleteManagedAlarmAutomation(id) {
-  const res = await haApiRequest("DELETE", `/api/config/automation/config/${id}`, null);
-  // 404 is acceptable for stale/non-existing generated automations.
-  if (res.status === 404) return { id, status: res.status, missing: true };
-  if (res.status < 200 || res.status >= 300) throw new Error(`HA delete rejected ${id}: ${res.status} ${res.body}`);
-  return { id, status: res.status };
-}
-
-async function syncAlarmResponseAutomations(alarms = loadAlarms()) {
-  const pushed = [];
-  const deleted = [];
-  const errors = [];
-
-  for (const alarm of (alarms || [])) {
-    for (const scope of ALARM_RESPONSE_SCOPES) {
-      const autoId = alarmResponseAutomationId(alarm, scope);
-      const haAuto = buildAlarmResponseAutomation(alarm, scope);
-      try {
-        if (haAuto) pushed.push(await pushManagedAlarmAutomation(haAuto));
-        else deleted.push(await deleteManagedAlarmAutomation(autoId));
-      } catch (e) {
-        console.warn(`[OW-AlarmResponse] ${autoId}: ${e.message}`);
-        errors.push({ id: autoId, error: e.message });
-      }
-    }
-  }
-
-  await reloadHAAutomations();
-  return { ok: errors.length === 0, pushed, deleted, errors };
-}
+function buildAlarmResponseAutomation(alarm, scope) { const autoId = alarmResponseAutomationId(alarm, scope); const alarmName = alarm?.name || alarm?.id || "Alarm"; const actions = buildAlarmResponseActions(alarm, scope); if (!actions.length) return null; return { id: autoId, alias: `HA-Overwatch — Alarm ${alarmName} ${scope === "triggered_armed" ? "Triggered Armed" : "Triggered Disarmed"} Response`, description: "Managed by HA-Overwatch alarm response profile", variables: { ow_id: autoId, ow_name: `Alarm ${alarmName} ${scope} response`, ow_managed: true, ow_type: "alarm_response", ow_alarm_id: alarm?.id || null, ow_alarm_name: alarmName, ow_trigger_scope: scope }, mode: "single", triggers: [{ trigger: "state", entity_id: alarmTriggerBinaryEntity(alarm, scope), to: "on" }], conditions: [], actions }; }
+function getHARequestConfig() { const cfg = getHAConfig(loadConfig()); if (!cfg.ha_url && !process.env.SUPERVISOR_TOKEN) throw new Error("HA not configured"); if (process.env.SUPERVISOR_TOKEN) return { lib: http, hostname: "supervisor", port: 80, basePath: "/core", token: process.env.SUPERVISOR_TOKEN }; const u = new URL(cfg.ha_url.replace(/\/$/, "")); return { lib: u.protocol === "https:" ? https : http, hostname: u.hostname, port: parseInt(u.port) || (u.protocol === "https:" ? 443 : 80), basePath: "", token: cfg.ha_token }; }
+function haApiRequest(method, apiPath, payload = null) { const { lib, hostname, port, basePath, token } = getHARequestConfig(); const body = payload == null ? "" : JSON.stringify(payload); return new Promise((resolve, reject) => { const req = lib.request({ hostname, port, method, path: `${basePath}${apiPath}`, headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) } }, res => { let data = ""; res.on("data", c => data += c); res.on("end", () => resolve({ status: res.statusCode || 0, body: data })); }); req.on("error", reject); if (body) req.write(body); req.end(); }); }
+async function reloadHAAutomations() { try { await haApiRequest("POST", "/api/services/automation/reload", null); } catch (e) { console.warn("[OW-AlarmResponse] automation.reload failed:", e.message); } }
+async function pushManagedAlarmAutomation(haAuto) { const res = await haApiRequest("POST", `/api/config/automation/config/${haAuto.id}`, haAuto); if (res.status < 200 || res.status >= 300) throw new Error(`HA rejected ${haAuto.id}: ${res.status} ${res.body}`); return { id: haAuto.id, status: res.status }; }
+async function deleteManagedAlarmAutomation(id) { const res = await haApiRequest("DELETE", `/api/config/automation/config/${id}`, null); if (res.status === 404 || (res.status === 400 && /Resource not found/i.test(String(res.body || "")))) return { id, status: res.status, missing: true }; if (res.status < 200 || res.status >= 300) throw new Error(`HA delete rejected ${id}: ${res.status} ${res.body}`); return { id, status: res.status }; }
+async function syncAlarmResponseAutomations(alarms = loadAlarms()) { const pushed = [], deleted = [], errors = []; for (const alarm of (alarms || [])) { for (const scope of ALARM_RESPONSE_SCOPES) { const autoId = alarmResponseAutomationId(alarm, scope); const haAuto = buildAlarmResponseAutomation(alarm, scope); try { if (haAuto) pushed.push(await pushManagedAlarmAutomation(haAuto)); else deleted.push(await deleteManagedAlarmAutomation(autoId)); } catch (e) { console.warn(`[OW-AlarmResponse] ${autoId}: ${e.message}`); errors.push({ id: autoId, error: e.message }); } } } await reloadHAAutomations(); return { ok: errors.length === 0, pushed, deleted, errors }; }
 
 /* ── Build HA automation config from OW draft ─────────────── */
 function buildHAAutomation(auto, allZones, allGroups) {
