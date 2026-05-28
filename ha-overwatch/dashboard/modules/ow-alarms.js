@@ -1,6 +1,6 @@
 /* ================================================================
  * HA-Overwatch — ow-alarms.js
- * v0.05.21: rollback Alarm Editor response UX to last clickable stable version; server-side response sync remains 0.05.20.
+ * v0.05.26: shared Automation Editor-style alarm response editor UX; preserves Alarm Manager edit/save/back wiring.
  *
  * Scope:
  * - Frontend-only.
@@ -234,7 +234,9 @@ const emptyResponseAction = () => ({ enabled:false, entities:[], targets:[] });
     s.id = 'ow-alarms-style';
     s.textContent = `.owa-btn{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);color:#aaa;border-radius:8px;padding:7px 12px;cursor:pointer;font-size:12px;font-weight:600}.owa-btn.primary{background:#0064d2;color:#fff}.owa-btn:disabled{opacity:.35;cursor:default}.owa-card{display:flex;align-items:flex-start;gap:12px;background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.08);border-radius:10px;padding:12px;margin:0 0 8px;cursor:pointer}.owa-card:hover{background:rgba(255,255,255,.055)}.owa-input,.owa-select{box-sizing:border-box;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);border-radius:7px;color:#fff;padding:8px 10px;outline:none}.owa-input{width:100%}.owa-select{font-size:12px;padding:7px 9px}.owa-select option{background:#111;color:#eee}.owa-muted{font-size:11px;color:#555}.owa-tree{background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.08);border-radius:10px;padding:8px;max-height:44vh;overflow:auto}.owa-row{display:flex;align-items:center;gap:8px;padding:4px 4px}.owa-row span{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.owa-exp{width:22px;height:22px;border:0;background:transparent;color:#aaa;cursor:pointer}.owa-exp.leaf{visibility:hidden}.owa-pill{font-size:10px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;border-radius:999px;padding:3px 8px;border:1px solid rgba(255,255,255,.12)}.owa-counts{display:flex;gap:8px;flex-wrap:wrap;margin-top:6px}.owa-count{font-size:10px;color:#d8d8d8;background:rgba(255,255,255,.045);border:1px solid rgba(255,255,255,.075);border-radius:999px;padding:3px 7px}.owa-count.selected{background:rgba(0,122,255,.20);border-color:rgba(0,122,255,.42);color:#b9dcff}.owa-count.active{background:rgba(52,199,89,.20);border-color:rgba(52,199,89,.42);color:#c7f5d3}.owa-count.suppressed{background:rgba(255,149,0,.20);border-color:rgba(255,149,0,.46);color:#ffd49a}.owa-response-tree{background:rgba(255,255,255,.025);border-left:3px solid rgba(52,199,89,.85);border-radius:9px;padding:8px 10px;margin-top:8px}.owa-response-row{display:flex;align-items:center;gap:8px;padding:5px 0}.owa-response-row.depth1{padding-left:18px}.owa-response-row.depth2{padding-left:36px}.owa-response-row.depth3{padding-left:54px}.owa-response-row .tag{font-size:9px;border-radius:4px;padding:1px 4px;margin-left:4px;background:rgba(0,122,255,.25);color:#87c7ff}.owa-response-row .tag.triggered{background:rgba(255,59,48,.28);color:#ff9d9a}.owa-response-other{margin-top:8px}.owa-entity-list{display:flex;flex-wrap:wrap;gap:6px;margin-top:7px}.owa-entity-pill{display:inline-flex;align-items:center;gap:6px;max-width:100%;font-size:11px;color:#d6d6d6;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.11);border-radius:999px;padding:4px 8px}.owa-entity-pill button{border:0;background:transparent;color:#aaa;cursor:pointer;padding:0;font-size:12px}.owa-warn{margin-top:10px;padding:9px 11px;background:rgba(255,59,48,.10);border:1px solid rgba(255,59,48,.22);border-radius:8px;color:#ff9d9a;font-size:11px}.owa-warn b{color:#ff6b6b}
 .owa-supp{margin-top:8px;padding:8px 10px;background:rgba(255,149,0,.07);border:1px solid rgba(255,149,0,.16);border-radius:8px;color:#c8a166;font-size:11px}.owa-supp ul{margin:5px 0 0 16px;padding:0}.owa-supp li{margin:2px 0}.owa-section{background:rgba(255,255,255,.025);border:1px solid rgba(255,255,255,.07);border-radius:10px;padding:10px;margin-top:12px}.owa-sortbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.owa-sortlabel{font-size:11px;color:#777}`;
-    document.head.appendChild(s);
+    
+s.textContent += `.owa-response-header{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:10px 0 7px}.owa-response-action-card{background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.08);border-left:3px solid #32d74b;border-radius:9px;padding:10px 12px;margin:8px 0}.owa-response-action-card.disabled{opacity:.55;border-left-color:#555}.owa-response-action-head{display:flex;align-items:center;gap:8px;margin-bottom:8px}.owa-response-action-head button{background:none;border:0;color:#32d74b;cursor:pointer;font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;padding:0;text-align:left;flex:1}.owa-response-actions{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0 2px}.owa-add-chip{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.10);color:#aaa;border-radius:7px;padding:5px 10px;cursor:pointer;font-size:12px}.owa-add-chip.active{background:rgba(50,215,75,.13);border-color:rgba(50,215,75,.34);color:#bff7ca}.owa-response-filter{width:100%;box-sizing:border-box;background:rgba(255,255,255,.045);border:1px solid rgba(255,255,255,.08);border-radius:7px;color:#eee;padding:7px 9px;font-size:12px;outline:none;margin-bottom:8px}.owa-devtree{background:rgba(255,255,255,.025);border:1px solid rgba(255,255,255,.07);border-radius:8px;padding:7px;max-height:260px;overflow:auto}.owa-devrow{display:flex;align-items:center;gap:7px;padding:3px 4px;min-height:22px}.owa-devrow label{display:flex;align-items:center;gap:7px;min-width:0;flex:1;cursor:pointer}.owa-devrow span.name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.owa-devexp{width:18px;height:18px;border:0;background:transparent;color:#777;cursor:pointer;padding:0}.owa-devexp.leaf{visibility:hidden}.owa-other-box{margin-top:8px;border-top:1px solid rgba(255,255,255,.06);padding-top:8px}.owa-response-empty{color:#555;font-size:11px;padding:8px 2px}.owa-response-selected-count{font-size:10px;color:#777;margin-left:auto}.owa-danger-note{font-size:10px;color:#ff9d9a;background:rgba(255,59,48,.08);border:1px solid rgba(255,59,48,.16);border-radius:7px;padding:6px 8px;margin-top:7px}`;
+document.head.appendChild(s);
   }
 
   function mount() {
@@ -398,106 +400,147 @@ const emptyResponseAction = () => ({ enabled:false, entities:[], targets:[] });
     };
   }
 
-  function responseTreeHtml(scope, key, label, deviceKey, domains, action) {
-    const selected = new Set(action.entities || []);
-    const fs = floors().length ? floors() : [{ id:'floor_default', name:'Ground Floor' }];
-    let html = `<div class="owa-response-tree" data-response-tree="${scope}.${key}"><div style="font-weight:800;text-transform:uppercase;color:#32d74b;font-size:11px;margin-bottom:7px">▾ ${esc(label)}</div>`;
-    fs.forEach(f => {
-      const floorZones = zonesForFloor(f.id).filter(z => responseEntityListForZone(z, deviceKey).length);
-      if (!floorZones.length) return;
-      html += `<div class="owa-response-row"><input type="checkbox" data-response-parent="${scope}.${key}" data-response-ids="${esc(floorZones.flatMap(z => responseEntityListForZone(z, deviceKey)).join('|'))}"><b>${esc(f.name || f.id)}</b></div>`;
-      groupRowsForFloor(f.id).forEach(({ g, zs }) => {
-        const groupZones = zs.filter(z => responseEntityListForZone(z, deviceKey).length);
-        if (!groupZones.length) return;
-        html += `<div class="owa-response-row depth1"><span>▾</span><input type="checkbox" data-response-parent="${scope}.${key}" data-response-ids="${esc(groupZones.flatMap(z => responseEntityListForZone(z, deviceKey)).join('|'))}"><b>${esc(g.name || g.id)}</b></div>`;
-        groupZones.forEach(z => {
-          const ids = responseEntityListForZone(z, deviceKey);
-          const zState = getZoneStateSafe(z);
-          html += `<div class="owa-response-row depth2"><span>▾</span><input type="checkbox" data-response-parent="${scope}.${key}" data-response-ids="${esc(ids.join('|'))}"><span>${esc(z.name || z.id)}</span>${zState ? `<span class="tag ${zState === 'triggered' ? 'triggered' : ''}">${esc(zState)}</span>` : ''}</div>`;
-          ids.forEach(eid => html += `<label class="owa-response-row depth3"><input type="checkbox" data-response-entity-check="${scope}.${key}" value="${esc(eid)}" ${selected.has(eid) ? 'checked' : ''}><span>${esc(entityLabel(eid))}</span></label>`);
-        });
-      });
-      ungroupedZonesForFloor(f.id).filter(z => responseEntityListForZone(z, deviceKey).length).forEach(z => {
-        const ids = responseEntityListForZone(z, deviceKey);
-        html += `<div class="owa-response-row depth1"><span>▾</span><input type="checkbox" data-response-parent="${scope}.${key}" data-response-ids="${esc(ids.join('|'))}"><b>${esc(z.name || z.id)}</b></div>`;
-        ids.forEach(eid => html += `<label class="owa-response-row depth2"><input type="checkbox" data-response-entity-check="${scope}.${key}" value="${esc(eid)}" ${selected.has(eid) ? 'checked' : ''}><span>${esc(entityLabel(eid))}</span></label>`);
-      });
-    });
-    const other = responseOtherEntities(deviceKey, domains);
-    html += `<details class="owa-response-other"><summary class="owa-btn" style="display:inline-block">Other ${esc(label.toLowerCase())} from HA (${other.length})</summary><div style="margin-top:8px;max-height:220px;overflow:auto">${other.map(eid => `<label class="owa-response-row depth1"><input type="checkbox" data-response-entity-check="${scope}.${key}" value="${esc(eid)}" ${selected.has(eid) ? 'checked' : ''}><span>${esc(entityLabel(eid))}</span></label>`).join('')}</div></details>`;
-    return html + '</div>';
-  }
-
-  function getZoneStateSafe(z) {
-    try { return typeof window.getZoneState === 'function' ? window.getZoneState(z) : ''; } catch { return ''; }
-  }
-
-  function searchResponseHtml(scope, key, label, hint, action, domains) {
-    const listId = `owa_${scope}_${key}_entities`;
-    const selected = (action.entities || []).map(entityId => `<span class="owa-entity-pill" data-response-entity="${scope}.${key}" data-entity-id="${esc(entityId)}"><span>${esc(entityLabel(entityId))}</span><button type="button" data-remove-response-entity="1">×</button></span>`).join('');
-    return `<div class="owa-section"><label style="display:flex;gap:8px;align-items:center;font-weight:700"><input type="checkbox" data-response-enabled="${scope}.${key}" ${action.enabled ? 'checked' : ''}>${esc(label)}</label><div style="display:flex;gap:6px;margin-top:8px"><input class="owa-input" list="${esc(listId)}" data-response-search="${scope}.${key}" placeholder="${esc(hint)}"><button type="button" class="owa-btn" data-response-add="${scope}.${key}">Add</button></div>${datalistOptions(listId, domains)}<div class="owa-entity-list" data-response-selected="${scope}.${key}">${selected}</div></div>`;
-  }
-
-  function notifyResponseHtml(scope, action) {
-    return `<div class="owa-section"><label style="display:flex;gap:8px;align-items:center;font-weight:700"><input type="checkbox" data-response-enabled="${scope}.notify" ${action.enabled ? 'checked' : ''}>Notify</label><textarea class="owa-input" data-response-list="${scope}.notify.targets" rows="2" placeholder="One notify target per line" style="resize:vertical;min-height:46px;margin-top:8px">${esc(arrayToLines(action.targets))}</textarea></div>`;
-  }
-
-  function responseSetHtml(scope, title, description, set) {
-    return `<div class="owa-section"><div style="font-weight:700;margin-bottom:4px">${esc(title)}</div><div class="owa-muted" style="margin-bottom:8px">${esc(description)}</div>${notifyResponseHtml(scope, set.notify)}${responseTreeHtml(scope, 'sirens', 'Sirens', 'sirens', ['siren', 'switch'], set.sirens)}${responseTreeHtml(scope, 'lights', 'Light', 'lights', ['light', 'switch'], set.lights)}${responseTreeHtml(scope, 'cameras', 'Cameras', 'cameras', ['camera'], set.cameras)}${searchResponseHtml(scope, 'scripts', 'HA Scripts', 'Search script entities to run', set.scripts, ['script'])}${searchResponseHtml(scope, 'automations', 'HA Automations', 'Search automation entities to trigger', set.automations, ['automation'])}</div>`;
-  }
-
-  function responseProfileHtml() {
-    const r = ensureResponses(draft);
-    return `<h3 style="font-size:13px;margin:18px 0 6px">Response Profile</h3><div class="owa-muted" style="margin-bottom:8px">Stored on the alarm profile only. Each response type has its own enable checkbox. Execution and managed HA automation generation are deferred.</div>${responseSetHtml('triggered_armed', 'Triggered Armed', 'Actions for active unsuppressed zones while the alarm is armed.', r.triggered_armed)}${responseSetHtml('triggered_disarmed', 'Triggered Disarmed', 'Actions for selected zones that trigger while the alarm is disarmed. Useful for lights/cameras without siren escalation.', r.triggered_disarmed)}`;
-  }
-
-  function wireResponseControls() {
-    panel.querySelectorAll('[data-response-parent]').forEach(cb => cb.onchange = () => {
-      const key = cb.dataset.responseParent;
-      const ids = (cb.dataset.responseIds || '').split('|').filter(Boolean);
-      ids.forEach(id => panel.querySelectorAll(`[data-response-entity-check="${CSS.escape(key)}"][value="${CSS.escape(id)}"]`).forEach(child => { child.checked = cb.checked; }));
-    });
-    panel.querySelectorAll('[data-response-add]').forEach(btn => btn.onclick = () => {
-      const key = btn.dataset.responseAdd;
-      const input = panel.querySelector(`[data-response-search="${CSS.escape(key)}"]`);
-      const host = panel.querySelector(`[data-response-selected="${CSS.escape(key)}"]`);
-      const entityId = String(input?.value || '').trim();
-      if (!entityId || !host || host.querySelector(`[data-entity-id="${CSS.escape(entityId)}"]`)) return;
-      const pill = document.createElement('span');
-      pill.className = 'owa-entity-pill';
-      pill.dataset.responseEntity = key;
-      pill.dataset.entityId = entityId;
-      pill.innerHTML = `<span>${esc(entityLabel(entityId))}</span><button type="button" data-remove-response-entity="1">×</button>`;
-      host.appendChild(pill);
-      if (input) input.value = '';
-      pill.querySelector('[data-remove-response-entity]').onclick = () => pill.remove();
-    });
-    panel.querySelectorAll('[data-remove-response-entity]').forEach(btn => btn.onclick = () => btn.closest('[data-response-entity]')?.remove());
-  }
-
-  function readResponseDraft() {
-    const r = ensureResponses(draft);
-    panel.querySelectorAll('[data-response-enabled]').forEach(cb => {
-      const [scope, key] = cb.dataset.responseEnabled.split('.');
-      if (r[scope]?.[key]) r[scope][key].enabled = !!cb.checked;
-    });
-    panel.querySelectorAll('[data-response-list]').forEach(ta => {
-      const [scope, key, field] = ta.dataset.responseList.split('.');
-      if (r[scope]?.[key]) r[scope][key][field] = linesToArray(ta.value);
-    });
-    ['triggered_armed', 'triggered_disarmed'].forEach(scope => ['sirens', 'lights', 'cameras'].forEach(key => {
-      if (!r[scope]?.[key]) return;
-      r[scope][key].entities = Array.from(panel.querySelectorAll(`[data-response-entity-check="${scope}.${key}"]:checked`)).map(el => el.value).filter(Boolean);
-    }));
-    panel.querySelectorAll('[data-response-selected]').forEach(host => {
-      const [scope, key] = host.dataset.responseSelected.split('.');
-      if (r[scope]?.[key]) r[scope][key].entities = Array.from(host.querySelectorAll('[data-entity-id]')).map(el => el.dataset.entityId).filter(Boolean);
-    });
-    draft.responses = normaliseResponses(r);
-  }
-
-  
-  function triggerFiltersHtml() {
+  function responseActionMeta() {
+return {
+notify:{ label:'Notify', kind:'notify', domains:['notify'], hint:'Send a notification service target.' },
+sirens:{ label:'Sirens', kind:'tree', deviceKey:'sirens', domains:['siren','switch'], hint:'Turn on selected siren entities.' },
+lights:{ label:'Lights', kind:'tree', deviceKey:'lights', domains:['light','switch'], hint:'Turn on selected lights/switches.' },
+cameras:{ label:'Cameras', kind:'tree', deviceKey:'cameras', domains:['camera'], hint:'Show selected cameras via Overwatch camera switches.' },
+scripts:{ label:'HA Scripts', kind:'search', domains:['script'], hint:'Run selected Home Assistant scripts.' },
+automations:{ label:'HA Automations', kind:'search', domains:['automation'], hint:'Trigger selected Home Assistant automations.' },
+};
+}
+function responseActionOpenKey(scope, key) { return 'owa_resp_open_' + scope + '_' + key; }
+function isResponseActionOpen(scope, key, action) {
+try { const v = sessionStorage.getItem(responseActionOpenKey(scope, key)); if (v === '1') return true; if (v === '0') return false; } catch {}
+return !!(action?.enabled || (action?.entities||[]).length || (action?.targets||[]).length);
+}
+function setResponseActionOpen(scope, key, open) { try { sessionStorage.setItem(responseActionOpenKey(scope, key), open ? '1' : '0'); } catch {} }
+function selectedCount(action) { return (action?.entities||[]).length + (action?.targets||[]).length; }
+function responseActionCardHtml(scope, key, action) {
+const meta = responseActionMeta()[key];
+const open = isResponseActionOpen(scope, key, action);
+const count = selectedCount(action);
+const disabled = !open && !count;
+return `<div class="owa-response-action-card ${disabled ? 'disabled' : ''}" data-response-card="${scope}.${key}">
+<div class="owa-response-action-head"><button data-response-collapse="${scope}.${key}">${open ? '▼' : '▶'} ${esc(meta.label)}</button><span class="owa-response-selected-count">${count ? count + ' selected' : 'not configured'}</span><button class="owa-btn" data-response-clear="${scope}.${key}" ${count ? '' : 'disabled'}>Clear</button></div>
+${open ? responseActionBodyHtml(scope, key, action, meta) : ''}
+</div>`;
+}
+function responseActionBodyHtml(scope, key, action, meta) {
+if (meta.kind === 'notify') return notifyResponseHtml(scope, action);
+if (meta.kind === 'tree') return responseTreeHtml(scope, key, meta.label, meta.deviceKey, meta.domains, action);
+return searchResponseHtml(scope, key, meta.label, meta.hint, action, meta.domains);
+}
+function responseTreeHtml(scope, key, label, deviceKey, domains, action) {
+const selected = new Set(action.entities || []);
+const base = `${scope}.${key}`;
+const fs = floors().length ? floors() : [{ id:'floor_default', name:'Ground Floor' }];
+let html = `<input class="owa-response-filter" data-response-filter="${base}" placeholder="Filter ${esc(label.toLowerCase())}…">`;
+html += `<div class="owa-devtree" data-response-tree="${base}">`;
+let any = false;
+fs.forEach(f => {
+const floorZones = zonesForFloor(f.id).filter(z => responseEntityListForZone(z, deviceKey).length);
+if (!floorZones.length) return;
+any = true;
+const floorIds = floorZones.flatMap(z => responseEntityListForZone(z, deviceKey));
+html += devRow('floor', f.id, f.name || f.id, floorIds, selected, 0, true, base);
+groupRowsForFloor(f.id).forEach(({ g, zs }) => {
+const groupZones = zs.filter(z => responseEntityListForZone(z, deviceKey).length);
+if (!groupZones.length) return;
+const groupIds = groupZones.flatMap(z => responseEntityListForZone(z, deviceKey));
+html += devRow('group', g.id, g.name || g.id, groupIds, selected, 16, true, base);
+groupZones.forEach(z => { html += responseZoneDeviceRows(z, deviceKey, selected, 32, base); });
+});
+ungroupedZonesForFloor(f.id).filter(z => responseEntityListForZone(z, deviceKey).length).forEach(z => {
+html += responseZoneDeviceRows(z, deviceKey, selected, 16, base);
+});
+});
+if (!any) html += `<div class="owa-response-empty">No ${esc(label.toLowerCase())} configured on zones.</div>`;
+html += `</div>`;
+const other = responseOtherEntities(deviceKey, domains);
+html += `<details class="owa-other-box"><summary class="owa-add-chip">Other ${esc(label.toLowerCase())} from HA (${other.length})</summary><input class="owa-response-filter" data-response-filter-other="${base}" placeholder="Filter other ${esc(label.toLowerCase())}…"><div style="max-height:210px;overflow:auto">${other.map(eid => `<label class="owa-devrow" data-response-filter-label="${esc(entityLabel(eid).toLowerCase())}" style="padding-left:4px"><span class="owa-devexp leaf"></span><input type="checkbox" data-response-entity-check="${base}" value="${esc(eid)}" ${selected.has(eid) ? 'checked' : ''}><span class="name">${esc(entityLabel(eid))}</span></label>`).join('') || `<div class="owa-response-empty">No matching HA entities.</div>`}</div></details>`;
+return html;
+}
+function devRow(type, id, label, ids, selected, pad, expandable, base) {
+const all = ids.length && ids.every(id => selected.has(id));
+const some = ids.some(id => selected.has(id));
+const key = `${base}.${type}.${id}`;
+const collapsed = sessionStorage.getItem('owa_dev_' + key) === '1';
+return `<div class="owa-devrow" data-dev-node="${esc(key)}" data-response-filter-label="${esc(String(label).toLowerCase())}" style="padding-left:${pad}px"><button class="owa-devexp ${expandable ? '' : 'leaf'}" data-dev-collapse="${esc(key)}">${collapsed ? '▶' : '▼'}</button><label><input type="checkbox" data-response-parent="${base}" data-response-ids="${esc(ids.join('|'))}" ${all ? 'checked' : ''} data-mixed="${some && !all ? 'true' : 'false'}"><span class="name"><b>${esc(label)}</b></span></label></div>`;
+}
+function responseZoneDeviceRows(z, deviceKey, selected, pad, base) {
+const ids = responseEntityListForZone(z, deviceKey);
+const all = ids.length && ids.every(id => selected.has(id));
+const some = ids.some(id => selected.has(id));
+const zState = getZoneStateSafe(z);
+const key = `${base}.zone.${z.id}`;
+const collapsed = sessionStorage.getItem('owa_dev_' + key) === '1';
+let html = `<div class="owa-devrow" data-dev-node="${esc(key)}" data-response-filter-label="${esc(String(z.name || z.id).toLowerCase())}" style="padding-left:${pad}px"><button class="owa-devexp" data-dev-collapse="${esc(key)}">${collapsed ? '▶' : '▼'}</button><label><input type="checkbox" data-response-parent="${base}" data-response-ids="${esc(ids.join('|'))}" ${all ? 'checked' : ''} data-mixed="${some && !all ? 'true' : 'false'}"><span class="name"><b>${esc(z.name || z.id)}</b>${zState ? ` <span class="tag">${esc(zState)}</span>` : ''}</span></label></div>`;
+html += `<div data-dev-children="${esc(key)}" ${collapsed ? 'style="display:none"' : ''}>`;
+ids.forEach(eid => html += `<label class="owa-devrow" data-response-filter-label="${esc((entityLabel(eid)+' '+(z.name||z.id)).toLowerCase())}" style="padding-left:${pad + 18}px"><span class="owa-devexp leaf"></span><input type="checkbox" data-response-entity-check="${base}" value="${esc(eid)}" ${selected.has(eid) ? 'checked' : ''}><span class="name">${esc(entityLabel(eid))}</span></label>`);
+html += `</div>`;
+return html;
+}
+function getZoneStateSafe(z) {
+try { return typeof window.getZoneState === 'function' ? window.getZoneState(z) : ''; } catch { return ''; }
+}
+function searchResponseHtml(scope, key, label, hint, action, domains) {
+const base = `${scope}.${key}`;
+const selected = new Set(action.entities || []);
+const entities = haEntityOptions(domains).map(eid => ({ entity_id:eid, label:entityLabel(eid) }));
+return `<div class="owa-muted" style="margin-bottom:7px">${esc(hint || '')}</div><input class="owa-response-filter" data-response-filter-other="${base}" placeholder="Filter ${esc(label.toLowerCase())}…"><div class="owa-devtree" data-response-selected="${base}" style="max-height:240px">${entities.map(e => `<label class="owa-devrow" data-response-filter-label="${esc(e.label.toLowerCase())}"><span class="owa-devexp leaf"></span><input type="checkbox" data-response-entity-check="${base}" value="${esc(e.entity_id)}" ${selected.has(e.entity_id) ? 'checked' : ''}><span class="name">${esc(e.label)}</span></label>`).join('') || `<div class="owa-response-empty">No ${esc(label.toLowerCase())} found.</div>`}</div>`;
+}
+function notifyResponseHtml(scope, action) {
+return `<div class="owa-muted" style="margin-bottom:7px">One notify target per line. Example: notify.mobile_app_phone</div><textarea class="owa-input" data-response-list="${scope}.notify.targets" rows="3" placeholder="notify.notify" style="resize:vertical;min-height:58px">${esc(arrayToLines(action.targets))}</textarea>`;
+}
+function responseSetHtml(scope, title, description, set) {
+const keys = ['notify','sirens','lights','cameras','scripts','automations'];
+return `<div class="owa-section" data-response-scope="${scope}"><div style="font-weight:700;margin-bottom:4px">${esc(title)}</div><div class="owa-muted" style="margin-bottom:8px">${esc(description)}</div><div class="owa-response-actions">${keys.map(k => `<button class="owa-add-chip ${isResponseActionOpen(scope,k,set[k]) ? 'active' : ''}" data-response-add-action="${scope}.${k}">+ ${esc(responseActionMeta()[k].label)}</button>`).join('')}</div>${keys.map(k => responseActionCardHtml(scope, k, set[k])).join('')}</div>`;
+}
+function responseProfileHtml() {
+const r = ensureResponses(draft);
+return `<h3 style="font-size:13px;margin:18px 0 6px">Response Profile</h3><div class="owa-muted" style="margin-bottom:8px">Managed alarm response profile. Actions are generated as HA automations by the server. Selecting entities enables that action.</div>${responseSetHtml('triggered_armed', 'Triggered Armed', 'Actions for active unsuppressed zones while the alarm is armed.', r.triggered_armed)}${responseSetHtml('triggered_disarmed', 'Triggered Disarmed', 'Actions for selected zones that trigger while the alarm is disarmed. Useful for lights/cameras without siren escalation.', r.triggered_disarmed)}`;
+}
+function wireResponseControls() {
+panel.querySelectorAll('[data-response-add-action]').forEach(btn => btn.onclick = () => { const [scope,key] = btn.dataset.responseAddAction.split('.'); setResponseActionOpen(scope,key,true); readResponseDraft(); renderEditor(); });
+panel.querySelectorAll('[data-response-collapse]').forEach(btn => btn.onclick = () => { const [scope,key] = btn.dataset.responseCollapse.split('.'); const card = btn.closest('[data-response-card]'); const isOpen = !!card && card.querySelector('[data-response-tree],[data-response-selected],textarea'); setResponseActionOpen(scope,key,!isOpen); readResponseDraft(); renderEditor(); });
+panel.querySelectorAll('[data-response-clear]').forEach(btn => btn.onclick = () => { const [scope,key] = btn.dataset.responseClear.split('.'); const r = ensureResponses(draft); if (r[scope]?.[key]) { r[scope][key].entities = []; r[scope][key].targets = []; r[scope][key].enabled = false; } setResponseActionOpen(scope,key,false); renderEditor(); });
+panel.querySelectorAll('[data-dev-collapse]').forEach(btn => btn.onclick = e => { e.preventDefault(); e.stopPropagation(); const key = btn.dataset.devCollapse; const child = panel.querySelector(`[data-dev-children="${CSS.escape(key)}"]`); const collapsed = child && child.style.display !== 'none'; try { sessionStorage.setItem('owa_dev_' + key, collapsed ? '1' : '0'); } catch {} if (child) child.style.display = collapsed ? 'none' : ''; btn.textContent = collapsed ? '▶' : '▼'; });
+panel.querySelectorAll('[data-response-parent]').forEach(cb => { cb.indeterminate = cb.dataset.mixed === 'true'; cb.onchange = () => { const key = cb.dataset.responseParent; const ids = (cb.dataset.responseIds || '').split('|').filter(Boolean); ids.forEach(id => panel.querySelectorAll(`[data-response-entity-check="${CSS.escape(key)}"][value="${CSS.escape(id)}"]`).forEach(child => child.checked = cb.checked)); updateResponseParentStates(key); }; });
+panel.querySelectorAll('[data-response-entity-check]').forEach(cb => cb.onchange = () => updateResponseParentStates(cb.dataset.responseEntityCheck));
+panel.querySelectorAll('[data-response-filter],[data-response-filter-other]').forEach(inp => { inp.oninput = () => { const q = inp.value.toLowerCase().trim(); const host = inp.nextElementSibling || inp.closest('.owa-section'); const root = host && (host.matches('.owa-devtree') ? host : host.querySelector?.('.owa-devtree')); const scopeHost = inp.parentElement; const rows = (root || scopeHost).querySelectorAll('[data-response-filter-label]'); rows.forEach(row => { row.style.display = !q || row.dataset.responseFilterLabel.includes(q) ? '' : 'none'; }); }; inp.onkeydown = e => e.stopPropagation(); });
+['triggered_armed','triggered_disarmed'].forEach(scope => ['sirens','lights','cameras','scripts','automations'].forEach(key => updateResponseParentStates(`${scope}.${key}`)));
+}
+function updateResponseParentStates(key) {
+if (!key) return;
+panel.querySelectorAll(`[data-response-parent="${CSS.escape(key)}"]`).forEach(parent => {
+const ids = (parent.dataset.responseIds || '').split('|').filter(Boolean);
+const checks = ids.flatMap(id => Array.from(panel.querySelectorAll(`[data-response-entity-check="${CSS.escape(key)}"][value="${CSS.escape(id)}"]`)));
+const total = checks.length;
+const checked = checks.filter(c => c.checked).length;
+parent.indeterminate = checked > 0 && checked < total;
+parent.checked = total > 0 && checked === total;
+});
+}
+function readResponseDraft() {
+const r = ensureResponses(draft);
+panel.querySelectorAll('[data-response-list]').forEach(ta => {
+const [scope, key, field] = ta.dataset.responseList.split('.');
+if (r[scope]?.[key]) r[scope][key][field] = linesToArray(ta.value);
+});
+['triggered_armed', 'triggered_disarmed'].forEach(scope => ['sirens', 'lights', 'cameras', 'scripts', 'automations'].forEach(key => {
+if (!r[scope]?.[key]) return;
+const entities = Array.from(panel.querySelectorAll(`[data-response-entity-check="${scope}.${key}"]:checked`)).map(el => el.value).filter(Boolean);
+r[scope][key].entities = [...new Set(entities)];
+r[scope][key].enabled = r[scope][key].entities.length > 0 || (r[scope][key].targets || []).length > 0;
+}));
+['triggered_armed', 'triggered_disarmed'].forEach(scope => {
+if (r[scope]?.notify) r[scope].notify.enabled = (r[scope].notify.targets || []).length > 0;
+});
+draft.responses = normaliseResponses(r);
+}
+function triggerFiltersHtml() {
     const f = ensureTriggerFilters(draft);
     const any = TRIGGER_FILTER_KEYS.some(k => f[k]);
     const warn = !any ? `<div class="owa-warn"><b>Warning:</b> No trigger filters are enabled. This alarm will never enter a triggered state until at least one filter is selected.</div>` : '';
