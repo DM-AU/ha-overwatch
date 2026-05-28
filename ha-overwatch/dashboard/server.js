@@ -1,4 +1,4 @@
-// HA-Overwatch 0.05.24-alarm-entity-delete-cleanup-and-response-alias: remove stale deleted/renamed alarm sensors and use requested alarm response automation alias format; no cascade changes.
+// HA-Overwatch 0.05.25-alarm-response-orphan-cleanup: delete stale/generated alarm response automations when alarms are deleted or renamed; keep alarm sensor cleanup and response alias convention; no cascade changes.
 /* ============================================================
  * HA-Overwatch — server.js
  *
@@ -3566,14 +3566,69 @@ async function _deleteManagedAlarmAutomation(id) {
   return { id, status: res.status };
 }
 
+
+function isManagedAlarmResponseAutomationId(id) {
+  return /^ow_alarm_.+_triggered_(armed|disarmed)_response$/.test(String(id || ""));
+}
+
+function readAlarmResponseAutomationIdsFromDisk() {
+  const ids = new Set();
+  const candidates = [
+    "/config/automations.yaml",
+    path.join(DATA_DIR, "automations.yaml"),
+    path.join(DATA_DIR, "config", "automations.yaml"),
+  ];
+  for (const file of candidates) {
+    try {
+      if (!fs.existsSync(file)) continue;
+      const text = fs.readFileSync(file, "utf8");
+      const re = /(?:^|\n)\s*(?:-\s*)?id:\s*["']?(ow_alarm_[A-Za-z0-9_]+_triggered_(?:armed|disarmed)_response)["']?/g;
+      let m;
+      while ((m = re.exec(text))) ids.add(m[1]);
+    } catch (e) {
+      console.warn(`[OW-AlarmResponse] failed scanning ${file}: ${e.message}`);
+    }
+  }
+  return [...ids];
+}
+
+async function listManagedAlarmResponseAutomationIds() {
+  const ids = new Set();
+
+  // Preferred: HA automation config API. It returns parsed automation configs including id/variables.
+  try {
+    const res = await _haApiRequest("GET", "/api/config/automation/config", null);
+    if (res.status >= 200 && res.status < 300 && res.body) {
+      const parsed = JSON.parse(res.body);
+      const list = Array.isArray(parsed) ? parsed : (Array.isArray(parsed?.automations) ? parsed.automations : []);
+      for (const auto of list) {
+        const id = String(auto?.id || "");
+        const vars = auto?.variables || {};
+        if (isManagedAlarmResponseAutomationId(id) || vars.ow_type === "alarm_response") {
+          if (id) ids.add(id);
+        }
+      }
+    }
+  } catch (e) {
+    console.warn(`[OW-AlarmResponse] HA automation list scan failed: ${e.message}`);
+  }
+
+  // Fallback/backup: direct disk scan in add-on mode.
+  readAlarmResponseAutomationIdsFromDisk().forEach(id => ids.add(id));
+  return [...ids];
+}
+
 async function syncAlarmResponseAutomations(alarms = loadAlarms()) {
   const pushed = [];
   const deleted = [];
+  const stale_deleted = [];
   const errors = [];
+  const expectedIds = new Set();
 
   for (const alarm of (alarms || [])) {
     for (const scope of ALARM_RESPONSE_SCOPES) {
       const autoId = alarmResponseAutomationId(alarm, scope);
+      expectedIds.add(autoId);
       const haAuto = buildAlarmResponseAutomation(alarm, scope);
       try {
         if (haAuto) pushed.push(await _pushManagedAlarmAutomation(haAuto));
@@ -3585,8 +3640,25 @@ async function syncAlarmResponseAutomations(alarms = loadAlarms()) {
     }
   }
 
+  // Delete generated alarm response automations for alarms that no longer exist, or old IDs left behind after rename.
+  try {
+    const existingGeneratedIds = await listManagedAlarmResponseAutomationIds();
+    for (const id of existingGeneratedIds) {
+      if (expectedIds.has(id)) continue;
+      try {
+        stale_deleted.push(await _deleteManagedAlarmAutomation(id));
+      } catch (e) {
+        console.warn(`[OW-AlarmResponse] stale ${id}: ${e.message}`);
+        errors.push({ id, error: e.message });
+      }
+    }
+  } catch (e) {
+    console.warn(`[OW-AlarmResponse] stale automation cleanup failed: ${e.message}`);
+    errors.push({ id: "stale_alarm_response_cleanup", error: e.message });
+  }
+
   await _reloadHAAutomations();
-  return { ok: errors.length === 0, pushed, deleted, errors };
+  return { ok: errors.length === 0, pushed, deleted, stale_deleted, errors };
 }
 
 /* ── Build HA automation config from OW draft ─────────────── */
