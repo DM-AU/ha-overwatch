@@ -1,4 +1,4 @@
-// HA-Overwatch 0.05.23-alarm-sensor-rename-propagation: alarm effective/triggered HA sensors dynamically add/remove on alarm rename; response automations continue using renamed HA entity IDs; no cascade changes.
+// HA-Overwatch 0.05.24-alarm-entity-delete-cleanup-and-response-alias: remove stale deleted/renamed alarm sensors and use requested alarm response automation alias format; no cascade changes.
 /* ============================================================
  * HA-Overwatch — server.js
  *
@@ -2261,8 +2261,8 @@ class OverwatchCameraSwitch(OWSwitch):
   "binary_sensor.py": `"""Binary sensor platform for HA Overwatch.
 
 Reads zone trigger state from /ow/triggered and alarm trigger state from
-/ow/alarms/triggered. Alarm triggered entities dynamically add/remove on alarm
-rename so their HA entity IDs match switches/zones/groups behaviour.
+/ow/alarms/triggered. Alarm triggered entities dynamically add new renamed
+entities and remove stale deleted/renamed registry entries.
 """
 from __future__ import annotations
 import logging
@@ -2289,6 +2289,10 @@ def _dev(url: str) -> DeviceInfo:
     )
 
 
+def _registry_entries(registry):
+    return list(getattr(registry, "entities", {}).values())
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -2313,9 +2317,30 @@ async def async_setup_entry(
             entities.extend(OverwatchAlarmTriggeredDisarmed(alarm_trig_coordinator, a) for a in alarms)
         return entities
 
+    def _remove_stale_registry_entries(current_unique_ids: set[str]) -> None:
+        registry = er.async_get(hass)
+        for reg_entry in _registry_entries(registry):
+            if getattr(reg_entry, "platform", None) != DOMAIN:
+                continue
+            if getattr(reg_entry, "domain", None) != "binary_sensor":
+                continue
+            uid = getattr(reg_entry, "unique_id", "") or ""
+            is_alarm_trigger = uid.startswith("overwatch_alarm_") and (uid.endswith("_triggered_armed") or uid.endswith("_triggered_disarmed"))
+            if not is_alarm_trigger:
+                continue
+            if uid in current_unique_ids:
+                continue
+            entity_id = getattr(reg_entry, "entity_id", None)
+            if entity_id:
+                registry.async_remove(entity_id)
+                _LOGGER.info("Overwatch: removed stale alarm triggered binary sensor %s (uid=%s)", entity_id, uid)
+            known_unique_ids.discard(uid)
+
     def _sync_entities() -> None:
         entities = _build_entities()
         current_unique_ids = {e._attr_unique_id for e in entities}
+        _remove_stale_registry_entries(current_unique_ids)
+
         new_entities = [e for e in entities if e._attr_unique_id not in known_unique_ids]
         if new_entities:
             _LOGGER.info("Overwatch: adding %d binary sensor entities", len(new_entities))
@@ -2330,7 +2355,7 @@ async def async_setup_entry(
                 entity_id = registry.async_get_entity_id("binary_sensor", DOMAIN, uid)
                 if entity_id:
                     registry.async_remove(entity_id)
-                    _LOGGER.info("Overwatch: removed stale binary sensor %s (uid=%s)", entity_id, uid)
+                    _LOGGER.info("Overwatch: removed deleted binary sensor %s (uid=%s)", entity_id, uid)
             known_unique_ids.difference_update(removed)
 
     _sync_entities()
@@ -2451,9 +2476,9 @@ class OverwatchAlarmTriggeredDisarmed(OverwatchAlarmTriggeredBase):
 `,
   "sensor.py": `"""Sensor platform for HA Overwatch alarm effective states.
 
-Read-only alarm effective-state sensors. Entity unique IDs intentionally follow the
-current OW alarm slug so renamed alarms create the expected new HA entity ID and
-remove stale registry entries, matching switch/platform rename behaviour.
+Read-only alarm effective-state sensors. Alarm effective sensors dynamically add
+new renamed entities and remove stale deleted/renamed registry entries, matching
+switch/platform lifecycle behaviour.
 """
 from __future__ import annotations
 import logging
@@ -2478,6 +2503,7 @@ def _slug(value: str) -> str:
 
 
 def _alarm_slug(alarm: dict) -> str:
+    # Server alarm payload id is the current HA-facing alarm slug.
     return _slug(alarm.get("id") or alarm.get("name") or alarm.get("raw_id") or "alarm")
 
 
@@ -2489,6 +2515,10 @@ def _dev(url: str) -> DeviceInfo:
         model="Floor Plan Dashboard",
         configuration_url=url,
     )
+
+
+def _registry_entries(registry):
+    return list(getattr(registry, "entities", {}).values())
 
 
 async def async_setup_entry(
@@ -2503,9 +2533,29 @@ async def async_setup_entry(
         alarms = (coordinator.data or {}).get("alarms", [])
         return [OverwatchAlarmEffectiveSensor(coordinator, alarm) for alarm in alarms]
 
+    def _remove_stale_registry_entries(current_unique_ids: set[str]) -> None:
+        registry = er.async_get(hass)
+        for reg_entry in _registry_entries(registry):
+            if getattr(reg_entry, "platform", None) != DOMAIN:
+                continue
+            if getattr(reg_entry, "domain", None) != "sensor":
+                continue
+            uid = getattr(reg_entry, "unique_id", "") or ""
+            if not (uid.startswith("overwatch_alarm_") and uid.endswith("_effective_state")):
+                continue
+            if uid in current_unique_ids:
+                continue
+            entity_id = getattr(reg_entry, "entity_id", None)
+            if entity_id:
+                registry.async_remove(entity_id)
+                _LOGGER.info("Overwatch: removed stale alarm effective sensor %s (uid=%s)", entity_id, uid)
+            known_unique_ids.discard(uid)
+
     def _sync_entities() -> None:
         entities = _build_entities()
         current_unique_ids = {e._attr_unique_id for e in entities}
+        _remove_stale_registry_entries(current_unique_ids)
+
         new_entities = [e for e in entities if e._attr_unique_id not in known_unique_ids]
         if new_entities:
             _LOGGER.info("Overwatch: adding %d alarm effective sensor entities", len(new_entities))
@@ -2520,7 +2570,7 @@ async def async_setup_entry(
                 entity_id = registry.async_get_entity_id("sensor", DOMAIN, uid)
                 if entity_id:
                     registry.async_remove(entity_id)
-                    _LOGGER.info("Overwatch: removed stale alarm effective sensor %s (uid=%s)", entity_id, uid)
+                    _LOGGER.info("Overwatch: removed deleted alarm effective sensor %s (uid=%s)", entity_id, uid)
             known_unique_ids.difference_update(removed)
 
     _sync_entities()
@@ -2571,7 +2621,7 @@ class OverwatchAlarmEffectiveSensor(CoordinatorEntity, SensorEntity):
   "manifest.json": `{
   "domain": "ha_overwatch",
   "name": "HA Overwatch",
-  "version": "1.14.7",
+  "version": "1.14.8",
   "documentation": "https://github.com/DM-AU/ha-overwatch",
   "issue_tracker": "https://github.com/DM-AU/ha-overwatch/issues",
   "codeowners": [],
@@ -3442,7 +3492,7 @@ function buildAlarmResponseAutomation(alarm, scope) {
   if (!actions.length) return null;
   return {
     id: autoId,
-    alias: `HA-Overwatch — Alarm ${alarmName} ${scope === "triggered_armed" ? "Triggered Armed" : "Triggered Disarmed"} Response`,
+    alias: `HA-Overwatch - Alarm - ${alarmName} - ${scope === "triggered_armed" ? "Triggered Armed" : "Triggered Disarmed"} Response`,
     description: "Managed by HA-Overwatch alarm response profile",
     variables: {
       ow_id: autoId,
