@@ -1,4 +1,4 @@
-// HA-Overwatch 0.05.22-alarm-response-enable-infer: response automations are generated when entities are selected (enabled inferred); delete missing response automations is non-fatal; no cascade changes.
+// HA-Overwatch 0.05.23-alarm-sensor-rename-propagation: alarm effective/triggered HA sensors dynamically add/remove on alarm rename; response automations continue using renamed HA entity IDs; no cascade changes.
 /* ============================================================
  * HA-Overwatch — server.js
  *
@@ -2260,13 +2260,16 @@ class OverwatchCameraSwitch(OWSwitch):
 `,
   "binary_sensor.py": `"""Binary sensor platform for HA Overwatch.
 
-Reads zone trigger state from /ow/triggered and alarm trigger state from /ow/alarms/triggered.
+Reads zone trigger state from /ow/triggered and alarm trigger state from
+/ow/alarms/triggered. Alarm triggered entities dynamically add/remove on alarm
+rename so their HA entity IDs match switches/zones/groups behaviour.
 """
 from __future__ import annotations
 import logging
 from homeassistant.components.binary_sensor import BinarySensorDeviceClass, BinarySensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -2295,24 +2298,45 @@ async def async_setup_entry(
     zone_coordinator: ZoneCoordinator = data["zone_coordinator"]
     trig_coordinator: TriggeredCoordinator = data["triggered_coordinator"]
     alarm_trig_coordinator: AlarmTriggeredCoordinator | None = data.get("alarm_triggered_coordinator")
+    known_unique_ids: set[str] = set()
 
-    zone_data = zone_coordinator.data or {}
-    groups = zone_data.get("groups", [])
-    zones = zone_data.get("zones", [])
+    def _build_entities() -> list:
+        zone_data = zone_coordinator.data or {}
+        groups = zone_data.get("groups", [])
+        zones = zone_data.get("zones", [])
+        entities = [OverwatchMasterTriggered(trig_coordinator, zone_coordinator)]
+        entities.extend(OverwatchGroupTriggered(trig_coordinator, g) for g in groups)
+        entities.extend(OverwatchZoneTriggered(trig_coordinator, z) for z in zones)
+        if alarm_trig_coordinator:
+            alarms = (alarm_trig_coordinator.data or {}).get("alarms", [])
+            entities.extend(OverwatchAlarmTriggeredArmed(alarm_trig_coordinator, a) for a in alarms)
+            entities.extend(OverwatchAlarmTriggeredDisarmed(alarm_trig_coordinator, a) for a in alarms)
+        return entities
 
-    entities = [OverwatchMasterTriggered(trig_coordinator, zone_coordinator)]
-    entities.extend(OverwatchGroupTriggered(trig_coordinator, g) for g in groups)
-    entities.extend(OverwatchZoneTriggered(trig_coordinator, z) for z in zones)
+    def _sync_entities() -> None:
+        entities = _build_entities()
+        current_unique_ids = {e._attr_unique_id for e in entities}
+        new_entities = [e for e in entities if e._attr_unique_id not in known_unique_ids]
+        if new_entities:
+            _LOGGER.info("Overwatch: adding %d binary sensor entities", len(new_entities))
+            for e in new_entities:
+                known_unique_ids.add(e._attr_unique_id)
+            async_add_entities(new_entities, update_before_add=False)
 
+        removed = known_unique_ids - current_unique_ids - {"overwatch_zone_master_triggered"}
+        if removed:
+            registry = er.async_get(hass)
+            for uid in removed:
+                entity_id = registry.async_get_entity_id("binary_sensor", DOMAIN, uid)
+                if entity_id:
+                    registry.async_remove(entity_id)
+                    _LOGGER.info("Overwatch: removed stale binary sensor %s (uid=%s)", entity_id, uid)
+            known_unique_ids.difference_update(removed)
+
+    _sync_entities()
+    entry.async_on_unload(zone_coordinator.async_add_listener(_sync_entities))
     if alarm_trig_coordinator:
-        alarms = (alarm_trig_coordinator.data or {}).get("alarms", [])
-        _LOGGER.warning("HA Overwatch adding %s alarm triggered binary sensors from %s alarms", len(alarms) * 2, len(alarms))
-        entities.extend(OverwatchAlarmTriggeredArmed(alarm_trig_coordinator, a) for a in alarms)
-        entities.extend(OverwatchAlarmTriggeredDisarmed(alarm_trig_coordinator, a) for a in alarms)
-    else:
-        _LOGGER.warning("HA Overwatch alarm_trig_coordinator missing; alarm triggered binary sensors not added")
-
-    async_add_entities(entities)
+        entry.async_on_unload(alarm_trig_coordinator.async_add_listener(_sync_entities))
 
 
 class OWSensor(CoordinatorEntity, BinarySensorEntity):
@@ -2427,8 +2451,9 @@ class OverwatchAlarmTriggeredDisarmed(OverwatchAlarmTriggeredBase):
 `,
   "sensor.py": `"""Sensor platform for HA Overwatch alarm effective states.
 
-Read-only entities. These sensors poll /ow/alarms/effective and do not write HA
-switch state, cascade zones/cameras, or push states directly.
+Read-only alarm effective-state sensors. Entity unique IDs intentionally follow the
+current OW alarm slug so renamed alarms create the expected new HA entity ID and
+remove stale registry entries, matching switch/platform rename behaviour.
 """
 from __future__ import annotations
 import logging
@@ -2436,6 +2461,7 @@ import re
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -2449,6 +2475,10 @@ def _slug(value: str) -> str:
     raw = str(value or "").lower()
     raw = re.sub(r"[^a-z0-9]+", "_", raw).strip("_")
     return raw or "alarm"
+
+
+def _alarm_slug(alarm: dict) -> str:
+    return _slug(alarm.get("id") or alarm.get("name") or alarm.get("raw_id") or "alarm")
 
 
 def _dev(url: str) -> DeviceInfo:
@@ -2467,8 +2497,34 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     coordinator: AlarmEffectiveCoordinator = hass.data[DOMAIN][entry.entry_id]["alarm_effective_coordinator"]
-    alarms = (coordinator.data or {}).get("alarms", [])
-    async_add_entities([OverwatchAlarmEffectiveSensor(coordinator, alarm) for alarm in alarms])
+    known_unique_ids: set[str] = set()
+
+    def _build_entities() -> list[OverwatchAlarmEffectiveSensor]:
+        alarms = (coordinator.data or {}).get("alarms", [])
+        return [OverwatchAlarmEffectiveSensor(coordinator, alarm) for alarm in alarms]
+
+    def _sync_entities() -> None:
+        entities = _build_entities()
+        current_unique_ids = {e._attr_unique_id for e in entities}
+        new_entities = [e for e in entities if e._attr_unique_id not in known_unique_ids]
+        if new_entities:
+            _LOGGER.info("Overwatch: adding %d alarm effective sensor entities", len(new_entities))
+            for e in new_entities:
+                known_unique_ids.add(e._attr_unique_id)
+            async_add_entities(new_entities, update_before_add=False)
+
+        removed = known_unique_ids - current_unique_ids
+        if removed:
+            registry = er.async_get(hass)
+            for uid in removed:
+                entity_id = registry.async_get_entity_id("sensor", DOMAIN, uid)
+                if entity_id:
+                    registry.async_remove(entity_id)
+                    _LOGGER.info("Overwatch: removed stale alarm effective sensor %s (uid=%s)", entity_id, uid)
+            known_unique_ids.difference_update(removed)
+
+    _sync_entities()
+    entry.async_on_unload(coordinator.async_add_listener(_sync_entities))
 
 
 class OverwatchAlarmEffectiveSensor(CoordinatorEntity, SensorEntity):
@@ -2479,19 +2535,15 @@ class OverwatchAlarmEffectiveSensor(CoordinatorEntity, SensorEntity):
 
     def __init__(self, coordinator: AlarmEffectiveCoordinator, alarm: dict) -> None:
         super().__init__(coordinator)
-        self._raw_id = str(alarm.get("raw_id") or alarm.get("id") or alarm.get("name") or "alarm")
-        self._slug = _slug(alarm.get("id") or alarm.get("name") or self._raw_id)
+        self._slug = _alarm_slug(alarm)
         self._attr_unique_id = f"overwatch_alarm_{self._slug}_effective_state"
         self._attr_name = f"Alarm: {alarm.get('name') or self._slug}"
         self.entity_id = f"sensor.overwatch_alarm_{self._slug}"
         self._attr_device_info = _dev(coordinator.url)
 
     def _alarm(self) -> dict:
-        alarms = (self.coordinator.data or {}).get("alarms", [])
-        for alarm in alarms:
-            if str(alarm.get("raw_id") or "") == self._raw_id:
-                return alarm
-            if _slug(alarm.get("id") or alarm.get("name") or "") == self._slug:
+        for alarm in (self.coordinator.data or {}).get("alarms", []):
+            if _alarm_slug(alarm) == self._slug:
                 return alarm
         return {}
 
@@ -2504,7 +2556,7 @@ class OverwatchAlarmEffectiveSensor(CoordinatorEntity, SensorEntity):
     def extra_state_attributes(self) -> dict:
         alarm = self._alarm()
         return {
-            "raw_id": alarm.get("raw_id", self._raw_id),
+            "raw_id": alarm.get("raw_id"),
             "alarm_id": alarm.get("id", self._slug),
             "name": alarm.get("name"),
             "role": alarm.get("role"),
@@ -2519,7 +2571,7 @@ class OverwatchAlarmEffectiveSensor(CoordinatorEntity, SensorEntity):
   "manifest.json": `{
   "domain": "ha_overwatch",
   "name": "HA Overwatch",
-  "version": "1.14.6",
+  "version": "1.14.7",
   "documentation": "https://github.com/DM-AU/ha-overwatch",
   "issue_tracker": "https://github.com/DM-AU/ha-overwatch/issues",
   "codeowners": [],
