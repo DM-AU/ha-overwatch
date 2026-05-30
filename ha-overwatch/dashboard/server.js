@@ -1,4 +1,4 @@
-// HA-Overwatch 0.05.25-alarm-response-orphan-cleanup: delete stale/generated alarm response automations when alarms are deleted or renamed; keep alarm sensor cleanup and response alias convention; no cascade changes.
+// HA-Overwatch 0.05.28-notify-response-options: alarm response notify title/message support; keep orphan cleanup and entity cleanup; no cascade changes.
 /* ============================================================
  * HA-Overwatch — server.js
  *
@@ -3391,7 +3391,7 @@ function alarmResponseAction(action) {
   const targets  = _cleanList(a.targets);
   // Enabled is inferred from selection to avoid silent 'no automation' when UI doesn't expose enable toggles.
   const enabled = !!a.enabled || entities.length > 0 || targets.length > 0;
-  return { enabled, entities, targets };
+  return { enabled, entities, targets, title: String(a.title || ''), message: String(a.message || '') };
 }
 
 function alarmResponseSet(alarm, scope) {
@@ -3450,12 +3450,15 @@ function buildAlarmResponseActions(alarm, scope) {
       const svc = String(target || "notify.notify").startsWith("notify.")
         ? String(target).slice("notify.".length)
         : String(target || "notify");
+      const title = (set.notify.title || `HA-Overwatch - Alarm - ${alarmName}`)
+        .replace(/\{\{\s*alarm_name\s*\}\}/g, alarmName)
+        .replace(/\{\{\s*trigger_scope\s*\}\}/g, scope);
+      const message = (set.notify.message || (scope === "triggered_armed" ? `Alarm ${alarmName} triggered while armed.` : `Alarm ${alarmName} triggered while disarmed.`))
+        .replace(/\{\{\s*alarm_name\s*\}\}/g, alarmName)
+        .replace(/\{\{\s*trigger_scope\s*\}\}/g, scope);
       actions.push({
         action: `notify.${svc}`,
-        data: {
-          title: `HA-Overwatch — ${alarmName}`,
-          message: scope === "triggered_armed" ? `Alarm ${alarmName} triggered while armed.` : `Alarm ${alarmName} triggered while disarmed.`,
-        },
+        data: { title, message },
       });
     });
   }
