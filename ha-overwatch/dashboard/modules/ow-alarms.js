@@ -1,6 +1,6 @@
 /* ================================================================
  * HA-Overwatch — ow-alarms.js
- * v0.05.30: modular alarm response actions with + blocks, per-action trigger delay, no camera response blocks.
+ * v0.05.31: modular response actions, shared profile, summaries, per-action preconditions, and response-specific turn-off wording.
  *
  * Scope:
  * - Frontend-only.
@@ -68,9 +68,9 @@
   }
   function ensureTriggerFilters(a) { a.trigger_filters = normaliseTriggerFilters(a.trigger_filters || a.filters || null); return a.trigger_filters; }
 
-const emptyResponseAction = () => ({ id:uid(), type:'light', enabled:false, entities:[], targets:[], auto_zones:false, trigger_for:'00:00:00', clear_mode:'none', clear_for:'00:00:00', title:'', message:'' });
+const emptyResponseAction = () => ({ id:uid(), type:'light', enabled:false, entities:[], targets:[], auto_zones:false, trigger_for:'00:00:00', clear_mode:'none', clear_for:'00:00:00', condition_mode:'always', time_after:'00:00', time_before:'23:59', condition_entity:'', title:'', message:'' });
   const emptyResponseSet = () => ({ actions:[] });
-  function defaultResponses() { return { triggered_armed: emptyResponseSet(), triggered_disarmed: emptyResponseSet() }; }
+  function defaultResponses() { return { shared: emptyResponseSet(), triggered_armed: emptyResponseSet(), triggered_disarmed: emptyResponseSet() }; }
   function normaliseDuration(value, fallback = '00:00:00') {
     const s = String(value || '').trim();
     const m = s.match(/^(\d{1,2}):(\d{1,2}):(\d{1,2})$/);
@@ -95,6 +95,10 @@ const emptyResponseAction = () => ({ id:uid(), type:'light', enabled:false, enti
       trigger_for: normaliseDuration(a.trigger_for || a.for_duration || '00:00:00'),
       clear_mode: String(a.clear_mode || 'none'),
       clear_for: normaliseDuration(a.clear_for || '00:00:00'),
+      condition_mode: String(a.condition_mode || 'always'),
+      time_after: String(a.time_after || '00:00'),
+      time_before: String(a.time_before || '23:59'),
+      condition_entity: String(a.condition_entity || ''),
     };
   }
   function legacyResponseActions(s) {
@@ -114,7 +118,7 @@ const emptyResponseAction = () => ({ id:uid(), type:'light', enabled:false, enti
   }
   function normaliseResponses(responses) {
     const r = responses && typeof responses === 'object' ? responses : {};
-    return { triggered_armed:normaliseResponseSet(r.triggered_armed || r.armed || r.triggered || {}), triggered_disarmed:normaliseResponseSet(r.triggered_disarmed || r.disarmed || {}) };
+    return { shared:normaliseResponseSet(r.shared || r.both || {}), triggered_armed:normaliseResponseSet(r.triggered_armed || r.armed || r.triggered || {}), triggered_disarmed:normaliseResponseSet(r.triggered_disarmed || r.disarmed || {}) };
   }
   function ensureResponses(a) { a.responses = normaliseResponses(a.responses || defaultResponses()); return a.responses; }
   
@@ -479,116 +483,77 @@ document.head.appendChild(s);
     return {
       light:{ label:'Light', plural:'Lights', deviceKey:'lights', kind:'tree', domains:['light','switch'], colour:'#32d74b', defaultClear:'none', verb:'Turn on these' },
       siren:{ label:'Siren', plural:'Sirens', deviceKey:'sirens', kind:'tree', domains:['siren','switch'], colour:'#ff3b30', defaultClear:'when_alarm_clears_or_disarmed', verb:'Turn on these' },
-      notify:{ label:'Notify', plural:'Notifications', kind:'notify', domains:['notify'], colour:'#4db8ff', defaultClear:'none', verb:'Send notification to' },
+      notify:{ label:'Notify', plural:'Recipients', kind:'notify', domains:['notify'], colour:'#4db8ff', defaultClear:'none', verb:'Notify these' },
       script:{ label:'HA Script', plural:'HA Scripts', kind:'search', domains:['script'], colour:'#bf5af2', defaultClear:'none', verb:'Run these' },
       automation:{ label:'HA Automation', plural:'HA Automations', kind:'search', domains:['automation'], colour:'#ff9500', defaultClear:'none', verb:'Trigger these' },
     };
   }
+  function responseOffVerb(type) { if (type === 'siren') return 'Silence'; return 'Turn off'; }
   function responseActionById(scope, id) { return (ensureResponses(draft)[scope]?.actions || []).find(a => a.id === id); }
+  function binarySensorOptions() { return haEntityOptions(['binary_sensor']).map(eid => ({ entity_id:eid, label:entityLabel(eid) })); }
+  function responseActionConfigured(a) { return !!(a.enabled || a.auto_zones || (a.entities||[]).length || (a.targets||[]).length || a.title || a.message || (a.clear_mode && a.clear_mode !== 'none')); }
+  function responseActionCountText(a) { const count = (a.entities||[]).length + (a.targets||[]).length + (a.auto_zones ? 1 : 0); return count ? `${count} configured` : 'not configured'; }
+  function responseActionSummary(a) {
+    const meta = responseActionMeta()[a.type] || responseActionMeta().light;
+    const parts = [];
+    if (a.type === 'notify') parts.push(`Notify ${(a.targets||[]).length || 'selected'} recipient${(a.targets||[]).length === 1 ? '' : 's'}`);
+    else parts.push(`${meta.verb} ${a.auto_zones ? 'affected-zone ' : ''}${meta.plural.toLowerCase()}`);
+    const manual = (a.entities||[]).length;
+    if (manual) parts.push(`${manual} manual selection${manual === 1 ? '' : 's'}`);
+    parts.push(`after ${a.trigger_for || '00:00:00'}`);
+    if (a.condition_mode === 'time') parts.push(`between ${a.time_after || '00:00'} and ${a.time_before || '23:59'}`);
+    if (a.condition_mode === 'entity' && a.condition_entity) parts.push(`when ${a.condition_entity} is on`);
+    if ((a.type === 'light' || a.type === 'siren') && a.clear_mode && a.clear_mode !== 'none') parts.push(`${responseOffVerb(a.type)} after ${a.clear_for || '00:00:00'}`);
+    return parts.join(' · ');
+  }
   function addResponseAction(scope, type) {
     readResponseDraft();
     const r = ensureResponses(draft);
     const meta = responseActionMeta()[type];
-    r[scope].actions.push(normaliseResponseAction({ id:uid(), type, enabled:true, trigger_for:'00:00:00', clear_mode:meta?.defaultClear || 'none', clear_for:'00:00:00' }, type));
+    r[scope].actions.push(normaliseResponseAction({ id:uid(), type, enabled:true, trigger_for:'00:00:00', clear_mode:meta?.defaultClear || 'none', clear_for:'00:00:00', condition_mode:'always' }, type));
     renderEditorPreserveScroll();
   }
-  function removeResponseAction(scope, id) {
-    readResponseDraft();
-    const r = ensureResponses(draft);
-    r[scope].actions = (r[scope].actions || []).filter(a => a.id !== id);
-    renderEditorPreserveScroll();
-  }
-  function responseActionConfigured(a) {
-    return !!(a.enabled || a.auto_zones || (a.entities||[]).length || (a.targets||[]).length || a.title || a.message || (a.clear_mode && a.clear_mode !== 'none'));
-  }
+  function removeResponseAction(scope, id) { readResponseDraft(); const r = ensureResponses(draft); r[scope].actions = (r[scope].actions || []).filter(a => a.id !== id); renderEditorPreserveScroll(); }
   function responseActionCardHtml(scope, action, index) {
     const meta = responseActionMeta()[action.type] || responseActionMeta().light;
     const configured = responseActionConfigured(action);
     const collapsed = sessionStorage.getItem('owa_resp_step_' + action.id) === '1';
-    return `<div class="owa-response-action-card ${configured ? '' : 'disabled'}" data-response-action-card="${scope}.${action.id}" style="border-left-color:${meta.colour}">
-      <div class="owa-response-action-head"><button data-response-step-collapse="${esc(action.id)}" style="color:${meta.colour}">${collapsed ? '▶' : '▼'} ${esc(meta.label)} #${index + 1}</button><span class="owa-response-selected-count" data-response-card-count="${scope}.${action.id}">${responseActionCountText(action)}</span><button class="owa-btn" data-response-remove-action="${scope}.${action.id}">Remove</button></div>
-      ${collapsed ? '' : responseActionBodyHtml(scope, action, meta)}
-    </div>`;
-  }
-  function responseActionCountText(a) {
-    const count = (a.entities||[]).length + (a.targets||[]).length + (a.auto_zones ? 1 : 0);
-    return count ? `${count} configured` : 'not configured';
+    return `<div class="owa-response-action-card ${configured ? '' : 'disabled'}" data-response-action-card="${scope}.${action.id}" style="border-left-color:${meta.colour}"><div class="owa-response-action-head"><button data-response-step-collapse="${esc(action.id)}" style="color:${meta.colour}">${collapsed ? '▶' : '▼'} ${esc(meta.label)} #${index + 1}</button><span class="owa-response-selected-count" data-response-card-count="${scope}.${action.id}">${responseActionCountText(action)}</span><button class="owa-btn" data-response-remove-action="${scope}.${action.id}">Remove</button></div><div class="owa-muted" data-response-card-summary="${scope}.${action.id}" style="margin:${collapsed ? '0' : '-3px 0 8px'};color:#777">${esc(responseActionSummary(action))}</div>${collapsed ? '' : responseActionBodyHtml(scope, action, meta)}</div>`;
   }
   function responseActionBodyHtml(scope, action, meta) {
     const base = `${scope}.${action.id}`;
-    const targetWord = action.type === 'notify' ? 'recipients' : meta.plural;
-    let html = `<div class="owa-muted" style="margin-bottom:8px">${esc(meta.verb)} ${esc(targetWord)} when the alarm has been triggered for <b>${esc(action.trigger_for || '00:00:00')}</b>.</div>
-      <label class="owa-muted">For</label><input class="owa-input" data-response-duration="${base}.trigger_for" value="${esc(action.trigger_for || '00:00:00')}" placeholder="HH:MM:SS" pattern="\\d{2}:\\d{2}:\\d{2}" style="margin:5px 0 8px">`;
+    let html = `<div class="owa-muted" style="margin-bottom:8px">${esc(meta.verb)} ${esc(action.type === 'notify' ? 'recipients' : meta.plural.toLowerCase())} when the alarm has been triggered for <b>${esc(action.trigger_for || '00:00:00')}</b>.</div><label class="owa-muted">For</label><input class="owa-input" data-response-duration="${base}.trigger_for" value="${esc(action.trigger_for || '00:00:00')}" placeholder="HH:MM:SS" pattern="\\d{2}:\\d{2}:\\d{2}" style="margin:5px 0 8px">${responsePreconditionHtml(scope, action)}`;
     if (meta.kind === 'tree') html += responseActionOptionsHtml(scope, action, meta) + responseTreeHtml(scope, action, meta.label, meta.deviceKey, meta.domains);
     else if (meta.kind === 'notify') html += notifyResponseHtml(scope, action);
     else html += searchResponseHtml(scope, action, meta.label, meta.verb, meta.domains);
     return html;
   }
+  function responsePreconditionHtml(scope, action) {
+    const base = `${scope}.${action.id}`;
+    const mode = action.condition_mode || 'always';
+    const binOpts = binarySensorOptions();
+    return `<div class="owa-section" style="margin:0 0 8px;padding:8px"><label class="owa-muted">Only run</label><select class="owa-select" data-response-condition-mode="${base}" style="width:100%;margin:5px 0 8px"><option value="always" ${mode === 'always' ? 'selected' : ''}>Always</option><option value="time" ${mode === 'time' ? 'selected' : ''}>During time range</option><option value="entity" ${mode === 'entity' ? 'selected' : ''}>When binary sensor is on</option></select>${mode === 'time' ? `<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px"><div><label class="owa-muted">After</label><input class="owa-input" type="time" data-response-time-after="${base}" value="${esc(action.time_after || '00:00')}"></div><div><label class="owa-muted">Before</label><input class="owa-input" type="time" data-response-time-before="${base}" value="${esc(action.time_before || '23:59')}"></div></div>` : ''}${mode === 'entity' ? `<input class="owa-response-filter" data-response-filter-other="${base}.condition" placeholder="Filter binary sensors…"><div class="owa-devtree" style="max-height:150px">${binOpts.map(e => `<label class="owa-devrow" data-response-filter-label="${esc(e.label.toLowerCase())}"><span class="owa-devexp leaf"></span><input type="radio" name="resp-cond-${esc(base)}" data-response-condition-entity="${base}" value="${esc(e.entity_id)}" ${action.condition_entity === e.entity_id ? 'checked' : ''}><span class="name">${esc(e.label)}</span></label>`).join('') || `<div class="owa-response-empty">No binary sensors found.</div>`}</div>` : ''}</div>`;
+  }
   function responseActionOptionsHtml(scope, action, meta) {
     const base = `${scope}.${action.id}`;
     const clear = action.clear_mode || meta.defaultClear || 'none';
-    return `<div class="owa-section" style="margin:0 0 8px;padding:8px"><label style="display:flex;align-items:center;gap:8px"><input type="checkbox" data-response-auto-zones="${base}" ${action.auto_zones ? 'checked' : ''}> <span>Use affected alarm zones automatically</span></label><div class="owa-muted" style="margin:5px 0 8px 24px">Uses ${esc(meta.plural.toLowerCase())} from zones selected by this alarm, plus any manual selections below.</div><label class="owa-muted">Turn off / cleanup</label><select class="owa-select" data-response-clear-mode="${base}" style="width:100%;margin:5px 0 8px"><option value="none" ${clear === 'none' ? 'selected' : ''}>Do not auto turn off</option><option value="when_alarm_clears" ${clear === 'when_alarm_clears' ? 'selected' : ''}>When alarm is no longer triggered</option><option value="when_alarm_disarmed" ${clear === 'when_alarm_disarmed' ? 'selected' : ''}>When alarm is disarmed</option><option value="when_alarm_clears_or_disarmed" ${clear === 'when_alarm_clears_or_disarmed' ? 'selected' : ''}>When alarm clears or is disarmed</option></select><label class="owa-muted">Cleanup For</label><input class="owa-input" data-response-duration="${base}.clear_for" value="${esc(action.clear_for || '00:00:00')}" placeholder="HH:MM:SS" pattern="\\d{2}:\\d{2}:\\d{2}"></div>`;
+    const off = responseOffVerb(action.type);
+    return `<div class="owa-section" style="margin:0 0 8px;padding:8px"><label style="display:flex;align-items:center;gap:8px"><input type="checkbox" data-response-auto-zones="${base}" ${action.auto_zones ? 'checked' : ''}> <span>Use affected alarm zones automatically</span></label><div class="owa-muted" style="margin:5px 0 8px 24px">Uses ${esc(meta.plural.toLowerCase())} from zones selected by this alarm, plus any manual selections below.</div><label class="owa-muted">${esc(off)}</label><select class="owa-select" data-response-clear-mode="${base}" style="width:100%;margin:5px 0 8px"><option value="none" ${clear === 'none' ? 'selected' : ''}>Do not ${esc(off.toLowerCase())} automatically</option><option value="when_alarm_clears" ${clear === 'when_alarm_clears' ? 'selected' : ''}>When alarm is no longer triggered</option><option value="when_alarm_disarmed" ${clear === 'when_alarm_disarmed' ? 'selected' : ''}>When alarm is disarmed</option><option value="when_alarm_clears_or_disarmed" ${clear === 'when_alarm_clears_or_disarmed' ? 'selected' : ''}>When alarm clears or is disarmed</option></select><label class="owa-muted">${esc(off)} after</label><input class="owa-input" data-response-duration="${base}.clear_for" value="${esc(action.clear_for || '00:00:00')}" placeholder="HH:MM:SS" pattern="\\d{2}:\\d{2}:\\d{2}"></div>`;
   }
   function isDevCollapsed(key) { try { return sessionStorage.getItem('owa_dev_' + key) === '1'; } catch { return false; } }
-  function responseParentRow(nodeKey, base, label, ids, selected, pad) {
-    const all = ids.length && ids.every(id => selected.has(id));
-    const some = ids.some(id => selected.has(id));
-    return `<div class="owa-devrow" data-response-filter-label="${esc(String(label).toLowerCase())}" style="padding-left:${pad}px"><button class="owa-devexp" data-dev-collapse="${esc(nodeKey)}">${isDevCollapsed(nodeKey) ? '▶' : '▼'}</button><label><input type="checkbox" data-response-parent="${base}" data-response-ids="${esc(ids.join('|'))}" ${all ? 'checked' : ''} data-mixed="${some && !all ? 'true' : 'false'}"><span class="name"><b>${esc(label)}</b></span></label></div>`;
-  }
+  function responseParentRow(nodeKey, base, label, ids, selected, pad) { const all = ids.length && ids.every(id => selected.has(id)); const some = ids.some(id => selected.has(id)); return `<div class="owa-devrow" data-response-filter-label="${esc(String(label).toLowerCase())}" style="padding-left:${pad}px"><button class="owa-devexp" data-dev-collapse="${esc(nodeKey)}">${isDevCollapsed(nodeKey) ? '▶' : '▼'}</button><label><input type="checkbox" data-response-parent="${base}" data-response-ids="${esc(ids.join('|'))}" ${all ? 'checked' : ''} data-mixed="${some && !all ? 'true' : 'false'}"><span class="name"><b>${esc(label)}</b></span></label></div>`; }
   function responseTreeHtml(scope, action, label, deviceKey, domains) {
-    const selected = new Set(action.entities || []);
-    const base = `${scope}.${action.id}`;
-    let html = `<input class="owa-response-filter" data-response-filter="${base}" placeholder="Filter ${esc(label.toLowerCase())}…"><div class="owa-devtree" data-response-tree="${base}">`;
-    let any = false;
-    (floors().length ? floors() : [{ id:'floor_default', name:'Ground Floor' }]).forEach(f => {
-      const fZones = zonesForFloor(f.id).filter(z => responseEntityListForZone(z, deviceKey).length);
-      if (!fZones.length) return;
-      any = true;
-      const fKey = `${base}.floor.${f.id}`;
-      html += responseParentRow(fKey, base, f.name || f.id, fZones.flatMap(z => responseEntityListForZone(z, deviceKey)), selected, 0);
-      html += `<div data-dev-children="${esc(fKey)}" ${isDevCollapsed(fKey) ? 'style="display:none"' : ''}>`;
-      groupRowsForFloor(f.id).forEach(({ g, zs }) => {
-        const gZones = zs.filter(z => responseEntityListForZone(z, deviceKey).length);
-        if (!gZones.length) return;
-        const gKey = `${base}.group.${g.id}`;
-        html += responseParentRow(gKey, base, g.name || g.id, gZones.flatMap(z => responseEntityListForZone(z, deviceKey)), selected, 16);
-        html += `<div data-dev-children="${esc(gKey)}" ${isDevCollapsed(gKey) ? 'style="display:none"' : ''}>`;
-        gZones.forEach(z => html += responseZoneDeviceRows(z, deviceKey, selected, 32, base));
-        html += `</div>`;
-      });
-      ungroupedZonesForFloor(f.id).filter(z => responseEntityListForZone(z, deviceKey).length).forEach(z => html += responseZoneDeviceRows(z, deviceKey, selected, 16, base));
-      html += `</div>`;
-    });
-    if (!any) html += `<div class="owa-response-empty">No ${esc(label.toLowerCase())} configured on zones.</div>`;
-    html += `</div>`;
-    const other = responseOtherEntities(deviceKey, domains);
-    html += `<details class="owa-other-box"><summary class="owa-btn">Other ${esc(label.toLowerCase())} from HA (${other.length})</summary><input class="owa-response-filter" data-response-filter-other="${base}" placeholder="Filter other ${esc(label.toLowerCase())}…"><div style="max-height:210px;overflow:auto">${other.map(eid => `<label class="owa-devrow" data-response-filter-label="${esc(entityLabel(eid).toLowerCase())}" style="padding-left:4px"><span class="owa-devexp leaf"></span><input type="checkbox" data-response-entity-check="${base}" value="${esc(eid)}" ${selected.has(eid) ? 'checked' : ''}><span class="name">${esc(entityLabel(eid))}</span></label>`).join('') || `<div class="owa-response-empty">No matching HA entities.</div>`}</div></details>`;
-    return html;
+    const selected = new Set(action.entities || []); const base = `${scope}.${action.id}`;
+    let html = `<input class="owa-response-filter" data-response-filter="${base}" placeholder="Filter ${esc(label.toLowerCase())}…"><div class="owa-devtree" data-response-tree="${base}">`; let any = false;
+    (floors().length ? floors() : [{ id:'floor_default', name:'Ground Floor' }]).forEach(f => { const fZones = zonesForFloor(f.id).filter(z => responseEntityListForZone(z, deviceKey).length); if (!fZones.length) return; any = true; const fKey = `${base}.floor.${f.id}`; html += responseParentRow(fKey, base, f.name || f.id, fZones.flatMap(z => responseEntityListForZone(z, deviceKey)), selected, 0); html += `<div data-dev-children="${esc(fKey)}" ${isDevCollapsed(fKey) ? 'style="display:none"' : ''}>`; groupRowsForFloor(f.id).forEach(({ g, zs }) => { const gZones = zs.filter(z => responseEntityListForZone(z, deviceKey).length); if (!gZones.length) return; const gKey = `${base}.group.${g.id}`; html += responseParentRow(gKey, base, g.name || g.id, gZones.flatMap(z => responseEntityListForZone(z, deviceKey)), selected, 16); html += `<div data-dev-children="${esc(gKey)}" ${isDevCollapsed(gKey) ? 'style="display:none"' : ''}>`; gZones.forEach(z => html += responseZoneDeviceRows(z, deviceKey, selected, 32, base)); html += `</div>`; }); ungroupedZonesForFloor(f.id).filter(z => responseEntityListForZone(z, deviceKey).length).forEach(z => html += responseZoneDeviceRows(z, deviceKey, selected, 16, base)); html += `</div>`; });
+    if (!any) html += `<div class="owa-response-empty">No ${esc(label.toLowerCase())} configured on zones.</div>`; html += `</div>`;
+    const other = responseOtherEntities(deviceKey, domains); html += `<details class="owa-other-box"><summary class="owa-btn">Other ${esc(label.toLowerCase())} from HA (${other.length})</summary><input class="owa-response-filter" data-response-filter-other="${base}" placeholder="Filter other ${esc(label.toLowerCase())}…"><div style="max-height:210px;overflow:auto">${other.map(eid => `<label class="owa-devrow" data-response-filter-label="${esc(entityLabel(eid).toLowerCase())}" style="padding-left:4px"><span class="owa-devexp leaf"></span><input type="checkbox" data-response-entity-check="${base}" value="${esc(eid)}" ${selected.has(eid) ? 'checked' : ''}><span class="name">${esc(entityLabel(eid))}</span></label>`).join('') || `<div class="owa-response-empty">No matching HA entities.</div>`}</div></details>`; return html;
   }
-  function responseZoneDeviceRows(z, deviceKey, selected, pad, base) {
-    const ids = responseEntityListForZone(z, deviceKey);
-    const zKey = `${base}.zone.${z.id}`;
-    let html = responseParentRow(zKey, base, z.name || z.id, ids, selected, pad);
-    html += `<div data-dev-children="${esc(zKey)}" ${isDevCollapsed(zKey) ? 'style="display:none"' : ''}>`;
-    ids.forEach(eid => html += `<label class="owa-devrow" data-response-filter-label="${esc((entityLabel(eid)+' '+(z.name||z.id)).toLowerCase())}" style="padding-left:${pad + 18}px"><span class="owa-devexp leaf"></span><input type="checkbox" data-response-entity-check="${base}" value="${esc(eid)}" ${selected.has(eid) ? 'checked' : ''}><span class="name">${esc(entityLabel(eid))}</span></label>`);
-    return html + `</div>`;
-  }
-  function searchResponseHtml(scope, action, label, hint, domains) {
-    const base = `${scope}.${action.id}`;
-    const selected = new Set(action.entities || []);
-    const entities = haEntityOptions(domains).map(eid => ({ entity_id:eid, label:entityLabel(eid) }));
-    return `<div class="owa-muted" style="margin-bottom:7px">${esc(hint || '')}</div><input class="owa-response-filter" data-response-filter-other="${base}" placeholder="Filter ${esc(label.toLowerCase())}…"><div class="owa-devtree" data-response-selected="${base}" style="max-height:240px">${entities.map(e => `<label class="owa-devrow" data-response-filter-label="${esc(e.label.toLowerCase())}"><span class="owa-devexp leaf"></span><input type="checkbox" data-response-entity-check="${base}" value="${esc(e.entity_id)}" ${selected.has(e.entity_id) ? 'checked' : ''}><span class="name">${esc(e.label)}</span></label>`).join('') || `<div class="owa-response-empty">No ${esc(label.toLowerCase())} found.</div>`}</div>`;
-  }
-  function notifyResponseHtml(scope, action) {
-    const base = `${scope}.${action.id}`;
-    const targets = new Set(action.targets || []);
-    return `<div class="owa-muted" style="margin-bottom:7px">Search/tick multiple notify recipients, or add manual targets one per line.</div><input class="owa-response-filter" data-response-filter-other="${base}" placeholder="Filter notify targets…"><div class="owa-devtree" style="max-height:180px">${notifyTargets.map(t => `<label class="owa-devrow" data-response-filter-label="${esc(t.toLowerCase())}"><span class="owa-devexp leaf"></span><input type="checkbox" data-response-notify-target="${base}" value="${esc(t)}" ${targets.has(t) ? 'checked' : ''}><span class="name">${esc(t)}</span></label>`).join('') || `<div class="owa-response-empty">No notify services found. Manual targets still work.</div>`}</div><label class="owa-muted">Title</label><input class="owa-input" data-response-field="${base}.title" value="${esc(action.title || '')}" placeholder="HA-Overwatch - Alarm - {{ alarm_name }}" style="margin:5px 0 8px"><label class="owa-muted">Message</label><textarea class="owa-input" data-response-field="${base}.message" rows="3" placeholder="Alarm {{ alarm_name }} triggered ({{ trigger_scope }})" style="resize:vertical;min-height:58px;margin:5px 0 8px">${esc(action.message || '')}</textarea><label class="owa-muted">Manual targets</label><textarea class="owa-input" data-response-list="${base}.targets" rows="3" placeholder="notify.mobile_app_phone" style="resize:vertical;min-height:58px;margin-top:5px">${esc(arrayToLines(action.targets))}</textarea><div class="owa-muted" style="margin-top:6px">Placeholders: {{ alarm_name }}, {{ trigger_scope }}</div>`;
-  }
-  function responseSetHtml(scope, title, description, set) {
-    const actions = set.actions || [];
-    return `<div class="owa-section" data-response-scope="${scope}"><div style="font-weight:700;margin-bottom:4px">${esc(title)}</div><div class="owa-muted" style="margin-bottom:8px">${esc(description)}</div>${actions.map((a,i) => responseActionCardHtml(scope, a, i)).join('') || `<div class="owa-response-empty">No response actions yet.</div>`}<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px"><button class="owa-btn" data-response-add="${scope}.siren">+ Siren</button><button class="owa-btn" data-response-add="${scope}.light">+ Light</button><button class="owa-btn" data-response-add="${scope}.notify">+ Notify</button><button class="owa-btn" data-response-add="${scope}.script">+ HA Script</button><button class="owa-btn" data-response-add="${scope}.automation">+ HA Automation</button></div></div>`;
-  }
-  function responseProfileHtml() { const r = ensureResponses(draft); return `<h3 style="font-size:13px;margin:18px 0 6px">Response Profile</h3><div class="owa-muted" style="margin-bottom:8px">Add only the response actions you need. Each action can have its own trigger delay to create a waterfall response.</div>${responseSetHtml('triggered_armed', 'Triggered Armed', 'Actions while the alarm is armed.', r.triggered_armed)}${responseSetHtml('triggered_disarmed', 'Triggered Disarmed', 'Actions while the alarm is disarmed.', r.triggered_disarmed)}`; }
+  function responseZoneDeviceRows(z, deviceKey, selected, pad, base) { const ids = responseEntityListForZone(z, deviceKey); const zKey = `${base}.zone.${z.id}`; let html = responseParentRow(zKey, base, z.name || z.id, ids, selected, pad); html += `<div data-dev-children="${esc(zKey)}" ${isDevCollapsed(zKey) ? 'style="display:none"' : ''}>`; ids.forEach(eid => html += `<label class="owa-devrow" data-response-filter-label="${esc((entityLabel(eid)+' '+(z.name||z.id)).toLowerCase())}" style="padding-left:${pad + 18}px"><span class="owa-devexp leaf"></span><input type="checkbox" data-response-entity-check="${base}" value="${esc(eid)}" ${selected.has(eid) ? 'checked' : ''}><span class="name">${esc(entityLabel(eid))}</span></label>`); return html + `</div>`; }
+  function searchResponseHtml(scope, action, label, hint, domains) { const base = `${scope}.${action.id}`; const selected = new Set(action.entities || []); const entities = haEntityOptions(domains).map(eid => ({ entity_id:eid, label:entityLabel(eid) })); return `<div class="owa-muted" style="margin-bottom:7px">${esc(hint || '')}</div><input class="owa-response-filter" data-response-filter-other="${base}" placeholder="Filter ${esc(label.toLowerCase())}…"><div class="owa-devtree" data-response-selected="${base}" style="max-height:240px">${entities.map(e => `<label class="owa-devrow" data-response-filter-label="${esc(e.label.toLowerCase())}"><span class="owa-devexp leaf"></span><input type="checkbox" data-response-entity-check="${base}" value="${esc(e.entity_id)}" ${selected.has(e.entity_id) ? 'checked' : ''}><span class="name">${esc(e.label)}</span></label>`).join('') || `<div class="owa-response-empty">No ${esc(label.toLowerCase())} found.</div>`}</div>`; }
+  function notifyResponseHtml(scope, action) { const base = `${scope}.${action.id}`; const targets = new Set(action.targets || []); return `<div class="owa-muted" style="margin-bottom:7px">Search/tick multiple notify recipients, or add manual targets one per line.</div><input class="owa-response-filter" data-response-filter-other="${base}" placeholder="Filter notify targets…"><div class="owa-devtree" style="max-height:180px">${notifyTargets.map(t => `<label class="owa-devrow" data-response-filter-label="${esc(t.toLowerCase())}"><span class="owa-devexp leaf"></span><input type="checkbox" data-response-notify-target="${base}" value="${esc(t)}" ${targets.has(t) ? 'checked' : ''}><span class="name">${esc(t)}</span></label>`).join('') || `<div class="owa-response-empty">No notify services found. Manual targets still work.</div>`}</div><label class="owa-muted">Title</label><input class="owa-input" data-response-field="${base}.title" value="${esc(action.title || '')}" placeholder="HA-Overwatch - Alarm - {{ alarm_name }}" style="margin:5px 0 8px"><label class="owa-muted">Message</label><textarea class="owa-input" data-response-field="${base}.message" rows="3" placeholder="Alarm {{ alarm_name }} triggered ({{ trigger_scope }})" style="resize:vertical;min-height:58px;margin:5px 0 8px">${esc(action.message || '')}</textarea><label class="owa-muted">Manual targets</label><textarea class="owa-input" data-response-list="${base}.targets" rows="3" placeholder="notify.mobile_app_phone" style="resize:vertical;min-height:58px;margin-top:5px">${esc(arrayToLines(action.targets))}</textarea><div class="owa-muted" style="margin-top:6px">Placeholders: {{ alarm_name }}, {{ trigger_scope }}</div>`; }
+  function responseSetHtml(scope, title, description, set) { const actions = set.actions || []; return `<div class="owa-section" data-response-scope="${scope}"><div style="font-weight:700;margin-bottom:4px">${esc(title)}</div><div class="owa-muted" style="margin-bottom:8px">${esc(description)}</div>${actions.map((a,i) => responseActionCardHtml(scope, a, i)).join('') || `<div class="owa-response-empty">No response actions yet.</div>`}<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px"><button class="owa-btn" data-response-add="${scope}.siren">+ Siren</button><button class="owa-btn" data-response-add="${scope}.light">+ Light</button><button class="owa-btn" data-response-add="${scope}.notify">+ Notify</button><button class="owa-btn" data-response-add="${scope}.script">+ HA Script</button><button class="owa-btn" data-response-add="${scope}.automation">+ HA Automation</button></div></div>`; }
+  function responseProfileHtml() { const r = ensureResponses(draft); return `<h3 style="font-size:13px;margin:18px 0 6px">Response Profile</h3><div class="owa-muted" style="margin-bottom:8px">Add only the response actions you need. Each action can have its own trigger delay, precondition, and response-specific reset behaviour.</div>${responseSetHtml('shared', 'Triggered Armed & Disarmed', 'Actions that run for both armed and disarmed trigger states.', r.shared)}${responseSetHtml('triggered_armed', 'Triggered Armed Only', 'Actions that only run while the alarm is armed.', r.triggered_armed)}${responseSetHtml('triggered_disarmed', 'Triggered Disarmed Only', 'Actions that only run while the alarm is disarmed.', r.triggered_disarmed)}`; }
   function renderEditorPreserveScroll() { const body = panel?.querySelector('#owaEditorBody'); const top = body ? body.scrollTop : 0; renderEditor(); requestAnimationFrame(() => { const next = panel?.querySelector('#owaEditorBody'); if (next) next.scrollTop = top; }); }
   function wireResponseControls() {
     panel.querySelectorAll('[data-response-add]').forEach(btn => btn.onclick = () => { const [scope,type] = btn.dataset.responseAdd.split('.'); addResponseAction(scope,type); });
@@ -598,28 +563,17 @@ document.head.appendChild(s);
     panel.querySelectorAll('[data-response-parent]').forEach(cb => { cb.indeterminate = cb.dataset.mixed === 'true'; cb.onchange = () => { const key = cb.dataset.responseParent; const ids = (cb.dataset.responseIds || '').split('|').filter(Boolean); ids.forEach(id => panel.querySelectorAll(`[data-response-entity-check="${CSS.escape(key)}"][value="${CSS.escape(id)}"]`).forEach(child => child.checked = cb.checked)); updateResponseParentStates(key); readResponseDraft(); updateResponseCardState(key); }; });
     panel.querySelectorAll('[data-response-entity-check]').forEach(cb => cb.onchange = () => { updateResponseParentStates(cb.dataset.responseEntityCheck); readResponseDraft(); updateResponseCardState(cb.dataset.responseEntityCheck); });
     panel.querySelectorAll('[data-response-notify-target]').forEach(cb => cb.onchange = () => { readResponseDraft(); updateResponseCardState(cb.dataset.responseNotifyTarget); });
-    panel.querySelectorAll('[data-response-list],[data-response-field],[data-response-auto-zones],[data-response-clear-mode],[data-response-duration]').forEach(el => el.oninput = el.onchange = () => { readResponseDraft(); const key = el.dataset.responseList || el.dataset.responseField || el.dataset.responseAutoZones || el.dataset.responseClearMode || el.dataset.responseDuration; updateResponseCardState(key?.split('.').slice(0,2).join('.')); });
+    panel.querySelectorAll('[data-response-list],[data-response-field],[data-response-auto-zones],[data-response-clear-mode],[data-response-duration],[data-response-condition-mode],[data-response-time-after],[data-response-time-before],[data-response-condition-entity]').forEach(el => el.oninput = el.onchange = () => { readResponseDraft(); const key = el.dataset.responseList || el.dataset.responseField || el.dataset.responseAutoZones || el.dataset.responseClearMode || el.dataset.responseDuration || el.dataset.responseConditionMode || el.dataset.responseTimeAfter || el.dataset.responseTimeBefore || el.dataset.responseConditionEntity; updateResponseCardState(key?.split('.').slice(0,2).join('.')); if (el.dataset.responseConditionMode) renderEditorPreserveScroll(); });
     panel.querySelectorAll('[data-response-filter],[data-response-filter-other]').forEach(inp => { inp.oninput = () => { const q = inp.value.toLowerCase().trim(); const root = inp.nextElementSibling || inp.parentElement; root.querySelectorAll('[data-response-filter-label]').forEach(row => row.style.display = !q || row.dataset.responseFilterLabel.includes(q) ? '' : 'none'); }; inp.onkeydown = e => e.stopPropagation(); });
   }
-  function updateResponseCardState(base) {
-    if (!base) return;
-    const [scope,id] = base.split('.');
-    const a = responseActionById(scope,id);
-    const card = panel.querySelector(`[data-response-action-card="${CSS.escape(scope)}.${CSS.escape(id)}"]`);
-    if (!a || !card) return;
-    const configured = responseActionConfigured(a);
-    card.classList.toggle('disabled', !configured);
-    const count = card.querySelector(`[data-response-card-count="${CSS.escape(scope)}.${CSS.escape(id)}"]`);
-    if (count) count.textContent = responseActionCountText(a);
-  }
+  function updateResponseCardState(base) { if (!base) return; const [scope,id] = base.split('.'); const a = responseActionById(scope,id); const card = panel.querySelector(`[data-response-action-card="${CSS.escape(scope)}.${CSS.escape(id)}"]`); if (!a || !card) return; const configured = responseActionConfigured(a); card.classList.toggle('disabled', !configured); const count = card.querySelector(`[data-response-card-count="${CSS.escape(scope)}.${CSS.escape(id)}"]`); if (count) count.textContent = responseActionCountText(a); const summary = card.querySelector(`[data-response-card-summary="${CSS.escape(scope)}.${CSS.escape(id)}"]`); if (summary) summary.textContent = responseActionSummary(a); }
   function updateResponseParentStates(key) { if (!key) return; panel.querySelectorAll(`[data-response-parent="${CSS.escape(key)}"]`).forEach(parent => { const ids = (parent.dataset.responseIds || '').split('|').filter(Boolean); const checks = ids.flatMap(id => Array.from(panel.querySelectorAll(`[data-response-entity-check="${CSS.escape(key)}"][value="${CSS.escape(id)}"]`))); const total = checks.length; const checked = checks.filter(c => c.checked).length; parent.indeterminate = checked > 0 && checked < total; parent.checked = total > 0 && checked === total; }); }
   function readResponseDraft() {
     const r = ensureResponses(draft);
-    ['triggered_armed','triggered_disarmed'].forEach(scope => {
+    ['shared','triggered_armed','triggered_disarmed'].forEach(scope => {
       r[scope].actions = (r[scope].actions || []).map(action => {
         const a = normaliseResponseAction(action, action.type);
         const base = `${scope}.${a.id}`;
-        panel.querySelectorAll(`[data-response-entity-check="${CSS.escape(base)}"]`).forEach(() => {});
         if (panel.querySelector(`[data-response-entity-check="${CSS.escape(base)}"]`)) a.entities = [...new Set(Array.from(panel.querySelectorAll(`[data-response-entity-check="${CSS.escape(base)}"]:checked`)).map(el => el.value).filter(Boolean))];
         const notifyChecks = panel.querySelectorAll(`[data-response-notify-target="${CSS.escape(base)}"]:checked`);
         if (notifyChecks.length || panel.querySelector(`[data-response-notify-target="${CSS.escape(base)}"]`)) a.targets = [...new Set([...Array.from(notifyChecks).map(el => el.value), ...linesToArray(panel.querySelector(`[data-response-list="${CSS.escape(base)}.targets"]`)?.value || '')])];
@@ -629,6 +583,10 @@ document.head.appendChild(s);
         const cm = panel.querySelector(`[data-response-clear-mode="${CSS.escape(base)}"]`); if (cm) a.clear_mode = String(cm.value || 'none');
         const tf = panel.querySelector(`[data-response-duration="${CSS.escape(base)}.trigger_for"]`); if (tf) a.trigger_for = normaliseDuration(tf.value, '00:00:00');
         const cf = panel.querySelector(`[data-response-duration="${CSS.escape(base)}.clear_for"]`); if (cf) a.clear_for = normaliseDuration(cf.value, '00:00:00');
+        const mode = panel.querySelector(`[data-response-condition-mode="${CSS.escape(base)}"]`); if (mode) a.condition_mode = String(mode.value || 'always');
+        const ta = panel.querySelector(`[data-response-time-after="${CSS.escape(base)}"]`); if (ta) a.time_after = String(ta.value || '00:00');
+        const tb = panel.querySelector(`[data-response-time-before="${CSS.escape(base)}"]`); if (tb) a.time_before = String(tb.value || '23:59');
+        const ce = panel.querySelector(`[data-response-condition-entity="${CSS.escape(base)}"]:checked`); if (ce) a.condition_entity = String(ce.value || '');
         a.enabled = responseActionConfigured(a);
         return a;
       });
