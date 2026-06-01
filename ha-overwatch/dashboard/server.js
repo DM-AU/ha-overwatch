@@ -1,4 +1,4 @@
-// HA-Overwatch 0.05.29-response-scope-lifecycle: auto-zone alarm responses, ghost filtering, notify target/title/message support, and cleanup automations; preserves orphan cleanup.
+// HA-Overwatch 0.05.30-modular-response-actions: modular alarm response action blocks, per-action trigger delay, no camera response blocks, cleanup delay support; preserves orphan cleanup.
 /* ============================================================
  * HA-Overwatch — server.js
  *
@@ -3376,7 +3376,7 @@ function sendWsFrame(sock, text) {
 
 /* ── Managed alarm response automations (0.05.22) ────────────── */
 const ALARM_RESPONSE_SCOPES = ["triggered_armed", "triggered_disarmed"];
-const ALARM_RESPONSE_ACTION_KEYS = ["notify", "lights", "cameras", "scripts", "automations", "sirens"];
+const ALARM_RESPONSE_ACTION_KEYS = ["notify", "lights", "scripts", "automations", "sirens"];
 
 function _cleanList(value) {
   return (Array.isArray(value) ? value : [])
@@ -3385,21 +3385,64 @@ function _cleanList(value) {
     .filter(Boolean);
 }
 
-function alarmResponseAction(action) {
+function _duration(value, fallback = "00:00:00") {
+  const s = String(value || "").trim();
+  const m = s.match(/^(\d{1,2}):(\d{1,2}):(\d{1,2})$/);
+  if (!m) return fallback;
+  return [m[1], m[2], m[3]].map(v => String(Math.max(0, parseInt(v, 10) || 0)).padStart(2, "0")).join(":");
+}
+
+function _durationSeconds(value) {
+  const [h,m,s] = _duration(value).split(":").map(v => parseInt(v, 10) || 0);
+  return h * 3600 + m * 60 + s;
+}
+
+function _durationForHA(value) {
+  const d = _duration(value);
+  return d === "00:00:00" ? null : d;
+}
+
+function alarmResponseAction(action, fallbackType = "light") {
   const a = (action && typeof action === "object") ? action : {};
   const entities = _cleanList(a.entities);
   const targets  = _cleanList(a.targets);
-  // Enabled is inferred from selection to avoid silent 'no automation' when UI doesn't expose enable toggles.
-  const enabled = !!a.enabled || entities.length > 0 || targets.length > 0;
-  return { enabled, entities, targets, title: String(a.title || ''), message: String(a.message || ''), auto_zones: !!a.auto_zones, clear_mode: String(a.clear_mode || 'none') };
+  const type = String(a.type || a.kind || fallbackType || "light");
+  const enabled = !!a.enabled || !!a.auto_zones || entities.length > 0 || targets.length > 0 || !!a.title || !!a.message || (a.clear_mode && a.clear_mode !== "none");
+  return {
+    id: String(a.id || `resp_${Math.random().toString(36).slice(2,9)}`),
+    type,
+    enabled,
+    entities,
+    targets,
+    title: String(a.title || ''),
+    message: String(a.message || ''),
+    auto_zones: !!a.auto_zones,
+    trigger_for: _duration(a.trigger_for || a.for_duration || "00:00:00"),
+    clear_mode: String(a.clear_mode || "none"),
+    clear_for: _duration(a.clear_for || "00:00:00"),
+  };
+}
+
+function _legacyResponseActions(raw) {
+  const out = [];
+  const add = (key, type) => {
+    if (!raw?.[key]) return;
+    const a = alarmResponseAction(raw[key], type);
+    if (a.enabled) out.push(a);
+  };
+  add("notify", "notify");
+  add("sirens", "siren");
+  add("lights", "light");
+  add("scripts", "script");
+  add("automations", "automation");
+  return out;
 }
 
 function alarmResponseSet(alarm, scope) {
   const responses = (alarm?.responses && typeof alarm.responses === "object") ? alarm.responses : {};
   const raw = (responses[scope] && typeof responses[scope] === "object") ? responses[scope] : {};
-  const out = {};
-  ALARM_RESPONSE_ACTION_KEYS.forEach(k => { out[k] = alarmResponseAction(raw[k]); });
-  return out;
+  const actions = Array.isArray(raw.actions) ? raw.actions.map(a => alarmResponseAction(a, a?.type || "light")) : _legacyResponseActions(raw);
+  return { actions };
 }
 
 function alarmResponseAutomationId(alarm, scope) {
@@ -3473,115 +3516,89 @@ function alarmCleanupAutomationId(alarm, scope) {
   return `ow_alarm_${slug}_${scope}_cleanup_response`;
 }
 
-function _alarmCleanupTriggers(alarm, scope, clearMode) {
-  const triggers = [];
-  const mode = clearMode || "none";
-  if (mode === "when_alarm_clears" || mode === "when_alarm_clears_or_disarmed") {
-    triggers.push({ trigger: "state", entity_id: alarmTriggerBinaryEntity(alarm, scope), from: "on", to: "off" });
-  }
-  if (mode === "when_alarm_disarmed" || mode === "when_alarm_clears_or_disarmed") {
-    triggers.push({ trigger: "state", entity_id: alarmSwitchEntityIds(alarm)[0], to: "off" });
-  }
-  return triggers.filter(t => t.entity_id);
+function _responseActionTargets(alarm, action) {
+  if (action.type === "light") return resolveAlarmResponseEntities(alarm, "lights", action);
+  if (action.type === "siren") return resolveAlarmResponseEntities(alarm, "sirens", action);
+  if (action.type === "script") return _cleanList(action.entities);
+  if (action.type === "automation") return _cleanList(action.entities);
+  return _cleanList(action.entities);
 }
 
-function _buildAlarmCleanupActions(alarm, scope) {
-  const set = alarmResponseSet(alarm, scope);
-  const actions = [];
-  const addCleanup = (responseKey, fallbackDomain, transform = x => x) => {
-    const action = set[responseKey];
-    if (!action || !action.clear_mode || action.clear_mode === "none") return;
-    const ids = resolveAlarmResponseEntities(alarm, responseKey, action).map(transform).filter(Boolean);
-    if (ids.length) _pushDomainServiceActions(actions, ids, fallbackDomain, "turn_off");
-  };
-  addCleanup("lights", "light");
-  addCleanup("sirens", "siren");
-  addCleanup("cameras", "switch", _cameraToOverwatchSwitch);
-  return actions;
+function _serviceSequenceForResponseAction(alarm, scope, action) {
+  const alarmName = alarm?.name || alarm?.id || "Alarm";
+  const seq = [];
+  if (action.type === "notify") {
+    const targets = action.targets.length ? action.targets : ["notify.notify"];
+    targets.forEach(target => {
+      const svc = String(target || "notify.notify").startsWith("notify.") ? String(target).slice("notify.".length) : String(target || "notify");
+      const title = (action.title || `HA-Overwatch - Alarm - ${alarmName}`).replace(/\{\{\s*alarm_name\s*\}\}/g, alarmName).replace(/\{\{\s*trigger_scope\s*\}\}/g, scope);
+      const message = (action.message || (scope === "triggered_armed" ? `Alarm ${alarmName} triggered while armed.` : `Alarm ${alarmName} triggered while disarmed.`)).replace(/\{\{\s*alarm_name\s*\}\}/g, alarmName).replace(/\{\{\s*trigger_scope\s*\}\}/g, scope);
+      seq.push({ action: `notify.${svc}`, data: { title, message } });
+    });
+  } else if (action.type === "light") {
+    _pushDomainServiceActions(seq, _responseActionTargets(alarm, action), "light", "turn_on");
+  } else if (action.type === "siren") {
+    _pushDomainServiceActions(seq, _responseActionTargets(alarm, action), "siren", "turn_on");
+  } else if (action.type === "script") {
+    _pushDomainServiceActions(seq, _responseActionTargets(alarm, action), "script", "turn_on");
+  } else if (action.type === "automation") {
+    const ids = _responseActionTargets(alarm, action);
+    if (ids.length) seq.push({ action: "automation.trigger", target: { entity_id: _asTargetValue(ids) }, data: { skip_condition: true } });
+  }
+  return seq;
+}
+
+function _cleanupSequenceForResponseAction(alarm, action) {
+  const seq = [];
+  if (!action.clear_mode || action.clear_mode === "none") return seq;
+  if (action.type === "light") _pushDomainServiceActions(seq, _responseActionTargets(alarm, action), "light", "turn_off");
+  if (action.type === "siren") _pushDomainServiceActions(seq, _responseActionTargets(alarm, action), "siren", "turn_off");
+  return seq;
+}
+
+function _triggerWithFor(entity_id, fields = {}, duration = "00:00:00") {
+  const t = { trigger: "state", entity_id, ...fields };
+  const f = _durationForHA(duration);
+  if (f) t.for = f;
+  return t;
 }
 
 function buildAlarmCleanupAutomation(alarm, scope) {
   const set = alarmResponseSet(alarm, scope);
-  const cleanupModes = [set.lights?.clear_mode, set.sirens?.clear_mode, set.cameras?.clear_mode].filter(m => m && m !== "none");
-  if (!cleanupModes.length) return null;
-  const triggerMode = cleanupModes.includes("when_alarm_clears_or_disarmed") ? "when_alarm_clears_or_disarmed" : (cleanupModes.includes("when_alarm_disarmed") ? "when_alarm_disarmed" : "when_alarm_clears");
-  const triggers = _alarmCleanupTriggers(alarm, scope, triggerMode);
-  const actions = _buildAlarmCleanupActions(alarm, scope);
-  if (!triggers.length || !actions.length) return null;
+  const triggerEntity = alarmTriggerBinaryEntity(alarm, scope);
+  const alarmSwitch = alarmSwitchEntityIds(alarm)[0];
+  const candidates = (set.actions || []).filter(a => a.enabled && a.clear_mode && a.clear_mode !== "none" && _cleanupSequenceForResponseAction(alarm, a).length);
+  if (!candidates.length) return null;
+  const triggers = [];
+  const choices = [];
+  candidates.forEach((a, idx) => {
+    const idBase = `cleanup_${a.id || idx}`;
+    if (a.clear_mode === "when_alarm_clears" || a.clear_mode === "when_alarm_clears_or_disarmed") triggers.push({ ..._triggerWithFor(triggerEntity, { from:"on", to:"off" }, a.clear_for), id: `${idBase}_clear` });
+    if ((a.clear_mode === "when_alarm_disarmed" || a.clear_mode === "when_alarm_clears_or_disarmed") && alarmSwitch) triggers.push({ ..._triggerWithFor(alarmSwitch, { to:"off" }, a.clear_for), id: `${idBase}_disarm` });
+    choices.push({ conditions: [{ condition: "trigger", id: [`${idBase}_clear`, `${idBase}_disarm`] }], sequence: _cleanupSequenceForResponseAction(alarm, a) });
+  });
+  if (!triggers.length || !choices.length) return null;
   const autoId = alarmCleanupAutomationId(alarm, scope);
   const alarmName = alarm?.name || alarm?.id || "Alarm";
-  return {
-    id: autoId,
-    alias: `HA-Overwatch - Alarm - ${alarmName} - ${scope === "triggered_armed" ? "Triggered Armed" : "Triggered Disarmed"} Response Cleanup`,
-    description: "Managed by HA-Overwatch alarm response cleanup profile",
-    variables: {
-      ow_id: autoId,
-      ow_name: `Alarm ${alarmName} ${scope} response cleanup`,
-      ow_managed: true,
-      ow_type: "alarm_response",
-      ow_alarm_id: alarm?.id || null,
-      ow_alarm_name: alarmName,
-      ow_trigger_scope: scope,
-      ow_cleanup: true,
-    },
-    mode: "single",
-    triggers,
-    conditions: [],
-    actions,
-  };
+  return { id:autoId, alias:`HA-Overwatch - Alarm - ${alarmName} - ${scope === "triggered_armed" ? "Triggered Armed" : "Triggered Disarmed"} Response Cleanup`, description:"Managed by HA-Overwatch alarm response cleanup profile", variables:{ ow_id:autoId, ow_name:`Alarm ${alarmName} ${scope} response cleanup`, ow_managed:true, ow_type:"alarm_response", ow_alarm_id:alarm?.id || null, ow_alarm_name:alarmName, ow_trigger_scope:scope, ow_cleanup:true }, mode:"parallel", triggers, conditions:[], actions:[{ choose: choices }] };
 }
 
 function buildAlarmResponseActions(alarm, scope) {
   const set = alarmResponseSet(alarm, scope);
-  const actions = [];
-  const alarmName = alarm?.name || alarm?.id || "Alarm";
-
-  if (set.notify.enabled) {
-    const targets = set.notify.targets.length ? set.notify.targets : ["notify.notify"];
-    targets.forEach(target => {
-      const svc = String(target || "notify.notify").startsWith("notify.")
-        ? String(target).slice("notify.".length)
-        : String(target || "notify");
-      const title = (set.notify.title || `HA-Overwatch - Alarm - ${alarmName}`)
-        .replace(/\{\{\s*alarm_name\s*\}\}/g, alarmName)
-        .replace(/\{\{\s*trigger_scope\s*\}\}/g, scope);
-      const message = (set.notify.message || (scope === "triggered_armed" ? `Alarm ${alarmName} triggered while armed.` : `Alarm ${alarmName} triggered while disarmed.`))
-        .replace(/\{\{\s*alarm_name\s*\}\}/g, alarmName)
-        .replace(/\{\{\s*trigger_scope\s*\}\}/g, scope);
-      actions.push({ action: `notify.${svc}`, data: { title, message } });
-    });
-  }
-
-  if (set.lights.enabled) {
-    _pushDomainServiceActions(actions, resolveAlarmResponseEntities(alarm, "lights", set.lights), "light", "turn_on");
-  }
-
-  if (set.cameras.enabled) {
-    const switches = resolveAlarmResponseEntities(alarm, "cameras", set.cameras).map(_cameraToOverwatchSwitch).filter(Boolean);
-    _pushDomainServiceActions(actions, switches, "switch", "turn_on");
-  }
-
-  if (set.scripts.enabled) {
-    _pushDomainServiceActions(actions, set.scripts.entities, "script", "turn_on");
-  }
-
-  if (set.automations.enabled) {
-    const ids = _cleanList(set.automations.entities);
-    if (ids.length) actions.push({ action: "automation.trigger", target: { entity_id: _asTargetValue(ids) }, data: {} });
-  }
-
-  if (set.sirens.enabled) {
-    _pushDomainServiceActions(actions, resolveAlarmResponseEntities(alarm, "sirens", set.sirens), "siren", "turn_on");
-  }
-
-  return actions;
+  return (set.actions || [])
+    .filter(a => a.enabled)
+    .map(a => ({ action: a, sequence: _serviceSequenceForResponseAction(alarm, scope, a) }))
+    .filter(x => x.sequence.length);
 }
 
 function buildAlarmResponseAutomation(alarm, scope) {
   const autoId = alarmResponseAutomationId(alarm, scope);
   const alarmName = alarm?.name || alarm?.id || "Alarm";
-  const actions = buildAlarmResponseActions(alarm, scope);
-  if (!actions.length) return null;
+  const triggerEntity = alarmTriggerBinaryEntity(alarm, scope);
+  const responseSteps = buildAlarmResponseActions(alarm, scope);
+  if (!responseSteps.length) return null;
+  const triggers = responseSteps.map((step, idx) => ({ ..._triggerWithFor(triggerEntity, { to:"on" }, step.action.trigger_for), id: `response_${step.action.id || idx}` }));
+  const choices = responseSteps.map((step, idx) => ({ conditions: [{ condition:"trigger", id:`response_${step.action.id || idx}` }], sequence: step.sequence }));
   return {
     id: autoId,
     alias: `HA-Overwatch - Alarm - ${alarmName} - ${scope === "triggered_armed" ? "Triggered Armed" : "Triggered Disarmed"} Response`,
@@ -3595,10 +3612,10 @@ function buildAlarmResponseAutomation(alarm, scope) {
       ow_alarm_name: alarmName,
       ow_trigger_scope: scope,
     },
-    mode: "single",
-    triggers: [{ trigger: "state", entity_id: alarmTriggerBinaryEntity(alarm, scope), to: "on" }],
+    mode: "parallel",
+    triggers,
     conditions: [],
-    actions,
+    actions: [{ choose: choices }],
   };
 }
 
