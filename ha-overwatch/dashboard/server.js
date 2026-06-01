@@ -1,4 +1,4 @@
-// HA-Overwatch 0.05.28-notify-response-options: alarm response notify title/message support; keep orphan cleanup and entity cleanup; no cascade changes.
+// HA-Overwatch 0.05.29-response-scope-lifecycle: auto-zone alarm responses, ghost filtering, notify target/title/message support, and cleanup automations; preserves orphan cleanup.
 /* ============================================================
  * HA-Overwatch — server.js
  *
@@ -3391,7 +3391,7 @@ function alarmResponseAction(action) {
   const targets  = _cleanList(a.targets);
   // Enabled is inferred from selection to avoid silent 'no automation' when UI doesn't expose enable toggles.
   const enabled = !!a.enabled || entities.length > 0 || targets.length > 0;
-  return { enabled, entities, targets, title: String(a.title || ''), message: String(a.message || '') };
+  return { enabled, entities, targets, title: String(a.title || ''), message: String(a.message || ''), auto_zones: !!a.auto_zones, clear_mode: String(a.clear_mode || 'none') };
 }
 
 function alarmResponseSet(alarm, scope) {
@@ -3439,6 +3439,98 @@ function _cameraToOverwatchSwitch(entityId) {
   return `switch.overwatch_camera_${bare}`;
 }
 
+
+function _serverEntityHidden(entityId) {
+  const id = String(entityId || "");
+  if (!id) return true;
+  const st = serverHaStates[id];
+  if (st?.attributes?.hidden_by || st?.attributes?.disabled_by) return true;
+  try {
+    const reg = (haRegistry.entities || []).find(e => e.entity_id === id || e.id === id);
+    if (reg?.hidden_by || reg?.disabled_by) return true;
+  } catch {}
+  return false;
+}
+
+function _zoneResponseEntities(zone, key) {
+  const hidden = new Set((zone?.ha_excluded_entities || zone?.hidden_entities || zone?.excluded_entities || []).map(String));
+  return _cleanList(zone?.[key] || []).filter(entityId => !hidden.has(String(entityId))).filter(entityId => !_serverEntityHidden(entityId));
+}
+
+function resolveAlarmResponseEntities(alarm, responseKey, action) {
+  const manual = _cleanList(action?.entities || []);
+  if (!action?.auto_zones) return [...new Set(manual)].filter(entityId => !_serverEntityHidden(entityId));
+  const zones = loadZones();
+  const groups = loadGroups();
+  const floors = loadFloors();
+  const selectedZones = alarmSelectedZones(alarm, zones, groups, floors);
+  const fromZones = selectedZones.flatMap(zone => _zoneResponseEntities(zone, responseKey));
+  return [...new Set([...fromZones, ...manual])].filter(entityId => !_serverEntityHidden(entityId));
+}
+
+function alarmCleanupAutomationId(alarm, scope) {
+  const slug = nameSlug(alarm?.name) || alarm?.id || "alarm";
+  return `ow_alarm_${slug}_${scope}_cleanup_response`;
+}
+
+function _alarmCleanupTriggers(alarm, scope, clearMode) {
+  const triggers = [];
+  const mode = clearMode || "none";
+  if (mode === "when_alarm_clears" || mode === "when_alarm_clears_or_disarmed") {
+    triggers.push({ trigger: "state", entity_id: alarmTriggerBinaryEntity(alarm, scope), from: "on", to: "off" });
+  }
+  if (mode === "when_alarm_disarmed" || mode === "when_alarm_clears_or_disarmed") {
+    triggers.push({ trigger: "state", entity_id: alarmSwitchEntityIds(alarm)[0], to: "off" });
+  }
+  return triggers.filter(t => t.entity_id);
+}
+
+function _buildAlarmCleanupActions(alarm, scope) {
+  const set = alarmResponseSet(alarm, scope);
+  const actions = [];
+  const addCleanup = (responseKey, fallbackDomain, transform = x => x) => {
+    const action = set[responseKey];
+    if (!action || !action.clear_mode || action.clear_mode === "none") return;
+    const ids = resolveAlarmResponseEntities(alarm, responseKey, action).map(transform).filter(Boolean);
+    if (ids.length) _pushDomainServiceActions(actions, ids, fallbackDomain, "turn_off");
+  };
+  addCleanup("lights", "light");
+  addCleanup("sirens", "siren");
+  addCleanup("cameras", "switch", _cameraToOverwatchSwitch);
+  return actions;
+}
+
+function buildAlarmCleanupAutomation(alarm, scope) {
+  const set = alarmResponseSet(alarm, scope);
+  const cleanupModes = [set.lights?.clear_mode, set.sirens?.clear_mode, set.cameras?.clear_mode].filter(m => m && m !== "none");
+  if (!cleanupModes.length) return null;
+  const triggerMode = cleanupModes.includes("when_alarm_clears_or_disarmed") ? "when_alarm_clears_or_disarmed" : (cleanupModes.includes("when_alarm_disarmed") ? "when_alarm_disarmed" : "when_alarm_clears");
+  const triggers = _alarmCleanupTriggers(alarm, scope, triggerMode);
+  const actions = _buildAlarmCleanupActions(alarm, scope);
+  if (!triggers.length || !actions.length) return null;
+  const autoId = alarmCleanupAutomationId(alarm, scope);
+  const alarmName = alarm?.name || alarm?.id || "Alarm";
+  return {
+    id: autoId,
+    alias: `HA-Overwatch - Alarm - ${alarmName} - ${scope === "triggered_armed" ? "Triggered Armed" : "Triggered Disarmed"} Response Cleanup`,
+    description: "Managed by HA-Overwatch alarm response cleanup profile",
+    variables: {
+      ow_id: autoId,
+      ow_name: `Alarm ${alarmName} ${scope} response cleanup`,
+      ow_managed: true,
+      ow_type: "alarm_response",
+      ow_alarm_id: alarm?.id || null,
+      ow_alarm_name: alarmName,
+      ow_trigger_scope: scope,
+      ow_cleanup: true,
+    },
+    mode: "single",
+    triggers,
+    conditions: [],
+    actions,
+  };
+}
+
 function buildAlarmResponseActions(alarm, scope) {
   const set = alarmResponseSet(alarm, scope);
   const actions = [];
@@ -3456,19 +3548,16 @@ function buildAlarmResponseActions(alarm, scope) {
       const message = (set.notify.message || (scope === "triggered_armed" ? `Alarm ${alarmName} triggered while armed.` : `Alarm ${alarmName} triggered while disarmed.`))
         .replace(/\{\{\s*alarm_name\s*\}\}/g, alarmName)
         .replace(/\{\{\s*trigger_scope\s*\}\}/g, scope);
-      actions.push({
-        action: `notify.${svc}`,
-        data: { title, message },
-      });
+      actions.push({ action: `notify.${svc}`, data: { title, message } });
     });
   }
 
   if (set.lights.enabled) {
-    _pushDomainServiceActions(actions, set.lights.entities, "light", "turn_on");
+    _pushDomainServiceActions(actions, resolveAlarmResponseEntities(alarm, "lights", set.lights), "light", "turn_on");
   }
 
   if (set.cameras.enabled) {
-    const switches = set.cameras.entities.map(_cameraToOverwatchSwitch).filter(Boolean);
+    const switches = resolveAlarmResponseEntities(alarm, "cameras", set.cameras).map(_cameraToOverwatchSwitch).filter(Boolean);
     _pushDomainServiceActions(actions, switches, "switch", "turn_on");
   }
 
@@ -3478,11 +3567,11 @@ function buildAlarmResponseActions(alarm, scope) {
 
   if (set.automations.enabled) {
     const ids = _cleanList(set.automations.entities);
-    if (ids.length) actions.push({ action: "automation.trigger", target: { entity_id: _asTargetValue(ids) }, data: { skip_condition: true } });
+    if (ids.length) actions.push({ action: "automation.trigger", target: { entity_id: _asTargetValue(ids) }, data: {} });
   }
 
   if (set.sirens.enabled) {
-    _pushDomainServiceActions(actions, set.sirens.entities, "siren", "turn_on");
+    _pushDomainServiceActions(actions, resolveAlarmResponseEntities(alarm, "sirens", set.sirens), "siren", "turn_on");
   }
 
   return actions;
@@ -3571,7 +3660,7 @@ async function _deleteManagedAlarmAutomation(id) {
 
 
 function isManagedAlarmResponseAutomationId(id) {
-  return /^ow_alarm_.+_triggered_(armed|disarmed)_response$/.test(String(id || ""));
+  return /^ow_alarm_.+_triggered_(armed|disarmed)(?:_cleanup)?_response$/.test(String(id || ""));
 }
 
 function readAlarmResponseAutomationIdsFromDisk() {
@@ -3585,7 +3674,7 @@ function readAlarmResponseAutomationIdsFromDisk() {
     try {
       if (!fs.existsSync(file)) continue;
       const text = fs.readFileSync(file, "utf8");
-      const re = /(?:^|\n)\s*(?:-\s*)?id:\s*["']?(ow_alarm_[A-Za-z0-9_]+_triggered_(?:armed|disarmed)_response)["']?/g;
+      const re = /(?:^|\n)\s*(?:-\s*)?id:\s*["']?(ow_alarm_[A-Za-z0-9_]+_triggered_(?:armed|disarmed)(?:_cleanup)?_response)["']?/g;
       let m;
       while ((m = re.exec(text))) ids.add(m[1]);
     } catch (e) {
@@ -3631,14 +3720,24 @@ async function syncAlarmResponseAutomations(alarms = loadAlarms()) {
   for (const alarm of (alarms || [])) {
     for (const scope of ALARM_RESPONSE_SCOPES) {
       const autoId = alarmResponseAutomationId(alarm, scope);
+      const cleanupId = alarmCleanupAutomationId(alarm, scope);
       expectedIds.add(autoId);
+      expectedIds.add(cleanupId);
       const haAuto = buildAlarmResponseAutomation(alarm, scope);
+      const cleanupAuto = buildAlarmCleanupAutomation(alarm, scope);
       try {
         if (haAuto) pushed.push(await _pushManagedAlarmAutomation(haAuto));
         else deleted.push(await _deleteManagedAlarmAutomation(autoId));
       } catch (e) {
         console.warn(`[OW-AlarmResponse] ${autoId}: ${e.message}`);
         errors.push({ id: autoId, error: e.message });
+      }
+      try {
+        if (cleanupAuto) pushed.push(await _pushManagedAlarmAutomation(cleanupAuto));
+        else deleted.push(await _deleteManagedAlarmAutomation(cleanupId));
+      } catch (e) {
+        console.warn(`[OW-AlarmResponse] ${cleanupId}: ${e.message}`);
+        errors.push({ id: cleanupId, error: e.message });
       }
     }
   }
