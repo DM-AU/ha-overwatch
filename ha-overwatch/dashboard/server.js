@@ -1,4 +1,4 @@
-// HA-Overwatch 0.05.31-response-conditions-summary: modular actions, shared profile, per-action preconditions, and response-specific turn-off wording; preserves orphan cleanup.
+// HA-Overwatch 0.05.33-response-night-condition: modular response actions with night precondition and preserved shared response automation support.
 /* ============================================================
  * HA-Overwatch — server.js
  *
@@ -3400,18 +3400,8 @@ function alarmResponseAction(action, fallbackType = "light") {
   const enabled = !!a.enabled || !!a.auto_zones || entities.length > 0 || targets.length > 0 || !!a.title || !!a.message || (a.clear_mode && a.clear_mode !== "none");
   return { id:String(a.id || `resp_${Math.random().toString(36).slice(2,9)}`), type, enabled, entities, targets, title:String(a.title || ''), message:String(a.message || ''), auto_zones:!!a.auto_zones, trigger_for:_duration(a.trigger_for || a.for_duration || "00:00:00"), clear_mode:String(a.clear_mode || "none"), clear_for:_duration(a.clear_for || "00:00:00"), condition_mode:String(a.condition_mode || "always"), time_after:String(a.time_after || "00:00"), time_before:String(a.time_before || "23:59"), condition_entity:String(a.condition_entity || "") };
 }
-function _legacyResponseActions(raw) {
-  const out = [];
-  const add = (key, type) => { if (!raw?.[key]) return; const a = alarmResponseAction(raw[key], type); if (a.enabled) out.push(a); };
-  add("notify", "notify"); add("sirens", "siren"); add("lights", "light"); add("scripts", "script"); add("automations", "automation");
-  return out;
-}
-function alarmResponseSet(alarm, scope) {
-  const responses = (alarm?.responses && typeof alarm.responses === "object") ? alarm.responses : {};
-  const raw = (responses[scope] && typeof responses[scope] === "object") ? responses[scope] : {};
-  const actions = Array.isArray(raw.actions) ? raw.actions.map(a => alarmResponseAction(a, a?.type || "light")) : _legacyResponseActions(raw);
-  return { actions };
-}
+function _legacyResponseActions(raw) { const out = []; const add = (key, type) => { if (!raw?.[key]) return; const a = alarmResponseAction(raw[key], type); if (a.enabled) out.push(a); }; add("notify", "notify"); add("sirens", "siren"); add("lights", "light"); add("scripts", "script"); add("automations", "automation"); return out; }
+function alarmResponseSet(alarm, scope) { const responses = (alarm?.responses && typeof alarm.responses === "object") ? alarm.responses : {}; const raw = (responses[scope] && typeof responses[scope] === "object") ? responses[scope] : {}; const actions = Array.isArray(raw.actions) ? raw.actions.map(a => alarmResponseAction(a, a?.type || "light")) : _legacyResponseActions(raw); return { actions }; }
 
 function alarmResponseAutomationId(alarm, scope) {
   const slug = nameSlug(alarm?.name) || alarm?.id || "alarm";
@@ -3451,97 +3441,21 @@ function _cameraToOverwatchSwitch(entityId) {
 }
 
 
-function _serverEntityHidden(entityId) {
-  const id = String(entityId || "");
-  if (!id) return true;
-  const st = serverHaStates[id];
-  if (st?.attributes?.hidden_by || st?.attributes?.disabled_by) return true;
-  try { const reg = (haRegistry.entities || []).find(e => e.entity_id === id || e.id === id); if (reg?.hidden_by || reg?.disabled_by) return true; } catch {}
-  return false;
-}
-function _zoneResponseEntities(zone, key) {
-  const hidden = new Set((zone?.ha_excluded_entities || zone?.hidden_entities || zone?.excluded_entities || []).map(String));
-  return _cleanList(zone?.[key] || []).filter(entityId => !hidden.has(String(entityId))).filter(entityId => !_serverEntityHidden(entityId));
-}
-function resolveAlarmResponseEntities(alarm, responseKey, action) {
-  const manual = _cleanList(action?.entities || []);
-  if (!action?.auto_zones) return [...new Set(manual)].filter(entityId => !_serverEntityHidden(entityId));
-  const selectedZones = alarmSelectedZones(alarm, loadZones(), loadGroups(), loadFloors());
-  const fromZones = selectedZones.flatMap(zone => _zoneResponseEntities(zone, responseKey));
-  return [...new Set([...fromZones, ...manual])].filter(entityId => !_serverEntityHidden(entityId));
-}
+function _serverEntityHidden(entityId) { const id = String(entityId || ""); if (!id) return true; const st = serverHaStates[id]; if (st?.attributes?.hidden_by || st?.attributes?.disabled_by) return true; try { const reg = (haRegistry.entities || []).find(e => e.entity_id === id || e.id === id); if (reg?.hidden_by || reg?.disabled_by) return true; } catch {} return false; }
+function _zoneResponseEntities(zone, key) { const hidden = new Set((zone?.ha_excluded_entities || zone?.hidden_entities || zone?.excluded_entities || []).map(String)); return _cleanList(zone?.[key] || []).filter(entityId => !hidden.has(String(entityId))).filter(entityId => !_serverEntityHidden(entityId)); }
+function resolveAlarmResponseEntities(alarm, responseKey, action) { const manual = _cleanList(action?.entities || []); if (!action?.auto_zones) return [...new Set(manual)].filter(entityId => !_serverEntityHidden(entityId)); const selectedZones = alarmSelectedZones(alarm, loadZones(), loadGroups(), loadFloors()); const fromZones = selectedZones.flatMap(zone => _zoneResponseEntities(zone, responseKey)); return [...new Set([...fromZones, ...manual])].filter(entityId => !_serverEntityHidden(entityId)); }
 function alarmCleanupAutomationId(alarm, scope) { const slug = nameSlug(alarm?.name) || alarm?.id || "alarm"; return `ow_alarm_${slug}_${scope}_cleanup_response`; }
 function _scopeTriggerEntities(alarm, scope) { if (scope === "shared") return [alarmTriggerBinaryEntity(alarm, "triggered_armed"), alarmTriggerBinaryEntity(alarm, "triggered_disarmed")]; return [alarmTriggerBinaryEntity(alarm, scope)]; }
 function _scopeLabel(scope) { if (scope === "shared") return "Triggered Armed & Disarmed"; return scope === "triggered_armed" ? "Triggered Armed" : "Triggered Disarmed"; }
-function _responseActionConditions(action) {
-  const mode = action.condition_mode || "always";
-  if (mode === "time") { const cond = { condition:"time" }; if (action.time_after) cond.after = action.time_after; if (action.time_before) cond.before = action.time_before; return [cond]; }
-  if (mode === "entity" && action.condition_entity) return [{ condition:"state", entity_id: action.condition_entity, state:"on" }];
-  return [];
-}
-function _responseActionTargets(alarm, action) {
-  if (action.type === "light") return resolveAlarmResponseEntities(alarm, "lights", action);
-  if (action.type === "siren") return resolveAlarmResponseEntities(alarm, "sirens", action);
-  if (action.type === "script") return _cleanList(action.entities);
-  if (action.type === "automation") return _cleanList(action.entities);
-  return _cleanList(action.entities);
-}
-function _serviceSequenceForResponseAction(alarm, scope, action) {
-  const alarmName = alarm?.name || alarm?.id || "Alarm";
-  const seq = [];
-  if (action.type === "notify") {
-    const targets = action.targets.length ? action.targets : ["notify.notify"];
-    targets.forEach(target => {
-      const svc = String(target || "notify.notify").startsWith("notify.") ? String(target).slice("notify.".length) : String(target || "notify");
-      const title = (action.title || `HA-Overwatch - Alarm - ${alarmName}`).replace(/\{\{\s*alarm_name\s*\}\}/g, alarmName).replace(/\{\{\s*trigger_scope\s*\}\}/g, scope);
-      const message = (action.message || (scope === "triggered_armed" ? `Alarm ${alarmName} triggered while armed.` : `Alarm ${alarmName} triggered while disarmed.`)).replace(/\{\{\s*alarm_name\s*\}\}/g, alarmName).replace(/\{\{\s*trigger_scope\s*\}\}/g, scope);
-      seq.push({ action: `notify.${svc}`, data: { title, message } });
-    });
-  } else if (action.type === "light") _pushDomainServiceActions(seq, _responseActionTargets(alarm, action), "light", "turn_on");
-  else if (action.type === "siren") _pushDomainServiceActions(seq, _responseActionTargets(alarm, action), "siren", "turn_on");
-  else if (action.type === "script") _pushDomainServiceActions(seq, _responseActionTargets(alarm, action), "script", "turn_on");
-  else if (action.type === "automation") { const ids = _responseActionTargets(alarm, action); if (ids.length) seq.push({ action: "automation.trigger", target: { entity_id: _asTargetValue(ids) }, data: { skip_condition: true } }); }
-  return seq;
-}
-function _cleanupSequenceForResponseAction(alarm, action) {
-  const seq = [];
-  if (!action.clear_mode || action.clear_mode === "none") return seq;
-  if (action.type === "light") _pushDomainServiceActions(seq, _responseActionTargets(alarm, action), "light", "turn_off");
-  if (action.type === "siren") _pushDomainServiceActions(seq, _responseActionTargets(alarm, action), "siren", "turn_off");
-  return seq;
-}
+function _responseActionConditions(action) { const mode = action.condition_mode || "always"; if (mode === "night") return [{ condition:"state", entity_id:"sun.sun", state:"below_horizon" }]; if (mode === "time") { const cond = { condition:"time" }; if (action.time_after) cond.after = action.time_after; if (action.time_before) cond.before = action.time_before; return [cond]; } if (mode === "entity" && action.condition_entity) return [{ condition:"state", entity_id: action.condition_entity, state:"on" }]; return []; }
+function _responseActionTargets(alarm, action) { if (action.type === "light") return resolveAlarmResponseEntities(alarm, "lights", action); if (action.type === "siren") return resolveAlarmResponseEntities(alarm, "sirens", action); if (action.type === "script") return _cleanList(action.entities); if (action.type === "automation") return _cleanList(action.entities); return _cleanList(action.entities); }
+function _serviceSequenceForResponseAction(alarm, scope, action) { const alarmName = alarm?.name || alarm?.id || "Alarm"; const seq = []; if (action.type === "notify") { const targets = action.targets.length ? action.targets : ["notify.notify"]; targets.forEach(target => { const svc = String(target || "notify.notify").startsWith("notify.") ? String(target).slice("notify.".length) : String(target || "notify"); const title = (action.title || `HA-Overwatch - Alarm - ${alarmName}`).replace(/\{\{\s*alarm_name\s*\}\}/g, alarmName).replace(/\{\{\s*trigger_scope\s*\}\}/g, scope); const message = (action.message || (scope === "triggered_armed" ? `Alarm ${alarmName} triggered while armed.` : `Alarm ${alarmName} triggered while disarmed.`)).replace(/\{\{\s*alarm_name\s*\}\}/g, alarmName).replace(/\{\{\s*trigger_scope\s*\}\}/g, scope); seq.push({ action: `notify.${svc}`, data: { title, message } }); }); } else if (action.type === "light") _pushDomainServiceActions(seq, _responseActionTargets(alarm, action), "light", "turn_on"); else if (action.type === "siren") _pushDomainServiceActions(seq, _responseActionTargets(alarm, action), "siren", "turn_on"); else if (action.type === "script") _pushDomainServiceActions(seq, _responseActionTargets(alarm, action), "script", "turn_on"); else if (action.type === "automation") { const ids = _responseActionTargets(alarm, action); if (ids.length) seq.push({ action: "automation.trigger", target: { entity_id: _asTargetValue(ids) }, data: { skip_condition: true } }); } return seq; }
+function _cleanupSequenceForResponseAction(alarm, action) { const seq = []; if (!action.clear_mode || action.clear_mode === "none") return seq; if (action.type === "light") _pushDomainServiceActions(seq, _responseActionTargets(alarm, action), "light", "turn_off"); if (action.type === "siren") _pushDomainServiceActions(seq, _responseActionTargets(alarm, action), "siren", "turn_off"); return seq; }
 function _triggerWithFor(entity_id, fields = {}, duration = "00:00:00") { const t = { trigger: "state", entity_id, ...fields }; const f = _durationForHA(duration); if (f) t.for = f; return t; }
-function buildAlarmCleanupAutomation(alarm, scope) {
-  const candidates = (alarmResponseSet(alarm, scope).actions || []).filter(a => a.enabled && a.clear_mode && a.clear_mode !== "none" && _cleanupSequenceForResponseAction(alarm, a).length);
-  if (!candidates.length) return null;
-  const alarmSwitch = alarmSwitchEntityIds(alarm)[0];
-  const triggerEntities = _scopeTriggerEntities(alarm, scope);
-  const triggers = [], choices = [];
-  candidates.forEach((a, idx) => {
-    const idBase = `cleanup_${a.id || idx}`;
-    if (a.clear_mode === "when_alarm_clears" || a.clear_mode === "when_alarm_clears_or_disarmed") triggerEntities.forEach((entityId, entityIdx) => triggers.push({ ..._triggerWithFor(entityId, { from:"on", to:"off" }, a.clear_for), id: `${idBase}_clear_${entityIdx}` }));
-    if ((a.clear_mode === "when_alarm_disarmed" || a.clear_mode === "when_alarm_clears_or_disarmed") && alarmSwitch) triggers.push({ ..._triggerWithFor(alarmSwitch, { to:"off" }, a.clear_for), id: `${idBase}_disarm` });
-    choices.push({ conditions: [{ condition:"trigger", id:[`${idBase}_clear_0`, `${idBase}_clear_1`, `${idBase}_disarm`] }, ..._responseActionConditions(a)], sequence:_cleanupSequenceForResponseAction(alarm, a) });
-  });
-  if (!triggers.length || !choices.length) return null;
-  const autoId = alarmCleanupAutomationId(alarm, scope); const alarmName = alarm?.name || alarm?.id || "Alarm";
-  return { id:autoId, alias:`HA-Overwatch - Alarm - ${alarmName} - ${_scopeLabel(scope)} Response Cleanup`, description:"Managed by HA-Overwatch alarm response cleanup profile", variables:{ ow_id:autoId, ow_name:`Alarm ${alarmName} ${scope} response cleanup`, ow_managed:true, ow_type:"alarm_response", ow_alarm_id:alarm?.id || null, ow_alarm_name:alarmName, ow_trigger_scope:scope, ow_cleanup:true }, mode:"parallel", triggers, conditions:[], actions:[{ choose: choices }] };
-}
+function buildAlarmCleanupAutomation(alarm, scope) { const candidates = (alarmResponseSet(alarm, scope).actions || []).filter(a => a.enabled && a.clear_mode && a.clear_mode !== "none" && _cleanupSequenceForResponseAction(alarm, a).length); if (!candidates.length) return null; const alarmSwitch = alarmSwitchEntityIds(alarm)[0]; const triggerEntities = _scopeTriggerEntities(alarm, scope); const triggers = [], choices = []; candidates.forEach((a, idx) => { const idBase = `cleanup_${a.id || idx}`; if (a.clear_mode === "when_alarm_clears" || a.clear_mode === "when_alarm_clears_or_disarmed") triggerEntities.forEach((entityId, entityIdx) => triggers.push({ ..._triggerWithFor(entityId, { from:"on", to:"off" }, a.clear_for), id: `${idBase}_clear_${entityIdx}` })); if ((a.clear_mode === "when_alarm_disarmed" || a.clear_mode === "when_alarm_clears_or_disarmed") && alarmSwitch) triggers.push({ ..._triggerWithFor(alarmSwitch, { to:"off" }, a.clear_for), id: `${idBase}_disarm` }); choices.push({ conditions: [{ condition:"trigger", id:[`${idBase}_clear_0`, `${idBase}_clear_1`, `${idBase}_disarm`] }, ..._responseActionConditions(a)], sequence:_cleanupSequenceForResponseAction(alarm, a) }); }); if (!triggers.length || !choices.length) return null; const autoId = alarmCleanupAutomationId(alarm, scope); const alarmName = alarm?.name || alarm?.id || "Alarm"; return { id:autoId, alias:`HA-Overwatch - Alarm - ${alarmName} - ${_scopeLabel(scope)} Response Cleanup`, description:"Managed by HA-Overwatch alarm response cleanup profile", variables:{ ow_id:autoId, ow_name:`Alarm ${alarmName} ${scope} response cleanup`, ow_managed:true, ow_type:"alarm_response", ow_alarm_id:alarm?.id || null, ow_alarm_name:alarmName, ow_trigger_scope:scope, ow_cleanup:true }, mode:"parallel", triggers, conditions:[], actions:[{ choose: choices }] }; }
 
-function buildAlarmResponseActions(alarm, scope) {
-  return (alarmResponseSet(alarm, scope).actions || []).filter(a => a.enabled).map(a => ({ action:a, sequence:_serviceSequenceForResponseAction(alarm, scope, a) })).filter(x => x.sequence.length);
-}
-function buildAlarmResponseAutomation(alarm, scope) {
-  const autoId = alarmResponseAutomationId(alarm, scope);
-  const alarmName = alarm?.name || alarm?.id || "Alarm";
-  const triggerEntities = _scopeTriggerEntities(alarm, scope);
-  const responseSteps = buildAlarmResponseActions(alarm, scope);
-  if (!responseSteps.length) return null;
-  const triggers = [];
-  responseSteps.forEach((step, idx) => triggerEntities.forEach((entityId, entityIdx) => triggers.push({ ..._triggerWithFor(entityId, { to:"on" }, step.action.trigger_for), id:`response_${step.action.id || idx}_${entityIdx}` })));
-  const choices = responseSteps.map((step, idx) => ({ conditions:[{ condition:"trigger", id:triggerEntities.map((_, entityIdx) => `response_${step.action.id || idx}_${entityIdx}`) }, ..._responseActionConditions(step.action)], sequence:step.sequence }));
-  return { id:autoId, alias:`HA-Overwatch - Alarm - ${alarmName} - ${_scopeLabel(scope)} Response`, description:"Managed by HA-Overwatch alarm response profile", variables:{ ow_id:autoId, ow_name:`Alarm ${alarmName} ${scope} response`, ow_managed:true, ow_type:"alarm_response", ow_alarm_id:alarm?.id || null, ow_alarm_name:alarmName, ow_trigger_scope:scope }, mode:"parallel", triggers, conditions:[], actions:[{ choose: choices }] };
-}
+function buildAlarmResponseActions(alarm, scope) { return (alarmResponseSet(alarm, scope).actions || []).filter(a => a.enabled).map(a => ({ action:a, sequence:_serviceSequenceForResponseAction(alarm, scope, a) })).filter(x => x.sequence.length); }
+function buildAlarmResponseAutomation(alarm, scope) { const autoId = alarmResponseAutomationId(alarm, scope); const alarmName = alarm?.name || alarm?.id || "Alarm"; const triggerEntities = _scopeTriggerEntities(alarm, scope); const responseSteps = buildAlarmResponseActions(alarm, scope); if (!responseSteps.length) return null; const triggers = []; responseSteps.forEach((step, idx) => triggerEntities.forEach((entityId, entityIdx) => triggers.push({ ..._triggerWithFor(entityId, { to:"on" }, step.action.trigger_for), id:`response_${step.action.id || idx}_${entityIdx}` }))); const choices = responseSteps.map((step, idx) => ({ conditions:[{ condition:"trigger", id:triggerEntities.map((_, entityIdx) => `response_${step.action.id || idx}_${entityIdx}`) }, ..._responseActionConditions(step.action)], sequence:step.sequence })); return { id:autoId, alias:`HA-Overwatch - Alarm - ${alarmName} - ${_scopeLabel(scope)} Response`, description:"Managed by HA-Overwatch alarm response profile", variables:{ ow_id:autoId, ow_name:`Alarm ${alarmName} ${scope} response`, ow_managed:true, ow_type:"alarm_response", ow_alarm_id:alarm?.id || null, ow_alarm_name:alarmName, ow_trigger_scope:scope }, mode:"parallel", triggers, conditions:[], actions:[{ choose: choices }] }; }
 
 function _getHARequestConfig() {
   const cfg = getHAConfig(loadConfig());
