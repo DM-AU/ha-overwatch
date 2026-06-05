@@ -1,5 +1,5 @@
 /* ─── CONFIG DEFAULTS ─────────────────────────────────────── */
-/* v0.05.35.02: force HA registry refresh for HA area/device/entity sync. */
+/* v0.05.35.03: HA area entity rebuild, object-detection sensors, and zone editor scroll stability. */
 let uiConfig = {
   floorplan: "img/floorplan.png",
   sidebar_position: "right",
@@ -188,7 +188,10 @@ async function loadHARegistry(force = false) {
       if (force) await new Promise(resolve => setTimeout(resolve, 250));
     }
 
-    if (_haRegistry.loaded) await autoAddNewHAAreas();
+    if (_haRegistry.loaded) {
+      await autoAddNewHAAreas();
+      if (force) await syncHAAreaZoneEntitiesFromRegistry();
+    }
 
     if (force) {
       await loadZones();
@@ -196,7 +199,7 @@ async function loadHARegistry(force = false) {
       await loadFloors();
       subscribeHAEntities();
       renderZones();
-      if (editorMode) renderZonesEditor(true);
+      if (editorMode) renderZonesEditorStable(true);
       if (window._updateFloorBtn) window._updateFloorBtn();
       logEvent('ok', `HA registry sync complete: ${(_haRegistry.areas || []).length} areas, ${(_haRegistry.devices || []).length} devices, ${(_haRegistry.entities || []).length} entities.`, 'ha');
     }
@@ -240,8 +243,11 @@ function haEntitiesForArea(areaId) {
 // Device class filters per OW tab
 const HA_DOOR_CLASSES = new Set(['door','window','garage_door','opening','gate']);
 const HA_ZONE_SENSOR_CLASSES = new Set([
-  'motion','occupancy','presence','vibration','sound','moisture','smoke','carbon_monoxide','heat','cold','gas','tamper','connectivity','power','problem','safety','update'
+  'motion','occupancy','presence','vibration','sound','moisture','smoke','carbon_monoxide','heat','cold','gas','tamper','connectivity','power','problem','safety','update','moving'
 ]);
+// Camera/object-detection binary sensors often have no useful device_class.
+// Include common AI/object detection entity names from cameras/NVRs when syncing HA areas.
+const HA_OBJECT_DETECTION_RE = /(^|[._\s-])(person|people|human|animal|pet|dog|cat|vehicle|car|truck|bike|bicycle|motorbike|motorcycle|package|parcel|object)[._\s-]*(detect|detected|detection|occupancy|presence|alarm|motion)?([._\s-]|$)|(^|[._\s-])(detect|detected|detection)[._\s-]*(person|people|human|animal|pet|dog|cat|vehicle|car|truck|bike|bicycle|motorbike|motorcycle|package|parcel|object)([._\s-]|$)/;
 
 // HA Area sync filter only. Runtime triggering must respect whatever the user has
 // intentionally left in Sensors or Doors & Windows unless that entity is ghosted.
@@ -271,16 +277,51 @@ const HA_AREA_FILTERS = {
   sensors: e => {
     const eid = String(e?.entity_id || '').toLowerCase();
     const dc = haEntityDeviceClass(e);
+    const text = haEntityText(e);
     return eid.startsWith('binary_sensor.')
-      && HA_ZONE_SENSOR_CLASSES.has(dc)
+      && !eid.startsWith('binary_sensor.overwatch_')
       && !isHADoorEntity(e)
-      && !eid.startsWith('binary_sensor.overwatch_');
+      && (HA_ZONE_SENSOR_CLASSES.has(dc) || HA_OBJECT_DETECTION_RE.test(text));
   },
   cameras: e => String(e?.entity_id || '').startsWith('camera.'),
   lights: e => String(e?.entity_id || '').startsWith('light.'),
   sirens: e => String(e?.entity_id || '').startsWith('siren.'),
   doors: e => isHADoorEntity(e),
 };
+
+function haAreaEntitiesByKind(areaId, kind) {
+  const filter = HA_AREA_FILTERS[kind];
+  if (!filter) return [];
+  return haEntitiesForArea(areaId).filter(filter).map(e => e.entity_id).filter(Boolean).sort((a,b)=>a.localeCompare(b, undefined, { sensitivity:'base', numeric:true }));
+}
+
+async function syncHAAreaZoneEntitiesFromRegistry() {
+  if (!_haRegistry.loaded) return { changed: 0, added: 0 };
+  let changed = 0;
+  let added = 0;
+  for (const zone of zones) {
+    if (!zone?.ha_area_id) continue;
+    const excluded = new Set((zone.ha_excluded_entities || []).map(String));
+    let zoneChanged = false;
+    for (const kind of ['sensors', 'cameras', 'lights', 'sirens']) {
+      const current = new Set((zone[kind] || []).map(String).filter(Boolean));
+      const candidates = haAreaEntitiesByKind(zone.ha_area_id, kind).filter(entityId => !excluded.has(entityId));
+      for (const entityId of candidates) {
+        if (current.has(entityId)) continue;
+        current.add(entityId);
+        zoneChanged = true;
+        added++;
+      }
+      zone[kind] = [...current].sort((a,b)=>a.localeCompare(b, undefined, { sensitivity:'base', numeric:true }));
+    }
+    if (zoneChanged) {
+      changed++;
+      await saveZone(zone);
+    }
+  }
+  if (changed) logEvent('ok', `HA area sync added ${added} entities across ${changed} zone${changed === 1 ? '' : 's'}.`, 'ha');
+  return { changed, added };
+}
 let haMsgId = 1;
 let haPendingCmds = {};
 let mapLocked = localStorage.getItem('ow_map_locked') === 'true'; // prevent pan/zoom when true
@@ -1037,7 +1078,7 @@ async function setZoneGroup(zoneId, groupId) {
   for (const g of changed) await saveGroup(g);
   selectedGroupId = null;
   renderZones();
-  renderZonesEditor(true);
+  renderZonesEditorStable(true);
 }
 
 function setGroupArmed(groupId, armed) {
@@ -1050,7 +1091,7 @@ function setGroupArmed(groupId, armed) {
   });
   // Toggle the group switch in HA
   owCallSwitch(`switch.overwatch_zone_group_${groupSlug(group)}`, armed);
-  renderZonesEditor();
+  renderZonesEditorStable();
 }
 
 /* ─── UNDO ────────────────────────────────────────────────── */
@@ -1065,7 +1106,7 @@ function undoZones() {
     zones = JSON.parse(undoStack.pop());
     saveZones();
     renderZones();
-    renderZonesEditor();
+    renderZonesEditorStable();
   } catch { /* ignore */ }
 }
 
@@ -1633,7 +1674,7 @@ function _evaluateAutoFloor() {
   if (_autoFloorReturnTimer) { clearTimeout(_autoFloorReturnTimer); _autoFloorReturnTimer = null; }
   setActiveFloor(targetFloorId);
   renderZones();
-  if (editorMode) renderZonesEditor();
+  if (editorMode) renderZonesEditorStable();
   if (document.getElementById("floorFlyout")) renderFloorFlyout();
 
   _startStayTimer();
@@ -1658,7 +1699,7 @@ function _startReturnTimer() {
     if (defaultFloorId && defaultFloorId !== activeFloorId) {
       setActiveFloor(defaultFloorId);
       renderZones();
-      if (editorMode) renderZonesEditor();
+      if (editorMode) renderZonesEditorStable();
       if (document.getElementById("floorFlyout")) renderFloorFlyout();
     }
   }, returnSecs * 1000);
@@ -2060,6 +2101,26 @@ function zoneEditorHasActiveControl(container) {
   const activeEl = document.activeElement;
   if (!panel || !activeEl || !panel.contains(activeEl)) return false;
   return activeEl.matches('input, textarea, select, [contenteditable="true"]') || !!activeEl.closest('.entity-search-results, .zone-handle, .ha-device-tabs');
+}
+function renderZonesEditorStable(force = false) {
+  const root = document.getElementById('zonesEditorContainer') || document;
+  const state = captureZoneEditorScrollState(root);
+  const active = document.activeElement;
+  const activeId = active?.id || '';
+  const activeName = active?.getAttribute?.('name') || '';
+  const activeValue = active && 'value' in active ? active.value : null;
+  renderZonesEditor(force);
+  restoreZoneEditorScrollState(root, state);
+  requestAnimationFrame(() => {
+    if (activeId) document.getElementById(activeId)?.focus?.({ preventScroll:true });
+    else if (activeName) root.querySelector(`[name="${CSS.escape(activeName)}"]`)?.focus?.({ preventScroll:true });
+    if (activeValue !== null) {
+      const next = document.activeElement;
+      if (next && 'value' in next && next.value === activeValue) {
+        try { next.setSelectionRange(active.selectionStart || 0, active.selectionEnd || 0); } catch {}
+      }
+    }
+  });
 }
 
 /* ─── ZONE EDITOR DRAGGABLE PANEL HELPER moved to modules/ow-zone-editor.js ───────────────────────── */
@@ -2559,7 +2620,7 @@ function bindZonesSvgEvents() {
             zone.points.splice(info.insertAfter + 1, 0, { x: Math.round(fp.x), y: Math.round(fp.y) });
             saveZone(zone);
             renderZones();
-            renderZonesEditor();
+            renderZonesEditorStable();
             e.stopPropagation();
             return;
           }
@@ -2596,7 +2657,7 @@ function bindZonesSvgEvents() {
       // Toggle — clicking same zone deselects it
       if (selectedZoneId === zoneId && !isEditingPoints) {
         selectedZoneId = null;
-        renderZones(); renderZonesEditor();
+        renderZones(); renderZonesEditorStable();
         e.stopPropagation(); return;
       }
       selectedZoneId  = zoneId;
@@ -2609,7 +2670,7 @@ function bindZonesSvgEvents() {
         svg.setPointerCapture(e.pointerId);
       }
       renderZones();
-      renderZonesEditor();
+      renderZonesEditorStable();
       e.stopPropagation();
       return;
     }
@@ -2625,7 +2686,7 @@ function bindZonesSvgEvents() {
     const svgEl = document.getElementById('zonesSvg');
     if (svgEl) svgEl.style.cursor = '';
     renderZones();
-    renderZonesEditor();
+    renderZonesEditorStable();
     // Do NOT stopPropagation here — outer pan handler will pick it up
   });
 
@@ -2664,7 +2725,7 @@ function bindZonesSvgEvents() {
     isCreatingZone = false;
     currentNewZone = null;
     saveZones();
-    renderZonesEditor();
+    renderZonesEditorStable();
     scheduleHAReload(); // zone is now complete — create HA entity
     e.stopPropagation();
   });
@@ -2680,7 +2741,7 @@ function bindZonesSvgEvents() {
       zone.points.splice(Number(target.dataset.index), 1);
       saveZone(zone);
       renderZones();
-      renderZonesEditor();
+      renderZonesEditorStable();
     }
   });
 }
@@ -2797,7 +2858,7 @@ function connectHA() {
       checkOfflineZoneEntities();
       checkZoneStateChanges();   // log any zones already triggered at connect time
       renderZones();
-        if (editorMode && !document.activeElement?.closest('.zed-right')) renderZonesEditor();
+        if (editorMode && !document.activeElement?.closest('.zed-right')) renderZonesEditorStable();
       // Notify camera page if loaded
       if (window.OW && window.camUpdate) window.camUpdate();
     }
@@ -2954,7 +3015,7 @@ function connectHA() {
         if (haSubscribedEntities.has(data.entity_id)) {
           checkZoneStateChanges();
           renderZones();
-          if (editorMode) renderZonesEditor();
+          if (editorMode) renderZonesEditorStable();
           if (window.camUpdate) window.camUpdate();
         }
 
@@ -3350,7 +3411,7 @@ function focusZone(zoneId) {
 
   selectedZoneId = zoneId;
   activePinId = null; activePinType = null;
-  if (editorMode) { renderZonesEditor(); renderZones(); }
+  if (editorMode) { renderZonesEditorStable(); renderZones(); }
   setSearchOpen(false);
 }
 
@@ -3874,7 +3935,7 @@ function renderFloorFlyout() {
 
     row.onclick = () => {
       setActiveFloor(f.id);
-      if (editorMode) renderZonesEditor();
+      if (editorMode) renderZonesEditorStable();
       flyout.remove();
       document.getElementById("floorsBtn")?.classList.remove("active");
     };
@@ -3964,7 +4025,7 @@ function clearZoneEditorSelection(render = true) {
   document.querySelectorAll('#zonesSvg, .fp-svg').forEach(svg => { svg.style.cursor = ''; });
   if (render) {
     renderZones();
-    renderZonesEditor();
+    renderZonesEditorStable();
   }
 }
 
@@ -3980,11 +4041,11 @@ function bindZonesButton() {
     if (editorMode) {
       editorPosRestored = false; // allow position restore on open
       // Load HA registry for floor/area linking (non-blocking)
-      if (!_haRegistry.loaded) loadHARegistry().then(() => renderZonesEditor());
+      if (!_haRegistry.loaded) loadHARegistry().then(() => renderZonesEditorStable());
     }
     zonesBtn.classList.toggle("active", editorMode);
     setZoneSvgInteractionState();
-    renderZonesEditor();
+    renderZonesEditorStable();
     renderZones();
   };
 }
@@ -4118,7 +4179,7 @@ await loadZones();
   window._updateFloorBtn?.(); // show/hide floor switcher based on floor count
   bindZonesSvgEvents();
   applyFloorPanels();   // build single or multi-panel layout based on saved settings
-  renderZonesEditor();
+  renderZonesEditorStable();
   renderZones();
   await loadConfig();
 
