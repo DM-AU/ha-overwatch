@@ -1,4 +1,5 @@
 /* ─── CONFIG DEFAULTS ─────────────────────────────────────── */
+/* v0.05.35.01: zone editor click isolation while creating/editing points. */
 let uiConfig = {
   floorplan: "img/floorplan.png",
   sidebar_position: "right",
@@ -2492,18 +2493,31 @@ function bindZonesSvgEvents() {
       return;
     }
 
-    // 2) Inserting a point (Edit Points mode)
-    // Click outside zone → insert new point at exact click position on closest edge
-    // Click inside zone → drag the zone (handled in step 3)
-    if (isEditingPoints && selectedZoneId && !isCreatingZone) {
+    // 2) Drawing a new zone — add point BEFORE polygon selection.
+    // While creating, every floorplan click is point placement. Other zones must not steal the click.
+    if (isCreatingZone && currentNewZone) {
+      pushUndo();
+      currentNewZone.points.push({ x: fp.x, y: fp.y });
+      saveZone(currentNewZone);
+      renderZones();
+      const countSpan = document.querySelector(`.zones-list-item[data-zone-id="${currentNewZone.id}"] span:last-child`);
+      if (countSpan) countSpan.textContent = `${currentNewZone.points.length}pts`;
+      e.stopPropagation();
+      return;
+    }
+
+    // 3) Inserting a point (Edit Points mode)
+    // Click outside the selected zone → insert new point at exact click position on closest edge.
+    // If another zone is under the cursor, it is ignored; edit mode belongs to selectedZoneId only.
+    if (isEditingPoints && selectedZoneId) {
       const zone = zones.find(z => z.id === selectedZoneId);
       if (zone && (zone.points || []).length >= 2) {
-        const insideZone = isPointInPolygon(fp.x, fp.y, zone.points);
-        if (!insideZone) {
+        const insideSelectedZone = isPointInPolygon(fp.x, fp.y, zone.points);
+        if (!insideSelectedZone) {
           const info = closestEdgeInfo(zone, fp.x, fp.y);
           if (info) {
             pushUndo();
-            // Insert at exact clicked position, not snapped to edge midpoint
+            // Insert at exact clicked position, not snapped to edge midpoint.
             zone.points.splice(info.insertAfter + 1, 0, { x: Math.round(fp.x), y: Math.round(fp.y) });
             saveZone(zone);
             renderZones();
@@ -2512,11 +2526,19 @@ function bindZonesSvgEvents() {
             return;
           }
         }
-        // Click inside zone — fall through to polygon handler to start drag
+        // Click inside selected zone but on a different overlapping polygon: drag selected zone, not the other zone.
+        if (insideSelectedZone && target.classList.contains("zone-polygon") && target.dataset.zoneId !== selectedZoneId) {
+          draggingZone = { zoneId: selectedZoneId, startPoints: zone.points.map(p => ({ ...p })) };
+          dragStart = { x: sx, y: sy };
+          svg.setPointerCapture(e.pointerId);
+          e.stopPropagation();
+          return;
+        }
+        // Click inside selected zone — fall through to polygon handler to start drag when target is selected polygon.
       }
     }
 
-    // 3) Clicking a polygon — in live mode open zone popup, in editor mode select it
+    // 4) Clicking a polygon — in live mode open zone popup, in editor mode select it.
     if (target.classList.contains("zone-polygon")) {
       const zoneId = target.dataset.zoneId;
       const zone   = zones.find(z => z.id === zoneId);
@@ -2528,8 +2550,10 @@ function bindZonesSvgEvents() {
         e.stopPropagation(); return;
       }
 
+      // Point editing is isolated to the selected zone. Other zones cannot be selected or dragged.
       if (isEditingPoints && selectedZoneId && zoneId !== selectedZoneId) {
-        e.stopPropagation(); return;
+        e.stopPropagation();
+        return;
       }
       // Toggle — clicking same zone deselects it
       if (selectedZoneId === zoneId && !isEditingPoints) {
@@ -2548,18 +2572,6 @@ function bindZonesSvgEvents() {
       }
       renderZones();
       renderZonesEditor();
-      e.stopPropagation();
-      return;
-    }
-
-    // 4) Drawing new zone — add point, block pan
-    if (isCreatingZone && currentNewZone) {
-      pushUndo();
-      currentNewZone.points.push({ x: fp.x, y: fp.y });
-      saveZone(currentNewZone);
-      renderZones();
-      const countSpan = document.querySelector(`.zones-list-item[data-zone-id="${currentNewZone.id}"] span:last-child`);
-      if (countSpan) countSpan.textContent = `${currentNewZone.points.length}pts`;
       e.stopPropagation();
       return;
     }
