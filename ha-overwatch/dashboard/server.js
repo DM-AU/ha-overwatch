@@ -1,4 +1,4 @@
-// HA-Overwatch 0.05.35.02-ha-area-sync-refresh: forced HA registry refresh waits for fresh floor/area/device/entity registry data.
+// HA-Overwatch 0.05.35.07-automation-action-controls: automation actions support per-action Only run, start delay, and fixed turn-off cleanup.
 /* ============================================================
  * HA-Overwatch — server.js
  *
@@ -3665,6 +3665,50 @@ async function syncAlarmResponseAutomations(alarms = loadAlarms()) {
   return { ok: errors.length === 0, pushed, deleted, stale_deleted, errors };
 }
 
+/* ── Automation action controls ───────────────────────────── */
+function _autoDuration(value) {
+  const s = String(value || '').trim();
+  const m = s.match(/^(\d{1,2}):(\d{1,2}):(\d{1,2})$/);
+  if (!m) return null;
+  const out = [m[1], m[2], m[3]].map(v => String(Math.max(0, parseInt(v,10)||0)).padStart(2,'0')).join(':');
+  return out === '00:00:00' ? null : out;
+}
+function _automationActionConditions(a) {
+  const mode = String(a?.condition_mode || 'always');
+  if (mode === 'night') return [{ condition:'state', entity_id:'sun.sun', state:'below_horizon' }];
+  if (mode === 'time') {
+    const c = { condition:'time' };
+    if (a.time_after) c.after = a.time_after;
+    if (a.time_before) c.before = a.time_before;
+    return [c];
+  }
+  if (mode === 'entity' && a.condition_entity) return [{ condition:'state', entity_id:a.condition_entity, state:'on' }];
+  return [];
+}
+function _turnOffActionFor(actionObj) {
+  const action = String(actionObj?.action || actionObj?.service || '');
+  const dot = action.indexOf('.');
+  if (dot < 0) return null;
+  const domain = action.slice(0, dot);
+  if (!['light','siren','switch'].includes(domain)) return null;
+  return { action: `${domain}.turn_off`, target: actionObj.target || {} };
+}
+function pushAutomationAction(actions, a, actionObj) {
+  const seq = [];
+  const startDelay = _autoDuration(a?.trigger_for);
+  if (startDelay) seq.push({ delay: startDelay });
+  seq.push(actionObj);
+  const offDelay = (a?.clear_mode === 'after_delay') ? _autoDuration(a?.clear_for) : null;
+  const offAction = offDelay ? _turnOffActionFor(actionObj) : null;
+  if (offDelay && offAction) {
+    seq.push({ delay: offDelay });
+    seq.push(offAction);
+  }
+  const conditions = _automationActionConditions(a);
+  if (conditions.length) actions.push({ choose: [{ conditions, sequence: seq }] });
+  else seq.forEach(step => actions.push(step));
+}
+
 /* ── Build HA automation config from OW draft ─────────────── */
 function buildHAAutomation(auto, allZones, allGroups) {
   const zoneList  = allZones  || [];
@@ -3685,7 +3729,7 @@ function buildHAAutomation(auto, allZones, allGroups) {
   const actions    = [];
 
   // OW metadata stored in 'variables' — a valid HA field, not shown in UI, survives round-trips
-  const owMeta = { ow_id: auto.id, ow_name: auto.name };
+  const owMeta = { ow_id: auto.id, ow_name: auto.name, ow_draft: auto };
 
   for (const t of (auto.triggers || [])) {
     const forDur = t.for_duration || null;
@@ -3762,39 +3806,39 @@ function buildHAAutomation(auto, allZones, allGroups) {
   for (const a of (auto.actions || [])) {
     if (a.type === 'siren') {
       const ids = [...(a.entity_ids||[]), ...(a.entity_ids_extra||[])].filter(Boolean);
-      if (ids.length) actions.push({ action:`siren.${a.service||'turn_on'}`, target:{ entity_id:ids.length===1?ids[0]:ids } });
+      if (ids.length) pushAutomationAction(actions, a, { action:`siren.${a.service||'turn_on'}`, target:{ entity_id:ids.length===1?ids[0]:ids } });
     } else if (a.type === 'light') {
       const ids = [...(a.entity_ids_zone||[]), ...(a.entity_ids_other||[]), ...(a.entity_ids||[])].filter(Boolean);
-      if (ids.length) actions.push({ action:`light.${a.service||'turn_on'}`, target:{ entity_id:ids.length===1?ids[0]:ids } });
+      if (ids.length) pushAutomationAction(actions, a, { action:`light.${a.service||'turn_on'}`, target:{ entity_id:ids.length===1?ids[0]:ids } });
     } else if (a.type === 'notify') {
       const target = a.target||'notify.notify';
       const svc = target.startsWith('notify.')?target.slice(7):target;
-      actions.push({ action:`notify.${svc}`, data:{ message:a.message||'', title:a.title||'HA-Overwatch Alert' } });
+      pushAutomationAction(actions, a, { action:`notify.${svc}`, data:{ message:a.message||'', title:a.title||'HA-Overwatch Alert' } });
     } else if (a.type === 'arm') {
       const ids = (a.entity_ids||[]).filter(Boolean);
       if (ids.length) {
         // New format: OW zone/group switches
-        actions.push({ action:`switch.${a.service||'turn_on'}`, target:{ entity_id:ids.length===1?ids[0]:ids } });
+        pushAutomationAction(actions, a, { action:`switch.${a.service||'turn_on'}`, target:{ entity_id:ids.length===1?ids[0]:ids } });
       } else if (a.entity_id) {
         // Backward compat: old single alarm_control_panel entity
-        actions.push({ action:`alarm_control_panel.${a.service||'alarm_arm_away'}`, target:{ entity_id:a.entity_id } });
+        pushAutomationAction(actions, a, { action:`alarm_control_panel.${a.service||'alarm_arm_away'}`, target:{ entity_id:a.entity_id } });
       }
     } else if (a.type === 'camera') {
       const ids = (a.entity_ids||[]).filter(Boolean);
       if (ids.length && a.service) {
         const act = { action:`camera.${a.service}`, target:{ entity_id:ids.length===1?ids[0]:ids } };
         if (a.service_data && Object.keys(a.service_data).length) act.data = a.service_data;
-        actions.push(act);
+        pushAutomationAction(actions, a, act);
       }
     } else if (a.type === 'camera_view') {
       const ids = (a.entity_ids||[]).filter(Boolean);
       if (ids.length) {
-        actions.push({ action:`switch.${a.service||'turn_on'}`, target:{ entity_id:ids.length===1?ids[0]:ids } });
+        pushAutomationAction(actions, a, { action:`switch.${a.service||'turn_on'}`, target:{ entity_id:ids.length===1?ids[0]:ids } });
       }
     } else if (a.type === 'entity') {
       if (a.entity_id) {
         const domain = a.entity_id.split('.')[0];
-        actions.push({ action:`${domain}.${a.service||'turn_on'}`, target:{ entity_id:a.entity_id } });
+        pushAutomationAction(actions, a, { action:`${domain}.${a.service||'turn_on'}`, target:{ entity_id:a.entity_id } });
       }
     }
   }
@@ -3813,6 +3857,11 @@ function buildHAAutomation(auto, allZones, allGroups) {
 
 function parseHAAutomation(ha, allZones, allGroups) {
   const warnings  = [];
+  if (ha?.variables?.ow_draft && typeof ha.variables.ow_draft === "object") {
+    const restored = JSON.parse(JSON.stringify(ha.variables.ow_draft));
+    restored._ha_parse_warnings = [];
+    return { draft: restored, warnings: [] };
+  }
   const zoneList  = allZones  || [];
   const groupList = allGroups || [];
 

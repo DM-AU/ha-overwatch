@@ -1,5 +1,5 @@
 /* ─── CONFIG DEFAULTS ─────────────────────────────────────── */
-/* v0.05.35.04: HA area assignment preserves existing/manual zone entities and only appends HA-area entities. */
+/* v0.05.35.05: preserve active floor/selected zone across HA-area unlink/sync refreshes. */
 let uiConfig = {
   floorplan: "img/floorplan.png",
   sidebar_position: "right",
@@ -194,9 +194,15 @@ async function loadHARegistry(force = false) {
     }
 
     if (force) {
+      const prevActiveFloorId = activeFloorId;
+      const prevSelectedZoneId = selectedZoneId;
+      const prevSelectedGroupId = selectedGroupId;
       await loadZones();
       await loadGroups();
       await loadFloors();
+      if (prevActiveFloorId && floors.some(f => f.id === prevActiveFloorId)) activeFloorId = prevActiveFloorId;
+      if (prevSelectedZoneId && zones.some(z => z.id === prevSelectedZoneId)) selectedZoneId = prevSelectedZoneId;
+      if (prevSelectedGroupId && groups.some(g => g.id === prevSelectedGroupId)) selectedGroupId = prevSelectedGroupId;
       subscribeHAEntities();
       renderZones();
       if (editorMode) renderZonesEditorStable(true);

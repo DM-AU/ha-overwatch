@@ -1,5 +1,5 @@
 /* ================================================================
- * HA-Overwatch — automations.js  v0.05.12
+ * HA-Overwatch — automations.js  v0.05.35.06
  * Admin-only Automation Editor.
  * HA is source of truth — reads/writes directly via server proxy.
  * ================================================================ */
@@ -285,6 +285,12 @@ async function deleteFromHA(autoId) {
 // Parse HA automation back to OW draft (client-side mirror of server's parseHAAutomation)
 function parseHAAutomation(ha) {
   const warnings = [];
+  if (ha?.variables?.ow_draft && typeof ha.variables.ow_draft === 'object') {
+    const restored = JSON.parse(JSON.stringify(ha.variables.ow_draft));
+    restored._ha_parse_warnings = [];
+    return { draft: restored, warnings: [] };
+  }
+
   let owId=null, owName=null;
   try {
     if (ha.variables?.ow_id) { owId=ha.variables.ow_id; owName=ha.variables.ow_name||null; }
@@ -422,6 +428,74 @@ function addCondition(type) {
   _draft.conditions.push({id:uid(),type,...(defaults[type]||{})});
   renderEditorKeepScroll();
 }
+function normaliseActionControls(a) {
+  if (!a || typeof a !== 'object') return a;
+  if (!a.trigger_for) a.trigger_for = '00:00:00';
+  if (!a.condition_mode) a.condition_mode = 'always';
+  if (!a.time_after) a.time_after = '00:00';
+  if (!a.time_before) a.time_before = '23:59';
+  if (!a.condition_entity) a.condition_entity = '';
+  if (!a.clear_mode) a.clear_mode = 'none';
+  if (!a.clear_for) a.clear_for = '00:00:00';
+  return a;
+}
+function actionEntityCount(a) {
+  const ids = new Set();
+  ['entity_ids','entity_ids_zone','entity_ids_other','entity_ids_extra'].forEach(k => (a[k]||[]).forEach(id=>ids.add(id)));
+  if (a.entity_id) ids.add(a.entity_id);
+  if (a.target) ids.add(a.target);
+  return ids.size;
+}
+function actionConditionText(a) {
+  const mode = a.condition_mode || 'always';
+  if (mode === 'night') return 'only at night';
+  if (mode === 'time') return `only between ${a.time_after || '00:00'} and ${a.time_before || '23:59'}`;
+  if (mode === 'entity') return a.condition_entity ? `only when ${a.condition_entity} is on` : 'only when selected binary sensor is on';
+  return 'always';
+}
+function actionTurnOffText(a) {
+  if (!['light','siren','entity','camera_view'].includes(a.type)) return '';
+  if ((a.clear_mode || 'none') === 'after_delay') return `Turn OFF after ${a.clear_for || '00:00:00'}`;
+  return 'Do not turn off automatically';
+}
+function actionSummary(a) {
+  const label = {siren:'selected sirens', light:'selected lights', camera:'selected cameras', camera_view:'selected camera views', notify:'notification target', arm:'selected arm/disarm targets', entity:'selected entity'}[a.type] || 'selected entities';
+  const verb = a.type === 'notify' ? 'Send notification' : (a.service === 'turn_off' ? 'Turn OFF' : a.service === 'toggle' ? 'Toggle' : 'Turn ON');
+  const count = actionEntityCount(a);
+  const delay = (a.trigger_for && a.trigger_for !== '00:00:00') ? ` after ${a.trigger_for}` : ' immediately';
+  const condition = actionConditionText(a);
+  const off = actionTurnOffText(a);
+  return `${verb} ${count ? count + ' ' : ''}${label}${delay}, ${condition}${off ? ', and ' + off : ''}.`;
+}
+function actionCommonControlsHtml(a) {
+  normaliseActionControls(a);
+  const canTurnOff = ['light','siren','entity','camera_view'].includes(a.type);
+  const clear = a.clear_mode || 'none';
+  return `<div style="background:rgba(255,255,255,0.035);border:1px solid rgba(255,255,255,0.08);border-radius:9px;padding:9px;margin-bottom:10px;">
+    <div style="font-size:12px;color:#ddd;line-height:1.35;margin-bottom:9px;">${escH(actionSummary(a))}</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;">
+      <div><label style="${labelStyle}">Turn ON after automation has been triggered for</label><input id="act-for-${a.id}" type="text" value="${escH(a.trigger_for || '00:00:00')}" placeholder="HH:MM:SS" pattern="\\d{2}:\\d{2}:\\d{2}" style="${inputStyle}"/></div>
+      <div><label style="${labelStyle}">Only run</label><select id="act-cond-mode-${a.id}" style="${selectStyle}">
+        <option value="always" ${a.condition_mode==='always'?'selected':''}>Always</option>
+        <option value="night" ${a.condition_mode==='night'?'selected':''}>Night (sunset to sunrise)</option>
+        <option value="time" ${a.condition_mode==='time'?'selected':''}>During time range</option>
+        <option value="entity" ${a.condition_mode==='entity'?'selected':''}>When binary sensor is on</option>
+      </select></div>
+    </div>
+    <div id="act-cond-time-${a.id}" style="display:${a.condition_mode==='time'?'grid':'none'};grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;">
+      <div><label style="${labelStyle}">After</label><input id="act-time-after-${a.id}" type="time" value="${escH(a.time_after || '00:00')}" style="${inputStyle}"/></div>
+      <div><label style="${labelStyle}">Before</label><input id="act-time-before-${a.id}" type="time" value="${escH(a.time_before || '23:59')}" style="${inputStyle}"/></div>
+    </div>
+    <div id="act-cond-entity-${a.id}" style="display:${a.condition_mode==='entity'?'block':'none'};margin-bottom:8px;">
+      <label style="${labelStyle}">Binary sensor</label>${entityAutocomplete(`act-cond-entity-ac-${a.id}`, a.condition_entity || '', 'binary_sensor.*', null, ['binary_sensor'])}
+    </div>
+    ${canTurnOff ? `<div style="display:grid;grid-template-columns:1fr 160px;gap:8px;"><div><label style="${labelStyle}">Turn OFF</label><select id="act-clear-mode-${a.id}" style="${selectStyle}"><option value="none" ${clear==='none'?'selected':''}>Do not turn off automatically</option><option value="after_delay" ${clear==='after_delay'?'selected':''}>After fixed duration</option></select></div><div id="act-clear-for-wrap-${a.id}" style="display:${clear==='after_delay'?'':'none'}"><label style="${labelStyle}">For</label><input id="act-clear-for-${a.id}" type="text" value="${escH(a.clear_for || '00:00:00')}" placeholder="HH:MM:SS" pattern="\\d{2}:\\d{2}:\\d{2}" style="${inputStyle}"/></div></div>` : ''}
+  </div>`;
+}
+function actionLayoutHtml(a, label, inner) {
+  return `${actionCommonControlsHtml(a)}<div style="background:rgba(255,255,255,0.025);border:1px solid rgba(255,255,255,0.06);border-radius:9px;padding:9px;">${inner}</div>`;
+}
+
 function addAction(type) {
   const defaults = {
     siren:  {entity_ids:[],service:'turn_on'},
@@ -432,7 +506,7 @@ function addAction(type) {
     camera_view: {entity_ids:[],service:'turn_on'},
     entity: {entity_id:'',service:'turn_on'},
   };
-  _draft.actions.push({id:uid(),type,...(defaults[type]||{})});
+  _draft.actions.push(normaliseActionControls({id:uid(),type,...(defaults[type]||{})}));
   renderEditorKeepScroll();
 }
 
@@ -1518,6 +1592,8 @@ function actionCard(a, idx, total) {
   }
 
   const labels={siren:'Siren',light:'Light',camera:'Camera',camera_view:'Camera View',notify:'Notify',arm:'Arm/Disarm',entity:'Other Entity'};
+  normaliseActionControls(a);
+  inner = actionLayoutHtml(a, labels[a.type]||a.type, inner);
   return stepCard(a.id, labels[a.type]||a.type, inner, 'action', moveControls);
 }
 
@@ -2000,6 +2076,28 @@ function wireActionFields(a) {
     wireSelect(`act-camview-svc-${a.id}`,v=>a.service=v);
   }
   if (a.type==='entity') { wireAutocomplete(`act-entity-ac-${a.id}`,v=>a.entity_id=v); wireSelect(`act-entity-svc-${a.id}`,v=>a.service=v); }
+  wireCommonActionFields(a);
+}
+
+function wireCommonActionFields(a) {
+  normaliseActionControls(a);
+  wireInput(`act-for-${a.id}`, v=>a.trigger_for=v || '00:00:00');
+  wireSelect(`act-cond-mode-${a.id}`, v=>{
+    a.condition_mode=v || 'always';
+    const tw=_panelEl?.querySelector(`#act-cond-time-${a.id}`);
+    const ew=_panelEl?.querySelector(`#act-cond-entity-${a.id}`);
+    if(tw) tw.style.display = a.condition_mode === 'time' ? 'grid' : 'none';
+    if(ew) ew.style.display = a.condition_mode === 'entity' ? 'block' : 'none';
+  });
+  wireInput(`act-time-after-${a.id}`, v=>a.time_after=v || '00:00');
+  wireInput(`act-time-before-${a.id}`, v=>a.time_before=v || '23:59');
+  wireAutocomplete(`act-cond-entity-ac-${a.id}`, v=>a.condition_entity=v);
+  wireSelect(`act-clear-mode-${a.id}`, v=>{
+    a.clear_mode=v || 'none';
+    const wrap=_panelEl?.querySelector(`#act-clear-for-wrap-${a.id}`);
+    if(wrap) wrap.style.display = a.clear_mode === 'after_delay' ? '' : 'none';
+  });
+  wireInput(`act-clear-for-${a.id}`, v=>a.clear_for=v || '00:00:00');
 }
 
 /* ════════════════════════════════════════════════════════════
