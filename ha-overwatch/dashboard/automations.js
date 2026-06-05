@@ -1,5 +1,5 @@
 /* ================================================================
- * HA-Overwatch — automations.js  v0.05.35.06
+ * HA-Overwatch — automations.js  v0.05.35.07
  * Admin-only Automation Editor.
  * HA is source of truth — reads/writes directly via server proxy.
  * ================================================================ */
@@ -437,6 +437,8 @@ function normaliseActionControls(a) {
   if (!a.condition_entity) a.condition_entity = '';
   if (!a.clear_mode) a.clear_mode = 'none';
   if (!a.clear_for) a.clear_for = '00:00:00';
+  if (!a.clear_match) a.clear_match = 'all';
+  if (!Array.isArray(a.clear_conditions)) a.clear_conditions = ['source_clear'];
   return a;
 }
 function actionEntityCount(a) {
@@ -455,7 +457,10 @@ function actionConditionText(a) {
 }
 function actionTurnOffText(a) {
   if (!['light','siren','entity','camera_view'].includes(a.type)) return '';
-  if ((a.clear_mode || 'none') === 'after_delay') return `Turn OFF after ${a.clear_for || '00:00:00'}`;
+  const mode = a.clear_mode || 'none';
+  if (mode === 'after_delay') return `Turn OFF after ${a.clear_for || '00:00:00'}`;
+  if (mode === 'source_clears') return `Turn OFF when source clears for ${a.clear_for || '00:00:00'}`;
+  if (mode === 'conditions') return `Turn OFF when selected conditions are met for ${a.clear_for || '00:00:00'}`;
   return 'Do not turn off automatically';
 }
 function actionSummary(a) {
@@ -489,7 +494,7 @@ function actionCommonControlsHtml(a) {
     <div id="act-cond-entity-${a.id}" style="display:${a.condition_mode==='entity'?'block':'none'};margin-bottom:8px;">
       <label style="${labelStyle}">Binary sensor</label>${entityAutocomplete(`act-cond-entity-ac-${a.id}`, a.condition_entity || '', 'binary_sensor.*', null, ['binary_sensor'])}
     </div>
-    ${canTurnOff ? `<div style="display:grid;grid-template-columns:1fr 160px;gap:8px;"><div><label style="${labelStyle}">Turn OFF</label><select id="act-clear-mode-${a.id}" style="${selectStyle}"><option value="none" ${clear==='none'?'selected':''}>Do not turn off automatically</option><option value="after_delay" ${clear==='after_delay'?'selected':''}>After fixed duration</option></select></div><div id="act-clear-for-wrap-${a.id}" style="display:${clear==='after_delay'?'':'none'}"><label style="${labelStyle}">For</label><input id="act-clear-for-${a.id}" type="text" value="${escH(a.clear_for || '00:00:00')}" placeholder="HH:MM:SS" pattern="\\d{2}:\\d{2}:\\d{2}" style="${inputStyle}"/></div></div>` : ''}
+    ${canTurnOff ? `<div style="display:grid;grid-template-columns:1fr 160px;gap:8px;"><div><label style="${labelStyle}">Turn OFF</label><select id="act-clear-mode-${a.id}" style="${selectStyle}"><option value="none" ${clear==='none'?'selected':''}>Never</option><option value="after_delay" ${clear==='after_delay'?'selected':''}>After fixed time</option><option value="source_clears" ${clear==='source_clears'?'selected':''}>When source clears</option><option value="conditions" ${clear==='conditions'?'selected':''}>When selected conditions are met</option></select></div><div id="act-clear-for-wrap-${a.id}" style="display:${['after_delay','source_clears','conditions'].includes(clear)?'':'none'}"><label style="${labelStyle}">For</label><input id="act-clear-for-${a.id}" type="text" value="${escH(a.clear_for || '00:00:00')}" placeholder="HH:MM:SS" pattern="\\d{2}:\\d{2}:\\d{2}" style="${inputStyle}"/></div></div><div id="act-clear-cond-wrap-${a.id}" style="display:${clear==='conditions'?'block':'none'};margin-top:8px;border:1px solid rgba(255,255,255,0.07);border-radius:8px;padding:8px;background:rgba(255,255,255,0.025);"><label style="${labelStyle}">Conditions</label><select id="act-clear-match-${a.id}" style="${selectStyle};margin-bottom:6px;"><option value="all" ${a.clear_match!=='any'?'selected':''}>ALL selected conditions</option><option value="any" ${a.clear_match==='any'?'selected':''}>ANY selected condition</option></select><label style="display:flex;gap:6px;align-items:center;font-size:11px;color:#bbb;margin:4px 0;"><input type="checkbox" data-clear-cond="source_clear" ${((a.clear_conditions||['source_clear']).includes('source_clear'))?'checked':''}> Source/trigger entity is OFF/clear</label><label style="display:flex;gap:6px;align-items:center;font-size:11px;color:#bbb;margin:4px 0;"><input type="checkbox" data-clear-cond="alarm_not_triggered" ${((a.clear_conditions||[]).includes('alarm_not_triggered'))?'checked':''}> Alarm triggered sensors are OFF</label></div>` : ''}
   </div>`;
 }
 function actionLayoutHtml(a, label, inner) {
@@ -2095,9 +2100,18 @@ function wireCommonActionFields(a) {
   wireSelect(`act-clear-mode-${a.id}`, v=>{
     a.clear_mode=v || 'none';
     const wrap=_panelEl?.querySelector(`#act-clear-for-wrap-${a.id}`);
-    if(wrap) wrap.style.display = a.clear_mode === 'after_delay' ? '' : 'none';
+    const condWrap=_panelEl?.querySelector(`#act-clear-cond-wrap-${a.id}`);
+    if(wrap) wrap.style.display = ['after_delay','source_clears','conditions'].includes(a.clear_mode) ? '' : 'none';
+    if(condWrap) condWrap.style.display = a.clear_mode === 'conditions' ? 'block' : 'none';
   });
   wireInput(`act-clear-for-${a.id}`, v=>a.clear_for=v || '00:00:00');
+  wireSelect(`act-clear-match-${a.id}`, v=>a.clear_match=v || 'all');
+  _panelEl?.querySelectorAll(`#act-clear-cond-wrap-${a.id} input[data-clear-cond]`).forEach(cb=>{
+    cb.onchange=()=>{
+      a.clear_conditions=[..._panelEl.querySelectorAll(`#act-clear-cond-wrap-${a.id} input[data-clear-cond]:checked`)].map(x=>x.dataset.clearCond);
+      if(!a.clear_conditions.length) a.clear_conditions=['source_clear'];
+    };
+  });
 }
 
 /* ════════════════════════════════════════════════════════════

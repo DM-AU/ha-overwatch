@@ -1,5 +1,5 @@
 /* ─── HA-Overwatch Zone Editor Module ─────────────────────────
- * Stable baseline: v0.05.35.06.
+ * Stable baseline: v0.05.35.07.
  * Scope: Zone Editor panel rendering, device rows/search, draggable editor helper.
  * Classic browser script; load before app.js.
  * Deliberately excludes SVG/map runtime events, zone popup rendering, and status dropdowns.
@@ -1082,8 +1082,10 @@ function renderZonesEditor(force = false) {
       setZoneGroup(selectedZone.id, e.target.value || null);
     });
 
-    // HA Area select — metadata assignment only. Do not navigate floors and do not delete existing entities.
+    // HA Area select — assignment/removal must not change floors.
+    // When unlinking an area, default behaviour is to remove the old area's entities; Cancel keeps them as manual.
     document.getElementById("zoneHAAreaSelect")?.addEventListener("change", async e => {
+      const oldAreaId = selectedZone.ha_area_id;
       const newAreaId = e.target.value || null;
       const prevActiveFloorId = activeFloorId;
       const prevSelectedZoneId = selectedZoneId;
@@ -1092,16 +1094,32 @@ function renderZonesEditor(force = false) {
       window._owSuppressFloorChange = true;
 
       try {
+        if (oldAreaId && oldAreaId !== newAreaId && !newAreaId) {
+          const removeOldAreaEntities = confirm(
+            'Remove entities from the old HA Area?\n\n' +
+            'OK = remove old HA Area sensors, cameras, lights, sirens, and door/window pins.\n' +
+            'Cancel = keep them as manually managed entities.'
+          );
+          if (removeOldAreaEntities) {
+            const oldAreaEntities = new Set(haEntitiesForArea(oldAreaId).map(e => e.entity_id));
+            const oldDoorPins = doorPins.filter(p => doorPinZoneIds(p).includes(selectedZone.id) && oldAreaEntities.has(p.sensor_entity));
+            for (const pin of oldDoorPins) {
+              doorPins.splice(doorPins.indexOf(pin), 1);
+              await fetch(apiPath('ow/delete-door-pin'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: pin.id }) });
+            }
+            ['sensors','cameras','lights','sirens'].forEach(tab => {
+              selectedZone[tab] = (selectedZone[tab]||[]).filter(eid => !oldAreaEntities.has(eid));
+            });
+            selectedZone.ha_excluded_entities = (selectedZone.ha_excluded_entities||[]).filter(eid => !oldAreaEntities.has(eid));
+          }
+        }
+
         selectedZone.ha_area_id = newAreaId;
         await saveZone(selectedZone);
-
-        // Sync adds HA area entities that are not already present. Existing manually-added
-        // entities are preserved and can be ghosted manually if they should be ignored.
-        if (newAreaId && typeof syncZoneFromHAArea === 'function') {
-          await syncZoneFromHAArea(selectedZone, { forceRefresh: true });
-        }
+        if (newAreaId && typeof syncZoneFromHAArea === 'function') await syncZoneFromHAArea(selectedZone, { forceRefresh: true });
       } finally {
         if (prevActiveFloorId && floors.some(f => f.id === prevActiveFloorId)) activeFloorId = prevActiveFloorId;
+        if (activeFloorId) localStorage.setItem("ow_active_floor", activeFloorId);
         if (prevSelectedZoneId && zones.some(z => z.id === prevSelectedZoneId)) selectedZoneId = prevSelectedZoneId;
         if (prevSelectedGroupId && groups.some(g => g.id === prevSelectedGroupId)) selectedGroupId = prevSelectedGroupId;
         window._owSuppressFloorChange = prevSuppressFloorChange;
@@ -1120,11 +1138,10 @@ function renderZonesEditor(force = false) {
       const prevSuppressFloorChange = window._owSuppressFloorChange === true;
       window._owSuppressFloorChange = true;
       try {
-        if (typeof syncZoneFromHAArea === 'function') {
-          await syncZoneFromHAArea(selectedZone, { forceRefresh: true });
-        }
+        if (typeof syncZoneFromHAArea === 'function') await syncZoneFromHAArea(selectedZone, { forceRefresh: true });
       } finally {
         if (prevActiveFloorId && floors.some(f => f.id === prevActiveFloorId)) activeFloorId = prevActiveFloorId;
+        if (activeFloorId) localStorage.setItem("ow_active_floor", activeFloorId);
         if (prevSelectedZoneId && zones.some(z => z.id === prevSelectedZoneId)) selectedZoneId = prevSelectedZoneId;
         if (prevSelectedGroupId && groups.some(g => g.id === prevSelectedGroupId)) selectedGroupId = prevSelectedGroupId;
         window._owSuppressFloorChange = prevSuppressFloorChange;

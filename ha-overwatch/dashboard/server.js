@@ -1,4 +1,4 @@
-// HA-Overwatch 0.05.35.07-automation-action-controls: automation actions support per-action Only run, start delay, and fixed turn-off cleanup.
+// HA-Overwatch 0.05.35.07-floor-area-dynamic-turnoff: automation actions support per-action Only run, start delay, and fixed turn-off cleanup.
 /* ============================================================
  * HA-Overwatch — server.js
  *
@@ -3693,17 +3693,39 @@ function _turnOffActionFor(actionObj) {
   if (!['light','siren','switch'].includes(domain)) return null;
   return { action: `${domain}.turn_off`, target: actionObj.target || {} };
 }
+function _clearTemplateForAction(a) {
+  const conds = Array.isArray(a?.clear_conditions) && a.clear_conditions.length ? a.clear_conditions : ['source_clear'];
+  const parts = [];
+  if (conds.includes('source_clear')) parts.push("is_state(trigger.entity_id, 'off')");
+  if (conds.includes('alarm_not_triggered')) parts.push("states.binary_sensor | selectattr('entity_id','match','binary_sensor\.overwatch_alarm_.*triggered') | selectattr('state','eq','on') | list | count == 0");
+  if (!parts.length) parts.push("is_state(trigger.entity_id, 'off')");
+  const op = (a?.clear_match === 'any') ? ' or ' : ' and ';
+  return `{{ ${parts.join(op)} }}`;
+}
+function _pushDynamicTurnOff(seq, a, actionObj) {
+  const clearMode = String(a?.clear_mode || 'none');
+  const offAction = _turnOffActionFor(actionObj);
+  if (!offAction || clearMode === 'none') return;
+  const clearFor = _autoDuration(a?.clear_for) || '00:00:00';
+  if (clearMode === 'after_delay') {
+    if (clearFor !== '00:00:00') seq.push({ delay: clearFor });
+    seq.push(offAction);
+    return;
+  }
+  if (clearMode === 'source_clears' || clearMode === 'conditions') {
+    const tpl = clearMode === 'source_clears' ? "{{ is_state(trigger.entity_id, 'off') }}" : _clearTemplateForAction(a);
+    seq.push({ wait_template: tpl, continue_on_timeout: false });
+    if (clearFor !== '00:00:00') seq.push({ delay: clearFor });
+    seq.push({ condition: 'template', value_template: tpl });
+    seq.push(offAction);
+  }
+}
 function pushAutomationAction(actions, a, actionObj) {
   const seq = [];
   const startDelay = _autoDuration(a?.trigger_for);
   if (startDelay) seq.push({ delay: startDelay });
   seq.push(actionObj);
-  const offDelay = (a?.clear_mode === 'after_delay') ? _autoDuration(a?.clear_for) : null;
-  const offAction = offDelay ? _turnOffActionFor(actionObj) : null;
-  if (offDelay && offAction) {
-    seq.push({ delay: offDelay });
-    seq.push(offAction);
-  }
+  _pushDynamicTurnOff(seq, a, actionObj);
   const conditions = _automationActionConditions(a);
   if (conditions.length) actions.push({ choose: [{ conditions, sequence: seq }] });
   else seq.forEach(step => actions.push(step));

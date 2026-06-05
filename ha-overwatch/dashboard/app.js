@@ -1,5 +1,5 @@
 /* ─── CONFIG DEFAULTS ─────────────────────────────────────── */
-/* v0.05.35.06: preserve active floor/selected zone across HA-area assignment/sync refreshes. */
+/* v0.05.35.07: preserve active floor/selected zone and keep startup floor/map consistent. */
 let uiConfig = {
   floorplan: "img/floorplan.png",
   sidebar_position: "right",
@@ -83,7 +83,7 @@ let zones = [];
 let groups = [];          // Zone groups
 let floors = [];          // Floor definitions [{id, name, floorplan}]
 let activeFloorId = null; // Currently displayed floor id
-// v0.05.35.06: guards floor navigation while HA area assignment/sync refreshes data.
+// v0.05.35.07: suppress floor navigation while HA area assignment/sync refreshes data.
 window._owSuppressFloorChange = window._owSuppressFloorChange || false;
 let lights     = [];      // Map light pins [{id, name, entity_id, floor_id, x, y, direction}]
 let sirens     = [];      // Map siren pins [{id, name, entity_id, floor_id, x, y}]
@@ -206,6 +206,7 @@ async function loadHARegistry(force = false) {
         await loadGroups();
         await loadFloors();
         if (prevActiveFloorId && floors.some(f => f.id === prevActiveFloorId)) activeFloorId = prevActiveFloorId;
+        if (activeFloorId) localStorage.setItem("ow_active_floor", activeFloorId);
         if (prevSelectedZoneId && zones.some(z => z.id === prevSelectedZoneId)) selectedZoneId = prevSelectedZoneId;
         if (prevSelectedGroupId && groups.some(g => g.id === prevSelectedGroupId)) selectedGroupId = prevSelectedGroupId;
       } finally {
@@ -496,10 +497,13 @@ function applyConfig() {
 
   const fp = document.getElementById("floorplanImage");
   if (fp && uiConfig.floorplan) {
-    const fpPath   = apiPath(uiConfig.floorplan);
+    // v0.05.35.07: if floors are loaded, the active floor owns the image.
+    // Prevent config polling from reverting the map image to the default floorplan.
+    const activeFloorPlan = (typeof activeFloor === 'function' ? activeFloor()?.floorplan : null) || uiConfig.floorplan;
+    const fpPath   = apiPath(activeFloorPlan);
     const newBase  = fpPath.split("?")[0];
     const curBase  = fp.src.split("?")[0].replace(window.location.origin, "").replace(/^\/api\/hassio_ingress\/[^/]+/, "");
-    if (!fp.dataset.loaded || !fp.src.includes(encodeURIComponent(uiConfig.floorplan).replace(/%20/g, " ").split("/").pop().split("?")[0])) {
+    if (!fp.dataset.loaded || !fp.src.includes(encodeURIComponent(activeFloorPlan).replace(/%20/g, " ").split("/").pop().split("?")[0])) {
       fp.src = fpPath + "?v=" + Date.now();
       fp.dataset.loaded = "1";
       fp.onload = initFloorplan;

@@ -1,5 +1,5 @@
 /* ─── HA-Overwatch Floors Module ───────────────────────────────
- * Stable baseline: v0.05.35.06.
+ * Stable baseline: v0.05.35.07.
  * Scope: Floor CRUD, active floor switching, multi-panel runtime.
  * Classic browser script; load before app.js.
  */
@@ -19,14 +19,17 @@ async function loadFloors() {
     const res = await fetch(apiPath("ow/floors") + "?v=" + Date.now());
     if (!res.ok) { floors = []; return; }
     floors = await res.json();
-    // v0.05.35.06: preserve current floor during HA registry/area refreshes.
-    // Only choose a default floor on initial load, or if the previous floor no longer exists.
+    // v0.05.35.07: one source of truth for startup floor.
+    // Prefer the last selected floor; fall back to the first/default floor if it no longer exists.
     const previousActiveFloorId = activeFloorId;
-    if (!activeFloorId || !floors.some(f => f.id === activeFloorId)) {
-      const savedActiveFloorId = localStorage.getItem("ow_active_floor");
-      activeFloorId = floors.find(f => f.id === savedActiveFloorId)?.id || floors[0]?.id || null;
+    const savedActiveFloorId = localStorage.getItem("ow_active_floor");
+    if (savedActiveFloorId && floors.some(f => f.id === savedActiveFloorId)) {
+      activeFloorId = savedActiveFloorId;
+    } else if (!activeFloorId || !floors.some(f => f.id === activeFloorId)) {
+      activeFloorId = floors[0]?.id || null;
     }
-    // Clear saved zoom only when the active floor actually changes.
+    if (activeFloorId) localStorage.setItem("ow_active_floor", activeFloorId);
+    // Clear saved zoom only if the floor actually changed.
     if (previousActiveFloorId !== activeFloorId) {
       localStorage.removeItem("zoomScale");
       localStorage.removeItem("zoomX");
@@ -73,8 +76,7 @@ async function deleteFloor(id) {
 }
 
 function setActiveFloor(id) {
-  // v0.05.35.06: HA area assignment/sync is data refresh, not navigation.
-  // Suppression is used while the zone editor is reconciling HA area membership.
+  // v0.05.35.07: HA area assignment/sync is data refresh, not floor navigation.
   if (window._owSuppressFloorChange) return;
 
   const floor = floors.find(f => f.id === id);
