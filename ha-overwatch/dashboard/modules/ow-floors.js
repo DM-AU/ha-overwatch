@@ -1,5 +1,5 @@
 /* ─── HA-Overwatch Floors Module ───────────────────────────────
- * Stable baseline: v1.551.36.09.
+ * Stable baseline: v0.05.35.06.
  * Scope: Floor CRUD, active floor switching, multi-panel runtime.
  * Classic browser script; load before app.js.
  */
@@ -19,13 +19,19 @@ async function loadFloors() {
     const res = await fetch(apiPath("ow/floors") + "?v=" + Date.now());
     if (!res.ok) { floors = []; return; }
     floors = await res.json();
-    // Set active floor to saved preference or first floor
-    // Always start on the first floor on page load so the map and editor are in sync
-    activeFloorId = floors[0]?.id || null;
-    // Clear saved zoom so each page load fits the floor image to the panel fresh
-    localStorage.removeItem("zoomScale");
-    localStorage.removeItem("zoomX");
-    localStorage.removeItem("zoomY");
+    // v0.05.35.06: preserve current floor during HA registry/area refreshes.
+    // Only choose a default floor on initial load, or if the previous floor no longer exists.
+    const previousActiveFloorId = activeFloorId;
+    if (!activeFloorId || !floors.some(f => f.id === activeFloorId)) {
+      const savedActiveFloorId = localStorage.getItem("ow_active_floor");
+      activeFloorId = floors.find(f => f.id === savedActiveFloorId)?.id || floors[0]?.id || null;
+    }
+    // Clear saved zoom only when the active floor actually changes.
+    if (previousActiveFloorId !== activeFloorId) {
+      localStorage.removeItem("zoomScale");
+      localStorage.removeItem("zoomX");
+      localStorage.removeItem("zoomY");
+    }
     // Load the active floor's floorplan image and await it so initFloorplan
     // gets correct dimensions before renderZones runs
     const floor = activeFloor();
@@ -67,6 +73,10 @@ async function deleteFloor(id) {
 }
 
 function setActiveFloor(id) {
+  // v0.05.35.06: HA area assignment/sync is data refresh, not navigation.
+  // Suppression is used while the zone editor is reconciling HA area membership.
+  if (window._owSuppressFloorChange) return;
+
   const floor = floors.find(f => f.id === id);
   if (!floor) return;
 

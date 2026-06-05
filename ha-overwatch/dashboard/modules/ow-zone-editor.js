@@ -1,5 +1,5 @@
 /* ─── HA-Overwatch Zone Editor Module ─────────────────────────
- * Stable baseline: v1.551.36.11.
+ * Stable baseline: v0.05.35.06.
  * Scope: Zone Editor panel rendering, device rows/search, draggable editor helper.
  * Classic browser script; load before app.js.
  * Deliberately excludes SVG/map runtime events, zone popup rendering, and status dropdowns.
@@ -1082,42 +1082,56 @@ function renderZonesEditor(force = false) {
       setZoneGroup(selectedZone.id, e.target.value || null);
     });
 
-    // HA Area select — when changed, remove old area's synced entities and sync new area
+    // HA Area select — metadata assignment only. Do not navigate floors and do not delete existing entities.
     document.getElementById("zoneHAAreaSelect")?.addEventListener("change", async e => {
-      const oldAreaId = selectedZone.ha_area_id;
       const newAreaId = e.target.value || null;
+      const prevActiveFloorId = activeFloorId;
+      const prevSelectedZoneId = selectedZoneId;
+      const prevSelectedGroupId = selectedGroupId;
+      const prevSuppressFloorChange = window._owSuppressFloorChange === true;
+      window._owSuppressFloorChange = true;
 
-      // Remove entities that came from the OLD area (not manually added)
-      if (oldAreaId && oldAreaId !== newAreaId) {
-        const oldAreaEntities = new Set(haEntitiesForArea(oldAreaId).map(e => e.entity_id));
-        // Also include door pins from old area
-        const oldDoorPins = doorPins.filter(p => doorPinZoneIds(p).includes(selectedZone.id) && oldAreaEntities.has(p.sensor_entity));
-        for (const pin of oldDoorPins) {
-          doorPins.splice(doorPins.indexOf(pin), 1);
-          await fetch(apiPath('ow/delete-door-pin'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: pin.id }) });
+      try {
+        selectedZone.ha_area_id = newAreaId;
+        await saveZone(selectedZone);
+
+        // Sync adds HA area entities that are not already present. Existing manually-added
+        // entities are preserved and can be ghosted manually if they should be ignored.
+        if (newAreaId && typeof syncZoneFromHAArea === 'function') {
+          await syncZoneFromHAArea(selectedZone, { forceRefresh: true });
         }
-        // Remove from entity tabs — only those that came from the old area
-        ['sensors','cameras','lights','sirens'].forEach(tab => {
-          selectedZone[tab] = (selectedZone[tab]||[]).filter(eid => !oldAreaEntities.has(eid));
-        });
-        // Clear excluded entities from old area too
-        selectedZone.ha_excluded_entities = (selectedZone.ha_excluded_entities||[]).filter(eid => !oldAreaEntities.has(eid));
+      } finally {
+        if (prevActiveFloorId && floors.some(f => f.id === prevActiveFloorId)) activeFloorId = prevActiveFloorId;
+        if (prevSelectedZoneId && zones.some(z => z.id === prevSelectedZoneId)) selectedZoneId = prevSelectedZoneId;
+        if (prevSelectedGroupId && groups.some(g => g.id === prevSelectedGroupId)) selectedGroupId = prevSelectedGroupId;
+        window._owSuppressFloorChange = prevSuppressFloorChange;
       }
 
-      selectedZone.ha_area_id = newAreaId;
-      await saveZone(selectedZone);
-
-      // Sync entities from new area if one was selected. Force a registry refresh so
-      // newly-added/removed HA area devices are reconciled immediately.
-      if (newAreaId) await syncZoneFromHAArea(selectedZone, { forceRefresh: true });
-
-      renderZonesEditor(true);
+      renderZones();
+      renderZonesEditorStable ? renderZonesEditorStable(true) : renderZonesEditor(true);
+      if (window._updateFloorBtn) window._updateFloorBtn();
     });
 
-    // HA Area sync button — authoritative refresh + reconcile from HA area
+    // HA Area sync button — authoritative refresh + reconcile from HA area without changing floors
     document.getElementById("zoneHAAreaSync")?.addEventListener("click", async () => {
-      await syncZoneFromHAArea(selectedZone, { forceRefresh: true });
-      renderZonesEditor(true);
+      const prevActiveFloorId = activeFloorId;
+      const prevSelectedZoneId = selectedZoneId;
+      const prevSelectedGroupId = selectedGroupId;
+      const prevSuppressFloorChange = window._owSuppressFloorChange === true;
+      window._owSuppressFloorChange = true;
+      try {
+        if (typeof syncZoneFromHAArea === 'function') {
+          await syncZoneFromHAArea(selectedZone, { forceRefresh: true });
+        }
+      } finally {
+        if (prevActiveFloorId && floors.some(f => f.id === prevActiveFloorId)) activeFloorId = prevActiveFloorId;
+        if (prevSelectedZoneId && zones.some(z => z.id === prevSelectedZoneId)) selectedZoneId = prevSelectedZoneId;
+        if (prevSelectedGroupId && groups.some(g => g.id === prevSelectedGroupId)) selectedGroupId = prevSelectedGroupId;
+        window._owSuppressFloorChange = prevSuppressFloorChange;
+      }
+      renderZones();
+      renderZonesEditorStable ? renderZonesEditorStable(true) : renderZonesEditor(true);
+      if (window._updateFloorBtn) window._updateFloorBtn();
     });
 
     // Device tabs

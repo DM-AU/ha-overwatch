@@ -1,5 +1,5 @@
 /* ─── CONFIG DEFAULTS ─────────────────────────────────────── */
-/* v0.05.35.05: preserve active floor/selected zone across HA-area unlink/sync refreshes. */
+/* v0.05.35.06: preserve active floor/selected zone across HA-area assignment/sync refreshes. */
 let uiConfig = {
   floorplan: "img/floorplan.png",
   sidebar_position: "right",
@@ -83,6 +83,8 @@ let zones = [];
 let groups = [];          // Zone groups
 let floors = [];          // Floor definitions [{id, name, floorplan}]
 let activeFloorId = null; // Currently displayed floor id
+// v0.05.35.06: guards floor navigation while HA area assignment/sync refreshes data.
+window._owSuppressFloorChange = window._owSuppressFloorChange || false;
 let lights     = [];      // Map light pins [{id, name, entity_id, floor_id, x, y, direction}]
 let sirens     = [];      // Map siren pins [{id, name, entity_id, floor_id, x, y}]
 let cameraPins = [];      // Map camera pins [{id, name, entity_id, floor_id, x, y}]
@@ -197,12 +199,18 @@ async function loadHARegistry(force = false) {
       const prevActiveFloorId = activeFloorId;
       const prevSelectedZoneId = selectedZoneId;
       const prevSelectedGroupId = selectedGroupId;
-      await loadZones();
-      await loadGroups();
-      await loadFloors();
-      if (prevActiveFloorId && floors.some(f => f.id === prevActiveFloorId)) activeFloorId = prevActiveFloorId;
-      if (prevSelectedZoneId && zones.some(z => z.id === prevSelectedZoneId)) selectedZoneId = prevSelectedZoneId;
-      if (prevSelectedGroupId && groups.some(g => g.id === prevSelectedGroupId)) selectedGroupId = prevSelectedGroupId;
+      const prevSuppressFloorChange = window._owSuppressFloorChange === true;
+      window._owSuppressFloorChange = true;
+      try {
+        await loadZones();
+        await loadGroups();
+        await loadFloors();
+        if (prevActiveFloorId && floors.some(f => f.id === prevActiveFloorId)) activeFloorId = prevActiveFloorId;
+        if (prevSelectedZoneId && zones.some(z => z.id === prevSelectedZoneId)) selectedZoneId = prevSelectedZoneId;
+        if (prevSelectedGroupId && groups.some(g => g.id === prevSelectedGroupId)) selectedGroupId = prevSelectedGroupId;
+      } finally {
+        window._owSuppressFloorChange = prevSuppressFloorChange;
+      }
       subscribeHAEntities();
       renderZones();
       if (editorMode) renderZonesEditorStable(true);
