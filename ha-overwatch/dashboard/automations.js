@@ -1,5 +1,5 @@
 /* ================================================================
- * HA-Overwatch — automations.js  v0.05.35.07
+ * HA-Overwatch — automations.js  v0.05.35.08
  * Admin-only Automation Editor.
  * HA is source of truth — reads/writes directly via server proxy.
  * ================================================================ */
@@ -145,34 +145,38 @@ function sensorsByType(type) {
 }
 
 // Build a device tree (lights/cameras) from zoneGroupTree, filtering to zones that have the device type
+function isEntityGhostedInZone(zone, entityId) {
+  return !!(zone && entityId && (zone.ha_excluded_entities || []).includes(entityId));
+}
+function isEntityGhostedAnywhere(entityId) {
+  return zones().some(z => isEntityGhostedInZone(z, entityId));
+}
+function zoneDeviceIds(zone, deviceKey) {
+  return (zone?.[deviceKey] || []).filter(eid => !isEntityGhostedInZone(zone, eid));
+}
+function deviceEntry(entityId) {
+  return {
+    entity_id: entityId,
+    name: haStates()[entityId]?.attributes?.friendly_name || entityId.split('.').pop().replace(/_/g, ' '),
+    state: haStates()[entityId]?.state,
+  };
+}
 function deviceTreeFromZones(deviceKey) {
-  // deviceKey: 'lights' | 'cameras'
-  // Returns the same floor→group→zone structure as zoneGroupTree but only nodes with devices
   const tree = zoneGroupTree();
   const result = [];
   tree.forEach(node => {
     if (node.type === 'floor') {
-      const floorGroups = (node.groups||[]).map(g => {
-        const gZones = g.zones.filter(z=>(z[deviceKey]||[]).length>0).map(z=>({
-          ...z, devices:(z[deviceKey]||[]).map(eid=>({entity_id:eid,name:haStates()[eid]?.attributes?.friendly_name||eid.split('.').pop().replace(/_/g,' '),state:haStates()[eid]?.state}))
-        }));
-        return gZones.length ? {...g, zones:gZones} : null;
+      const floorGroups = (node.groups || []).map(g => {
+        const gZones = g.zones.filter(z => zoneDeviceIds(z, deviceKey).length > 0).map(z => ({ ...z, devices: zoneDeviceIds(z, deviceKey).map(deviceEntry) }));
+        return gZones.length ? { ...g, zones:gZones } : null;
       }).filter(Boolean);
-      const floorUngrouped = (node.ungrouped||[]).filter(z=>(z[deviceKey]||[]).length>0).map(z=>({
-        ...z, devices:(z[deviceKey]||[]).map(eid=>({entity_id:eid,name:haStates()[eid]?.attributes?.friendly_name||eid.split('.').pop().replace(/_/g,' '),state:haStates()[eid]?.state}))
-      }));
-      if (floorGroups.length||floorUngrouped.length) {
-        result.push({type:'floor',id:node.id,name:node.name,groups:floorGroups,ungrouped:floorUngrouped,triggered:node.triggered,armed:node.armed});
-      }
+      const floorUngrouped = (node.ungrouped || []).filter(z => zoneDeviceIds(z, deviceKey).length > 0).map(z => ({ ...z, devices: zoneDeviceIds(z, deviceKey).map(deviceEntry) }));
+      if (floorGroups.length || floorUngrouped.length) result.push({ type:'floor', id:node.id, name:node.name, groups:floorGroups, ungrouped:floorUngrouped, triggered:node.triggered, armed:node.armed });
     } else if (node.type === 'group') {
-      const gZones = node.zones.filter(z=>(z[deviceKey]||[]).length>0).map(z=>({
-        ...z, devices:(z[deviceKey]||[]).map(eid=>({entity_id:eid,name:haStates()[eid]?.attributes?.friendly_name||eid.split('.').pop().replace(/_/g,' '),state:haStates()[eid]?.state}))
-      }));
-      if (gZones.length) result.push({type:'group',...node,zones:gZones});
+      const gZones = node.zones.filter(z => zoneDeviceIds(z, deviceKey).length > 0).map(z => ({ ...z, devices: zoneDeviceIds(z, deviceKey).map(deviceEntry) }));
+      if (gZones.length) result.push({ type:'group', ...node, zones:gZones });
     } else if (node.type === 'ungrouped') {
-      (node.zones||[]).filter(z=>(z[deviceKey]||[]).length>0).forEach(z=>{
-        result.push({type:'zone',...z, devices:(z[deviceKey]||[]).map(eid=>({entity_id:eid,name:haStates()[eid]?.attributes?.friendly_name||eid.split('.').pop().replace(/_/g,' '),state:haStates()[eid]?.state}))});
-      });
+      (node.zones || []).filter(z => zoneDeviceIds(z, deviceKey).length > 0).forEach(z => result.push({ type:'zone', ...z, devices: zoneDeviceIds(z, deviceKey).map(deviceEntry) }));
     }
   });
   return result;
@@ -186,9 +190,9 @@ function sirensByGroupZone()   { return deviceTreeFromZones('sirens'); }
 
 function sirenEntities() {
   const s = new Set();
-  zones().forEach(z=>(z.sirens||[]).forEach(e=>s.add(e)));
+  zones().forEach(z=>zoneDeviceIds(z, 'sirens').forEach(e=>s.add(e)));
   (ow().sirens||[]).forEach(p=>{if(p.entity_id)s.add(p.entity_id);});
-  entitiesByDomain('siren').forEach(e=>s.add(e.entity_id));
+  entitiesByDomain('siren').filter(e=>!isEntityGhostedAnywhere(e.entity_id)).forEach(e=>s.add(e.entity_id));
   // Filter: only entities with 'siren' in entity_id or friendly_name
   return [...s].filter(id=>{
     const fn=(haStates()[id]?.attributes?.friendly_name||'').toLowerCase();
@@ -476,6 +480,9 @@ function actionCommonControlsHtml(a) {
   normaliseActionControls(a);
   const canTurnOff = ['light','siren','entity','camera_view'].includes(a.type);
   const clear = a.clear_mode || 'none';
+  if (!a.clear_match) a.clear_match = 'all';
+  if (!Array.isArray(a.clear_conditions)) a.clear_conditions = ['source_clear'];
+  const clearTimed = ['after_delay','source_clears','conditions'].includes(clear);
   return `<div style="background:rgba(255,255,255,0.035);border:1px solid rgba(255,255,255,0.08);border-radius:9px;padding:9px;margin-bottom:10px;">
     <div style="font-size:12px;color:#ddd;line-height:1.35;margin-bottom:9px;">${escH(actionSummary(a))}</div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;">
@@ -494,7 +501,7 @@ function actionCommonControlsHtml(a) {
     <div id="act-cond-entity-${a.id}" style="display:${a.condition_mode==='entity'?'block':'none'};margin-bottom:8px;">
       <label style="${labelStyle}">Binary sensor</label>${entityAutocomplete(`act-cond-entity-ac-${a.id}`, a.condition_entity || '', 'binary_sensor.*', null, ['binary_sensor'])}
     </div>
-    ${canTurnOff ? `<div style="display:grid;grid-template-columns:1fr 160px;gap:8px;"><div><label style="${labelStyle}">Turn OFF</label><select id="act-clear-mode-${a.id}" style="${selectStyle}"><option value="none" ${clear==='none'?'selected':''}>Never</option><option value="after_delay" ${clear==='after_delay'?'selected':''}>After fixed time</option><option value="source_clears" ${clear==='source_clears'?'selected':''}>When source clears</option><option value="conditions" ${clear==='conditions'?'selected':''}>When selected conditions are met</option></select></div><div id="act-clear-for-wrap-${a.id}" style="display:${['after_delay','source_clears','conditions'].includes(clear)?'':'none'}"><label style="${labelStyle}">For</label><input id="act-clear-for-${a.id}" type="text" value="${escH(a.clear_for || '00:00:00')}" placeholder="HH:MM:SS" pattern="\\d{2}:\\d{2}:\\d{2}" style="${inputStyle}"/></div></div><div id="act-clear-cond-wrap-${a.id}" style="display:${clear==='conditions'?'block':'none'};margin-top:8px;border:1px solid rgba(255,255,255,0.07);border-radius:8px;padding:8px;background:rgba(255,255,255,0.025);"><label style="${labelStyle}">Conditions</label><select id="act-clear-match-${a.id}" style="${selectStyle};margin-bottom:6px;"><option value="all" ${a.clear_match!=='any'?'selected':''}>ALL selected conditions</option><option value="any" ${a.clear_match==='any'?'selected':''}>ANY selected condition</option></select><label style="display:flex;gap:6px;align-items:center;font-size:11px;color:#bbb;margin:4px 0;"><input type="checkbox" data-clear-cond="source_clear" ${((a.clear_conditions||['source_clear']).includes('source_clear'))?'checked':''}> Source/trigger entity is OFF/clear</label><label style="display:flex;gap:6px;align-items:center;font-size:11px;color:#bbb;margin:4px 0;"><input type="checkbox" data-clear-cond="alarm_not_triggered" ${((a.clear_conditions||[]).includes('alarm_not_triggered'))?'checked':''}> Alarm triggered sensors are OFF</label></div>` : ''}
+    ${canTurnOff ? `<div style="display:grid;grid-template-columns:1fr 160px;gap:8px;"><div><label style="${labelStyle}">Turn OFF</label><select id="act-clear-mode-${a.id}" style="${selectStyle}"><option value="none" ${clear==='none'?'selected':''}>Never</option><option value="after_delay" ${clear==='after_delay'?'selected':''}>After fixed time</option><option value="source_clears" ${clear==='source_clears'?'selected':''}>When source clears</option><option value="conditions" ${clear==='conditions'?'selected':''}>When selected conditions are met</option></select></div><div id="act-clear-for-wrap-${a.id}" style="display:${clearTimed?'':'none'}"><label style="${labelStyle}">For</label><input id="act-clear-for-${a.id}" type="text" value="${escH(a.clear_for || '00:00:00')}" placeholder="HH:MM:SS" pattern="\\d{2}:\\d{2}:\\d{2}" style="${inputStyle}"/></div></div><div id="act-clear-cond-wrap-${a.id}" style="display:${clear==='conditions'?'block':'none'};margin-top:8px;border:1px solid rgba(255,255,255,0.07);border-radius:8px;padding:8px;background:rgba(255,255,255,0.025);"><label style="${labelStyle}">Conditions</label><select id="act-clear-match-${a.id}" style="${selectStyle};margin-bottom:6px;"><option value="all" ${a.clear_match!=='any'?'selected':''}>ALL selected conditions</option><option value="any" ${a.clear_match==='any'?'selected':''}>ANY selected condition</option></select><label style="display:flex;gap:6px;align-items:center;font-size:11px;color:#bbb;margin:4px 0;"><input type="checkbox" data-clear-cond="source_clear" ${((a.clear_conditions||['source_clear']).includes('source_clear'))?'checked':''}> Source/trigger entity is OFF/clear</label><label style="display:flex;gap:6px;align-items:center;font-size:11px;color:#bbb;margin:4px 0;"><input type="checkbox" data-clear-cond="alarm_not_triggered" ${((a.clear_conditions||[]).includes('alarm_not_triggered'))?'checked':''}> Alarm triggered sensors are OFF</label></div>` : ''}
   </div>`;
 }
 function actionLayoutHtml(a, label, inner) {
@@ -1362,7 +1369,7 @@ function actionCard(a, idx, total) {
     const tree = lightsByGroupZone();
     const otherLights = entitiesByDomain('light').filter(e=>{
       const allZoneLightIds=new Set(zones().flatMap(z=>z.lights||[]));
-      return !allZoneLightIds.has(e.entity_id);
+      return !allZoneLightIds.has(e.entity_id) && !isEntityGhostedAnywhere(e.entity_id);
     });
     inner = `
       ${tree.length ? deviceActionTree(tree, a.entity_ids_zone||[], `act-light-${a.id}`) : ''}

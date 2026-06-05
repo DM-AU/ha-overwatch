@@ -1,5 +1,5 @@
 /* ─── HA-Overwatch Zone Editor Module ─────────────────────────
- * Stable baseline: v0.05.35.07.
+ * Stable baseline: v0.05.35.08.
  * Scope: Zone Editor panel rendering, device rows/search, draggable editor helper.
  * Classic browser script; load before app.js.
  * Deliberately excludes SVG/map runtime events, zone popup rendering, and status dropdowns.
@@ -1424,6 +1424,15 @@ function doorPinRow(pin, zone) {
 
 
 
+function isZoneHAAreaEntity(zone, entityId) {
+  if (!zone?.ha_area_id || !entityId || typeof haEntitiesForArea !== 'function') return false;
+  try {
+    return haEntitiesForArea(zone.ha_area_id).some(e => e.entity_id === entityId);
+  } catch {
+    return false;
+  }
+}
+
 function deviceRow(entityId, devType, zone) {
   const st = haStates[entityId];
   const stateStr  = st ? st.state : (haConnected ? "unavailable" : "—");
@@ -1434,18 +1443,16 @@ function deviceRow(entityId, devType, zone) {
   const icons = { sensors:"⬡", cameras:"⊡", lights:"⊙", sirens:"⊛" };
   const icon = icons[devType] || "·";
 
-  // Ghost state — entity is excluded (from HA area sync but user toggled off)
+  // Ghost state only applies to entities that are actually derived from the linked HA Area.
+  // Manually-added entities in an HA-linked zone remain manually removable.
   const excluded = zone && (zone.ha_excluded_entities || []).includes(entityId);
-  // If zone is linked to HA area, use ghost instead of delete for all entities in this zone
-  const isHALinked = !!zone?.ha_area_id;
-  const ghostBtn = isHALinked
-    ? `<button class="ha-entity-ghost" data-entity-id="${escapeHtml(entityId)}" title="${excluded ? 'Restore entity (currently hidden from automations & search)' : 'Hide entity (ghost — removes from automations & search but keeps the link)'}"
+  const isHAAreaEntity = isZoneHAAreaEntity(zone, entityId);
+  const ghostBtn = isHAAreaEntity
+    ? `<button class="ha-entity-ghost" data-entity-id="${escapeHtml(entityId)}" title="${excluded ? 'Restore HA Area entity (currently hidden from automations & search)' : 'Hide HA Area entity (ghost — removes from automations & search but keeps the area link)'}"
         style="background:none;border:1px solid ${excluded ? 'rgba(255,149,0,0.5)' : 'rgba(255,255,255,0.12)'};border-radius:4px;padding:2px 6px;cursor:pointer;font-size:10px;color:${excluded ? '#ff9500' : '#555'};flex-shrink:0;"
         >${excluded ? '👻 Hidden' : '👻'}</button>`
     : '';
-  // Show ✕ delete button only on non-HA-linked zones (or always for manually-added?)
-  // Design decision: zones with ha_area_id use ghost-only (no delete); zones without use delete-only
-  const showDelete = !isHALinked;
+  const showDelete = !isHAAreaEntity;
 
   // For lights and sirens: show pin button — filled if already placed, outline if not
   let pinBtn = '';
