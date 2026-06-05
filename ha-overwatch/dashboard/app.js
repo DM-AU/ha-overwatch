@@ -1,5 +1,5 @@
 /* ─── CONFIG DEFAULTS ─────────────────────────────────────── */
-/* v0.05.35.03: HA area entity rebuild, object-detection sensors, and zone editor scroll stability. */
+/* v0.05.35.04: HA area assignment preserves existing/manual zone entities and only appends HA-area entities. */
 let uiConfig = {
   floorplan: "img/floorplan.png",
   sidebar_position: "right",
@@ -763,6 +763,45 @@ function hexToRgba(hex, alpha) {
   return `rgba(${r},${g},${b},${alpha})`;
 }
 
+
+const ZONE_ENTITY_LIST_KEYS = ['sensors', 'cameras', 'lights', 'sirens'];
+const zonePersistedEntitySnapshot = new Map();
+function cloneZoneEntityLists(zone) {
+  const out = { ha_area_id: zone?.ha_area_id || '' };
+  ZONE_ENTITY_LIST_KEYS.forEach(key => {
+    out[key] = Array.isArray(zone?.[key]) ? zone[key].map(String).filter(Boolean) : [];
+  });
+  return out;
+}
+function rememberZoneEntitySnapshot(zone) {
+  if (!zone?.id) return;
+  zonePersistedEntitySnapshot.set(zone.id, cloneZoneEntityLists(zone));
+}
+function rememberAllZoneEntitySnapshots() {
+  zones.forEach(rememberZoneEntitySnapshot);
+}
+function mergeUniqueEntityList(existing, incoming) {
+  return [...new Set([...(Array.isArray(existing) ? existing : []), ...(Array.isArray(incoming) ? incoming : [])]
+    .map(String).filter(Boolean))]
+    .sort((a,b)=>a.localeCompare(b, undefined, { sensitivity:'base', numeric:true }));
+}
+function preserveEntitiesOnHAAreaAssignment(zone) {
+  if (!zone?.id || !zone.ha_area_id) return false;
+  const previous = zonePersistedEntitySnapshot.get(zone.id);
+  if (!previous) return false;
+  // Only apply this guard when a HA area is newly assigned or changed. Normal manual deletes after
+  // the zone already has the same HA area must still be respected.
+  if ((previous.ha_area_id || '') === (zone.ha_area_id || '')) return false;
+  let changed = false;
+  ZONE_ENTITY_LIST_KEYS.forEach(key => {
+    const before = JSON.stringify(zone[key] || []);
+    zone[key] = mergeUniqueEntityList(zone[key], previous[key]);
+    if (JSON.stringify(zone[key] || []) !== before) changed = true;
+  });
+  if (changed) logEvent('info', `Preserved existing zone entities while assigning HA area to ${zone.name || zone.id}.`, 'ha');
+  return changed;
+}
+
 function zoneToYaml(z) {
   let out = `id: ${z.id}\n`;
   out += `name: "${(z.name || "").replace(/"/g, '\\"')}"\n`;
@@ -851,13 +890,16 @@ async function loadZones() {
       return parseZoneYaml(await r.text());
     }));
     zones = results.filter(Boolean);
+    rememberAllZoneEntitySnapshots();
   } catch {
     try { zones = JSON.parse(localStorage.getItem("zones") || "[]"); }
     catch { zones = []; }
+    rememberAllZoneEntitySnapshots();
   }
 }
 
 async function saveZone(zone) {
+  preserveEntitiesOnHAAreaAssignment(zone);
   const filename = zoneFilename(zone.id);
   try {
     const res = await fetch(apiPath("ow/save-zone"), {
@@ -868,9 +910,11 @@ async function saveZone(zone) {
     if (!res.ok) throw new Error(res.statusText);
     // Update dataVersion baseline so we don't self-sync
     try { const h = await fetch(apiPath("ow/health"),{cache:"no-store"}); const d = await h.json(); if(d.dataVersion) _lastDataVersion = d.dataVersion; } catch{}
+    rememberZoneEntitySnapshot(zone);
     showSaveToast('Zone');
   } catch {
     localStorage.setItem("zones", JSON.stringify(zones));
+    rememberZoneEntitySnapshot(zone);
     showSaveToast('Zone');
   }
 }
@@ -4216,6 +4260,7 @@ await loadZones();
     zoneTriggerEntities,
     zoneActiveTriggerEntity,
     isEntityGhosted,
+    preserveEntitiesOnHAAreaAssignment,
     getZoneState,
     apiPath,
     logEvent,
