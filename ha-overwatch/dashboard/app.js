@@ -1,5 +1,5 @@
 /* ─── CONFIG DEFAULTS ─────────────────────────────────────── */
-/* v0.05.35.01: zone editor click isolation while creating/editing points. */
+/* v0.05.35.02: force HA registry refresh for HA area/device/entity sync. */
 let uiConfig = {
   floorplan: "img/floorplan.png",
   sidebar_position: "right",
@@ -155,17 +155,55 @@ function isEntityGhosted(entityId) {
   return zones.some(z => (z.ha_excluded_entities||[]).includes(entityId));
 }
 
+function haRegistryFingerprint(reg = _haRegistry) {
+  const areas = (reg.areas || []).map(a => `${a.area_id}:${a.floor_id || ''}`).sort().join('|');
+  const devices = (reg.devices || []).map(d => `${d.id}:${d.area_id || ''}`).sort().join('|');
+  const entities = (reg.entities || []).map(e => `${e.entity_id}:${e.area_id || ''}:${e.device_id || ''}:${e.disabled_by || ''}:${e.hidden_by || ''}`).sort().join('|');
+  return `${reg.refresh_id || 0}::${areas}::${devices}::${entities}`;
+}
+
 async function loadHARegistry(force = false) {
+  const beforeFingerprint = haRegistryFingerprint();
   try {
-    if (force) await fetch(apiPath('ow/ha-registry/refresh'), { method: 'POST', cache: 'no-store' }).catch(() => null);
-    const attempts = force ? 14 : 1;
+    let refreshInfo = null;
+    if (force) {
+      const rr = await fetch(apiPath('ow/ha-registry/refresh'), { method: 'POST', cache: 'no-store' }).catch(() => null);
+      if (rr?.ok) refreshInfo = await rr.json().catch(() => null);
+    }
+
+    const attempts = force ? 24 : 1;
     for (let i = 0; i < attempts; i++) {
       const r = await fetch(apiPath('ow/ha-registry') + '?v=' + Date.now(), { cache: 'no-store' });
-      if (r.ok) { _haRegistry = await r.json(); if (_haRegistry.loaded || !force) break; }
+      if (r.ok) {
+        const nextRegistry = await r.json();
+        _haRegistry = nextRegistry;
+        const freshEnough = !force
+          || (nextRegistry.loaded && !nextRegistry.refreshing && (
+            (refreshInfo?.refresh_id && nextRegistry.refresh_id >= refreshInfo.refresh_id)
+            || haRegistryFingerprint(nextRegistry) !== beforeFingerprint
+            || refreshInfo?.completed === true
+          ));
+        if (freshEnough) break;
+      }
       if (force) await new Promise(resolve => setTimeout(resolve, 250));
     }
+
     if (_haRegistry.loaded) await autoAddNewHAAreas();
-  } catch { _haRegistry = { floors: [], areas: [], devices: [], entities: [], loaded: false }; }
+
+    if (force) {
+      await loadZones();
+      await loadGroups();
+      await loadFloors();
+      subscribeHAEntities();
+      renderZones();
+      if (editorMode) renderZonesEditor(true);
+      if (window._updateFloorBtn) window._updateFloorBtn();
+      logEvent('ok', `HA registry sync complete: ${(_haRegistry.areas || []).length} areas, ${(_haRegistry.devices || []).length} devices, ${(_haRegistry.entities || []).length} entities.`, 'ha');
+    }
+  } catch (e) {
+    if (force) logEvent('warn', `HA registry sync failed: ${e.message || e}`, 'ha');
+    _haRegistry = { floors: [], areas: [], devices: [], entities: [], loaded: false, refreshing: false };
+  }
 }
 
 // Check each linked floor for new HA areas and auto-create zones if ha_auto_add_areas is on

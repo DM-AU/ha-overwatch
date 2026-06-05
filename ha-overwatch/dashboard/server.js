@@ -1,4 +1,4 @@
-// HA-Overwatch 0.05.33-response-night-condition: modular response actions with night precondition and preserved shared response automation support.
+// HA-Overwatch 0.05.35.02-ha-area-sync-refresh: forced HA registry refresh waits for fresh floor/area/device/entity registry data.
 /* ============================================================
  * HA-Overwatch — server.js
  *
@@ -638,7 +638,7 @@ function nameSlug(name) {
 
 // Zone triggered states — written by startHAListener, read by /ow/triggered endpoint
 // HA registry cache — populated by startHAListener on auth_ok
-const haRegistry = { floors: [], areas: [], devices: [], entities: [], loaded: false };
+const haRegistry = { floors: [], areas: [], devices: [], entities: [], loaded: false, refreshing: false, refresh_id: 0, requested_at: null, completed_at: null };
 const haRegistryCallbacks = {}; // msgId -> type being fetched
 let haMsgId = 1; // module-scoped so IDs are unique across restarts
 let haListenerSend = null; // set by startHAListener once connected — used to trigger re-fetches
@@ -647,17 +647,48 @@ let haListenerSend = null; // set by startHAListener once connected — used to 
 function refetchHARegistry() {
   if (!haListenerSend) return false;
   haRegistry.loaded = false;
+  haRegistry.refreshing = true;
+  haRegistry.refresh_id = (haRegistry.refresh_id || 0) + 1;
+  haRegistry.requested_at = new Date().toISOString();
+  haRegistry.completed_at = null;
   haRegistry._got_floors = false; haRegistry._got_areas = false;
   haRegistry._got_devices = false; haRegistry._got_entities = false;
   haRegistry.floors = []; haRegistry.areas = []; haRegistry.devices = []; haRegistry.entities = [];
   Object.keys(haRegistryCallbacks).forEach(k => delete haRegistryCallbacks[k]);
-  const floorId = haMsgId; haListenerSend({ type: 'config/floor_registry/list' }); haRegistryCallbacks[floorId] = 'floors';
-  const areaId  = haMsgId; haListenerSend({ type: 'config/area_registry/list' });  haRegistryCallbacks[areaId]  = 'areas';
-  const devId   = haMsgId; haListenerSend({ type: 'config/device_registry/list' }); haRegistryCallbacks[devId]   = 'devices';
-  const entId   = haMsgId; haListenerSend({ type: 'config/entity_registry/list' }); haRegistryCallbacks[entId]   = 'entities';
-  return true;
+
+  const requestRegistry = (kind, type) => {
+    const msgId = haListenerSend({ type });
+    if (msgId == null) return false;
+    haRegistryCallbacks[msgId] = kind;
+    return true;
+  };
+
+  const ok = [
+    requestRegistry('floors',   'config/floor_registry/list'),
+    requestRegistry('areas',    'config/area_registry/list'),
+    requestRegistry('devices',  'config/device_registry/list'),
+    requestRegistry('entities', 'config/entity_registry/list'),
+  ].every(Boolean);
+
+  if (!ok) {
+    haRegistry.refreshing = false;
+    haRegistry.loaded = false;
+  }
+  return ok;
 }
 
+function waitForHARegistryRefresh(refreshId, timeoutMs = 5000) {
+  const started = Date.now();
+  return new Promise(resolve => {
+    const tick = () => {
+      const done = haRegistry.loaded && !haRegistry.refreshing && haRegistry.refresh_id >= refreshId;
+      if (done) return resolve(true);
+      if (Date.now() - started >= timeoutMs) return resolve(false);
+      setTimeout(tick, 100);
+    };
+    tick();
+  });
+}
 
 // Full HA entity state cache — written by startHAListener, read by /ow/states endpoint
 // Keyed by entity_id, value is the full HA state object {entity_id, state, attributes, ...}
@@ -1406,7 +1437,26 @@ if (pathname === "/ow/alarms/responses/sync" && req.method === "POST") {
   /* ── /ow/ha-registry/refresh — re-fetch registry from HA ── */
   if (pathname === "/ow/ha-registry/refresh" && req.method === "POST") {
     const ok = refetchHARegistry();
-    json(res, { ok, message: ok ? "Registry refresh triggered" : "Not connected to HA — registry will reload on next connection" });
+    const refreshId = haRegistry.refresh_id || 0;
+    const completed = ok ? await waitForHARegistryRefresh(refreshId, 5000) : false;
+    json(res, {
+      ok,
+      completed,
+      refresh_id: refreshId,
+      loaded: haRegistry.loaded,
+      refreshing: haRegistry.refreshing,
+      requested_at: haRegistry.requested_at,
+      completed_at: haRegistry.completed_at,
+      counts: {
+        floors: haRegistry.floors.length,
+        areas: haRegistry.areas.length,
+        devices: haRegistry.devices.length,
+        entities: haRegistry.entities.length,
+      },
+      message: ok
+        ? (completed ? "Registry refresh completed" : "Registry refresh triggered but did not complete before timeout")
+        : "Not connected to HA — registry will reload on next connection",
+    });
     return;
   }
 
@@ -2764,7 +2814,9 @@ function startHAListener() {
       let connected = true;
 
       function send(obj) {
-        sendWsFrame(sock, JSON.stringify({ ...obj, id: haMsgId++ }));
+        const id = haMsgId++;
+        sendWsFrame(sock, JSON.stringify({ ...obj, id }));
+        return id;
       }
       haListenerSend = send; // expose for registry refresh endpoint
 
@@ -2853,16 +2905,9 @@ function startHAListener() {
       send({ type: "subscribe_events", event_type: "state_changed" });
       // Fetch all current entity states into cache for /ow/states endpoint
       send({ type: "get_states" });
-      // Fetch HA registries — clear stale callbacks first
-      Object.keys(haRegistryCallbacks).forEach(k => delete haRegistryCallbacks[k]);
-      const floorMsgId = haMsgId; send({ type: "config/floor_registry/list" });
-      haRegistryCallbacks[floorMsgId] = "floors";
-      const areaMsgId  = haMsgId; send({ type: "config/area_registry/list" });
-      haRegistryCallbacks[areaMsgId] = "areas";
-      const devMsgId   = haMsgId; send({ type: "config/device_registry/list" });
-      haRegistryCallbacks[devMsgId] = "devices";
-      const entMsgId   = haMsgId; send({ type: "config/entity_registry/list" });
-      haRegistryCallbacks[entMsgId] = "entities";
+      // Fetch HA registries through the same forced-refresh path used by the Sync button.
+      // This keeps message IDs/callbacks consistent and avoids stale area/device/entity mappings.
+      refetchHARegistry();
       return;
     }
     // Populate serverHaStates from get_states response
@@ -2876,6 +2921,8 @@ function startHAListener() {
         haRegistry[`_got_${regType}`] = true;
         if (haRegistry._got_floors && haRegistry._got_areas && haRegistry._got_devices && haRegistry._got_entities) {
           haRegistry.loaded = true;
+          haRegistry.refreshing = false;
+          haRegistry.completed_at = new Date().toISOString();
           console.log(`[HA-Overwatch] Registry loaded: ${haRegistry.floors.length} floors, ${haRegistry.areas.length} areas, ${haRegistry.devices.length} devices, ${haRegistry.entities.length} entities`);
         }
         return;
