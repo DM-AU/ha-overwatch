@@ -1,5 +1,5 @@
 /* ─── CONFIG DEFAULTS ─────────────────────────────────────── */
-/* v0.05.35.07: preserve active floor/selected zone and keep startup floor/map consistent. */
+/* v0.05.35.09: automation scope targets, registry/state sync hardening. */
 let uiConfig = {
   floorplan: "img/floorplan.png",
   sidebar_position: "right",
@@ -190,12 +190,23 @@ async function loadHARegistry(force = false) {
       if (force) await new Promise(resolve => setTimeout(resolve, 250));
     }
 
+    if (force) {
+      try {
+        const sr = await fetch(apiPath('ow/states') + '?v=' + Date.now(), { cache: 'no-store' });
+        if (sr.ok) {
+          const states = await sr.json();
+          Object.values(states || {}).forEach(st => { if (st?.entity_id) haStates[st.entity_id] = st; });
+          haStatesLoaded = Object.keys(haStates).length > 0;
+        }
+      } catch {}
+    }
     if (_haRegistry.loaded) {
       await autoAddNewHAAreas();
       if (force) await syncHAAreaZoneEntitiesFromRegistry();
     }
 
     if (force) {
+      if (window.OW_Automations?.refreshEntityCache) await window.OW_Automations.refreshEntityCache(true).catch(()=>{});
       const prevActiveFloorId = activeFloorId;
       const prevSelectedZoneId = selectedZoneId;
       const prevSelectedGroupId = selectedGroupId;
