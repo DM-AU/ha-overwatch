@@ -1,4 +1,4 @@
-// HA-Overwatch 0.05.35.12-action-scope-status-layout: automation actions support per-action Only run, start delay, and fixed turn-off cleanup.
+// HA-Overwatch 0.05.35.13-parallel-automation-actions: automation actions support per-action Only run, start delay, and fixed turn-off cleanup.
 /* ============================================================
  * HA-Overwatch — server.js
  *
@@ -3720,15 +3720,22 @@ function _pushDynamicTurnOff(seq, a, actionObj) {
     seq.push(offAction);
   }
 }
-function pushAutomationAction(actions, a, actionObj) {
+function buildAutomationActionBranch(a, actionObj) {
   const seq = [];
   const startDelay = _autoDuration(a?.trigger_for);
   if (startDelay) seq.push({ delay: startDelay });
   seq.push(actionObj);
   _pushDynamicTurnOff(seq, a, actionObj);
+
   const conditions = _automationActionConditions(a);
-  if (conditions.length) actions.push({ choose: [{ conditions, sequence: seq }] });
-  else seq.forEach(step => actions.push(step));
+  if (conditions.length) return { choose: [{ conditions, sequence: seq }] };
+  return { sequence: seq };
+}
+function pushAutomationAction(actions, a, actionObj) {
+  // Kept for compatibility with any older call sites. New generator code collects
+  // branches and emits one top-level parallel action so waits/delays do not block
+  // following OW actions.
+  actions.push(buildAutomationActionBranch(a, actionObj));
 }
 
 function _resolveAutomationScopedEntityIds(a, key, zoneList, groupList, floorList) {
@@ -3852,44 +3859,71 @@ function buildHAAutomation(auto, allZones, allGroups) {
     }
   }
 
+  const actionBranches = [];
+  function uniq(ids) { return [...new Set((ids || []).filter(Boolean))]; }
+  function targetFor(ids) {
+    const u = uniq(ids);
+    return { entity_id: u.length === 1 ? u[0] : u };
+  }
+  function addActionBranch(a, actionObj) {
+    actionBranches.push(buildAutomationActionBranch(a, actionObj));
+  }
+
   for (const a of (auto.actions || [])) {
     if (a.type === 'siren') {
-      const ids = [..._resolveAutomationScopedEntityIds(a, 'sirens', zoneList, groupList, floorList), ...(a.entity_ids||[]), ...(a.entity_ids_extra||[])].filter(Boolean);
-      if (ids.length) pushAutomationAction(actions, a, { action:`siren.${a.service||'turn_on'}`, target:{ entity_id:[...new Set(ids)].length===1?[...new Set(ids)][0]:[...new Set(ids)] } });
+      const ids = uniq([
+        ..._resolveAutomationScopedEntityIds(a, 'sirens', zoneList, groupList, floorList),
+        ...(a.entity_ids || []),
+        ...(a.entity_ids_extra || [])
+      ]);
+      if (ids.length) addActionBranch(a, { action:`siren.${a.service || 'turn_on'}`, target: targetFor(ids) });
     } else if (a.type === 'light') {
-      const ids = [..._resolveAutomationScopedEntityIds(a, 'lights', zoneList, groupList, floorList), ...(a.entity_ids_zone||[]), ...(a.entity_ids_other||[]), ...(a.entity_ids||[])].filter(Boolean);
-      if (ids.length) pushAutomationAction(actions, a, { action:`light.${a.service||'turn_on'}`, target:{ entity_id:[...new Set(ids)].length===1?[...new Set(ids)][0]:[...new Set(ids)] } });
+      const ids = uniq([
+        ..._resolveAutomationScopedEntityIds(a, 'lights', zoneList, groupList, floorList),
+        ...(a.entity_ids_zone || []),
+        ...(a.entity_ids_other || []),
+        ...(a.entity_ids || [])
+      ]);
+      if (ids.length) addActionBranch(a, { action:`light.${a.service || 'turn_on'}`, target: targetFor(ids) });
     } else if (a.type === 'notify') {
-      const target = a.target||'notify.notify';
-      const svc = target.startsWith('notify.')?target.slice(7):target;
-      pushAutomationAction(actions, a, { action:`notify.${svc}`, data:{ message:a.message||'', title:a.title||'HA-Overwatch Alert' } });
+      const target = a.target || 'notify.notify';
+      const svc = target.startsWith('notify.') ? target.slice(7) : target;
+      addActionBranch(a, { action:`notify.${svc}`, data:{ message:a.message || '', title:a.title || 'HA-Overwatch Alert' } });
     } else if (a.type === 'arm') {
-      const ids = (a.entity_ids||[]).filter(Boolean);
+      const ids = uniq(a.entity_ids || []);
       if (ids.length) {
-        // New format: OW zone/group switches
-        pushAutomationAction(actions, a, { action:`switch.${a.service||'turn_on'}`, target:{ entity_id:[...new Set(ids)].length===1?[...new Set(ids)][0]:[...new Set(ids)] } });
+        addActionBranch(a, { action:`switch.${a.service || 'turn_on'}`, target: targetFor(ids) });
       } else if (a.entity_id) {
-        // Backward compat: old single alarm_control_panel entity
-        pushAutomationAction(actions, a, { action:`alarm_control_panel.${a.service||'alarm_arm_away'}`, target:{ entity_id:a.entity_id } });
+        addActionBranch(a, { action:`alarm_control_panel.${a.service || 'alarm_arm_away'}`, target:{ entity_id:a.entity_id } });
       }
     } else if (a.type === 'camera') {
-      const ids = [..._resolveAutomationScopedEntityIds(a, 'cameras', zoneList, groupList, floorList), ...(a.entity_ids||[])].filter(Boolean);
+      const ids = uniq([
+        ..._resolveAutomationScopedEntityIds(a, 'cameras', zoneList, groupList, floorList),
+        ...(a.entity_ids || [])
+      ]);
       if (ids.length && a.service) {
-        const act = { action:`camera.${a.service}`, target:{ entity_id:[...new Set(ids)].length===1?[...new Set(ids)][0]:[...new Set(ids)] } };
+        const act = { action:`camera.${a.service}`, target: targetFor(ids) };
         if (a.service_data && Object.keys(a.service_data).length) act.data = a.service_data;
-        pushAutomationAction(actions, a, act);
+        addActionBranch(a, act);
       }
     } else if (a.type === 'camera_view') {
-      const ids = (a.entity_ids||[]).filter(Boolean);
-      if (ids.length) {
-        pushAutomationAction(actions, a, { action:`switch.${a.service||'turn_on'}`, target:{ entity_id:[...new Set(ids)].length===1?[...new Set(ids)][0]:[...new Set(ids)] } });
-      }
+      const ids = uniq([
+        ..._resolveAutomationScopedEntityIds(a, 'cameras', zoneList, groupList, floorList),
+        ...(a.entity_ids || [])
+      ]);
+      if (ids.length) addActionBranch(a, { action:`switch.${a.service || 'turn_on'}`, target: targetFor(ids) });
     } else if (a.type === 'entity') {
       if (a.entity_id) {
         const domain = a.entity_id.split('.')[0];
-        pushAutomationAction(actions, a, { action:`${domain}.${a.service||'turn_on'}`, target:{ entity_id:a.entity_id } });
+        addActionBranch(a, { action:`${domain}.${a.service || 'turn_on'}`, target:{ entity_id:a.entity_id } });
       }
     }
+  }
+
+  if (actionBranches.length === 1) {
+    actions.push(actionBranches[0]);
+  } else if (actionBranches.length > 1) {
+    actions.push({ parallel: actionBranches });
   }
 
   return {
