@@ -1,4 +1,4 @@
-// HA-Overwatch 0.05.35.11-automation-action-scope-status: automation actions support per-action Only run, start delay, and fixed turn-off cleanup.
+// HA-Overwatch 0.05.35.12-action-scope-status-layout: automation actions support per-action Only run, start delay, and fixed turn-off cleanup.
 /* ============================================================
  * HA-Overwatch — server.js
  *
@@ -3748,8 +3748,7 @@ function _resolveAutomationScopedEntityIds(a, key, zoneList, groupList, floorLis
   });
   const selectedFloors = new Set(a?.floor_ids || []);
   if (selectedFloors.size) {
-    const floors = floorList || [];
-    floors.forEach((f, idx) => {
+    (floorList || []).forEach((f, idx) => {
       if (!selectedFloors.has(f.id)) return;
       const isFirst = idx === 0;
       zoneList.filter(z => z.floor_id === f.id || (!z.floor_id && isFirst)).forEach(addFromZone);

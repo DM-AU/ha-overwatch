@@ -1,5 +1,5 @@
 /* ================================================================
- * HA-Overwatch — automations.js  v0.05.35.11
+ * HA-Overwatch — automations.js  v0.05.35.12
  * Admin-only Automation Editor.
  * HA is source of truth — reads/writes directly via server proxy.
  * ================================================================ */
@@ -501,11 +501,6 @@ function actionSummary(a) {
 }
 function actionCommonControlsHtml(a) {
   normaliseActionControls(a);
-  const canTurnOff = ['light','siren','entity','camera_view'].includes(a.type);
-  const clear = a.clear_mode || 'none';
-  if (!a.clear_match) a.clear_match = 'all';
-  if (!Array.isArray(a.clear_conditions)) a.clear_conditions = ['source_clear'];
-  const clearTimed = ['after_delay','source_clears','conditions'].includes(clear);
   return `<div style="background:rgba(255,255,255,0.035);border:1px solid rgba(255,255,255,0.08);border-radius:9px;padding:9px;margin-bottom:10px;">
     <div style="font-size:12px;color:#ddd;line-height:1.35;margin-bottom:9px;">${escH(actionSummary(a))}</div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;">
@@ -524,11 +519,25 @@ function actionCommonControlsHtml(a) {
     <div id="act-cond-entity-${a.id}" style="display:${a.condition_mode==='entity'?'block':'none'};margin-bottom:8px;">
       <label style="${labelStyle}">Binary sensor</label>${entityAutocomplete(`act-cond-entity-ac-${a.id}`, a.condition_entity || '', 'binary_sensor.*', null, ['binary_sensor'])}
     </div>
-    ${canTurnOff ? `<div style="display:grid;grid-template-columns:1fr 160px;gap:8px;"><div><label style="${labelStyle}">Turn OFF</label><select id="act-clear-mode-${a.id}" style="${selectStyle}"><option value="none" ${clear==='none'?'selected':''}>Never</option><option value="after_delay" ${clear==='after_delay'?'selected':''}>After fixed time</option><option value="source_clears" ${clear==='source_clears'?'selected':''}>When source clears</option><option value="conditions" ${clear==='conditions'?'selected':''}>When selected conditions are met</option></select></div><div id="act-clear-for-wrap-${a.id}" style="display:${clearTimed?'':'none'}"><label style="${labelStyle}">For</label><input id="act-clear-for-${a.id}" type="text" value="${escH(a.clear_for || '00:00:00')}" placeholder="HH:MM:SS" pattern="\\d{2}:\\d{2}:\\d{2}" style="${inputStyle}"/></div></div><div id="act-clear-cond-wrap-${a.id}" style="display:${clear==='conditions'?'block':'none'};margin-top:8px;border:1px solid rgba(255,255,255,0.07);border-radius:8px;padding:8px;background:rgba(255,255,255,0.025);"><label style="${labelStyle}">Conditions</label><select id="act-clear-match-${a.id}" style="${selectStyle};margin-bottom:6px;"><option value="all" ${a.clear_match!=='any'?'selected':''}>ALL selected conditions</option><option value="any" ${a.clear_match==='any'?'selected':''}>ANY selected condition</option></select><label style="display:flex;gap:6px;align-items:center;font-size:11px;color:#bbb;margin:4px 0;"><input type="checkbox" data-clear-cond="source_clear" ${((a.clear_conditions||['source_clear']).includes('source_clear'))?'checked':''}> Source/trigger entity is OFF/clear</label><label style="display:flex;gap:6px;align-items:center;font-size:11px;color:#bbb;margin:4px 0;"><input type="checkbox" data-clear-cond="alarm_not_triggered" ${((a.clear_conditions||[]).includes('alarm_not_triggered'))?'checked':''}> Alarm triggered sensors are OFF</label></div>` : ''}
   </div>`;
 }
+function actionTurnOffControlsHtml(a) {
+  normaliseActionControls(a);
+  const canTurnOff = ['light','siren','entity','camera_view'].includes(a.type);
+  if (!canTurnOff) return '';
+  const clear = a.clear_mode || 'none';
+  const clearTimed = ['after_delay','source_clears','conditions'].includes(clear);
+  return `<div style="background:rgba(255,255,255,0.035);border:1px solid rgba(255,255,255,0.08);border-radius:9px;padding:9px;margin-top:10px;">
+    <div style="display:grid;grid-template-columns:1fr 160px;gap:8px;">
+      <div><label style="${labelStyle}">Turn OFF</label><select id="act-clear-mode-${a.id}" style="${selectStyle}"><option value="none" ${clear==='none'?'selected':''}>Never</option><option value="after_delay" ${clear==='after_delay'?'selected':''}>After fixed time</option><option value="source_clears" ${clear==='source_clears'?'selected':''}>When source clears</option><option value="conditions" ${clear==='conditions'?'selected':''}>When selected conditions are met</option></select></div>
+      <div id="act-clear-for-wrap-${a.id}" style="display:${clearTimed?'':'none'}"><label style="${labelStyle}">For</label><input id="act-clear-for-${a.id}" type="text" value="${escH(a.clear_for || '00:00:00')}" placeholder="HH:MM:SS" pattern="\\d{2}:\\d{2}:\\d{2}" style="${inputStyle}"/></div>
+    </div>
+    <div id="act-clear-cond-wrap-${a.id}" style="display:${clear==='conditions'?'block':'none'};margin-top:8px;border:1px solid rgba(255,255,255,0.07);border-radius:8px;padding:8px;background:rgba(255,255,255,0.025);"><label style="${labelStyle}">Conditions</label><select id="act-clear-match-${a.id}" style="${selectStyle};margin-bottom:6px;"><option value="all" ${a.clear_match!=='any'?'selected':''}>ALL selected conditions</option><option value="any" ${a.clear_match==='any'?'selected':''}>ANY selected condition</option></select><label style="display:flex;gap:6px;align-items:center;font-size:11px;color:#bbb;margin:4px 0;"><input type="checkbox" data-clear-cond="source_clear" ${((a.clear_conditions||['source_clear']).includes('source_clear'))?'checked':''}> Source/trigger entity is OFF/clear</label><label style="display:flex;gap:6px;align-items:center;font-size:11px;color:#bbb;margin:4px 0;"><input type="checkbox" data-clear-cond="alarm_not_triggered" ${((a.clear_conditions||[]).includes('alarm_not_triggered'))?'checked':''}> Alarm triggered sensors are OFF</label></div>
+  </div>`;
+}
+
 function actionLayoutHtml(a, label, inner) {
-  return `${actionCommonControlsHtml(a)}<div style="background:rgba(255,255,255,0.025);border:1px solid rgba(255,255,255,0.06);border-radius:9px;padding:9px;">${inner}</div>`;
+  return `${actionCommonControlsHtml(a)}<div style="background:rgba(255,255,255,0.025);border:1px solid rgba(255,255,255,0.06);border-radius:9px;padding:9px;">${inner}</div>${actionTurnOffControlsHtml(a)}`;
 }
 
 function addAction(type) {
@@ -1292,7 +1301,6 @@ function stateBadge(triggered, armed, size='normal', context='auto') {
   const badge = (label, bg, color) => `<span style="font-size:${fs}px;padding:1px 4px;border-radius:3px;background:${bg};color:${color};">${label}</span>`;
   if (context === 'event') return triggered ? badge('triggered','rgba(255,59,48,0.2)','#ff6b6b') : badge('clear','rgba(52,199,89,0.13)','#34c759');
   if (context === 'arm') return armed === true ? badge('armed','rgba(255,59,48,0.20)','#ff6b6b') : badge('disarmed','rgba(52,199,89,0.13)','#34c759');
-  if (context === 'power') return triggered ? badge('ON','rgba(52,199,89,0.13)','#34c759') : badge('OFF','rgba(255,255,255,0.05)','#777');
   const parts=[];
   if (triggered) parts.push(badge('triggered','rgba(255,59,48,0.2)','#ff6b6b'));
   else if (armed===true) parts.push(badge('armed','rgba(255,59,48,0.20)','#ff6b6b'));
@@ -1304,7 +1312,7 @@ function entityStateBadge(entityId, state, size='small') {
   if (state === undefined || state === null) return '';
   const domain = String(entityId || '').split('.')[0];
   const fs = size === 'small' ? '9' : '10';
-  const badge = (label, bg, color) => `<span style="font-size:${fs}px;padding:1px 4px;border-radius:3px;background:${bg};color:${color};">${label}</span>`;
+  const badge = (label, bg, color) => `<span style="font-size:${fs}px;padding:1px 4px;border-radius:3px;background:${bg};color:${color};flex-shrink:0;">${label}</span>`;
   if (domain === 'person' || domain === 'device_tracker') {
     return String(state) === 'home'
       ? badge('Home','rgba(52,199,89,0.13)','#34c759')
@@ -1312,8 +1320,8 @@ function entityStateBadge(entityId, state, size='small') {
   }
   if (['light','switch','siren','fan','media_player','input_boolean','binary_sensor'].includes(domain)) {
     return String(state) === 'on'
-      ? badge('ON','rgba(52,199,89,0.13)','#34c759')
-      : badge('OFF','rgba(255,255,255,0.05)','#777');
+      ? badge('ON','rgba(255,214,10,0.20)','#ffd60a')
+      : badge('OFF','rgba(255,59,48,0.20)','#ff6b6b');
   }
   return badge(String(state), 'rgba(255,255,255,0.05)', '#777');
 }
@@ -1683,12 +1691,27 @@ function deviceActionTree(tree, selectedIds, baseId, scope = {}) {
     const ungDevs = (node.ungrouped||[]).flatMap(z=>(z.devices||[]).map(d=>d.entity_id));
     return [...grpDevs,...ungDevs];
   }
-  function isFull(node) { const ids=allDevIds(node); return ids.length>0 && ids.every(id=>selectedIds.includes(id)); }
-  function isPartial(node) { const ids=allDevIds(node); return ids.some(id=>selectedIds.includes(id)); }
-  function isScopeSelected(type, id) {
-    if (type === 'floor') return selectedFloors.includes(id);
-    if (type === 'group') return selectedGroups.includes(id);
-    if (type === 'zone') return selectedZones.includes(id);
+  function nodeZoneIds(node) {
+    if (node.devices) return [node.id].filter(Boolean);
+    if (node.zones) return (node.zones||[]).map(z=>z.id);
+    return [...(node.groups||[]).flatMap(g=>(g.zones||[]).map(z=>z.id)), ...(node.ungrouped||[]).map(z=>z.id)].filter(Boolean);
+  }
+  function nodeGroupIds(node) {
+    if (node.groups) return (node.groups||[]).map(g=>g.id);
+    return node.type === 'group' ? [node.id] : [];
+  }
+  function isFull(node, type) {
+    if (type === 'floor' && selectedFloors.includes(node.id)) return true;
+    if (type === 'group' && selectedGroups.includes(node.id)) return true;
+    if (type === 'zone' && selectedZones.includes(node.id)) return true;
+    const ids = allDevIds(node);
+    return ids.length>0 && ids.every(id=>selectedIds.includes(id));
+  }
+  function isPartial(node, type) {
+    if (isFull(node, type)) return false;
+    if (allDevIds(node).some(id=>selectedIds.includes(id))) return true;
+    if (nodeZoneIds(node).some(id=>selectedZones.includes(id))) return true;
+    if (nodeGroupIds(node).some(id=>selectedGroups.includes(id))) return true;
     return false;
   }
   function collapseBtn(key, dataAttr, collapsed, extraData) {
@@ -1702,15 +1725,15 @@ function deviceActionTree(tree, selectedIds, baseId, scope = {}) {
       '<span style="flex-shrink:0;width:14px;"></span>' +
       '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;min-width:0;">' +
       '<input type="checkbox" data-dl-cb="'+escH(d.entity_id)+'" data-base-id="'+escH(baseId)+'" '+(sel?'checked':'')+' style="accent-color:#0064d2;flex-shrink:0;">' +
-      '<span style="flex:1;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+escH(d.name)+'</span>' + badge +
+      '<span style="font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:48%;">'+escH(d.name)+'</span>' + badge +
       '</label></div>';
   }
   function renderZone(zone, depth) {
     const pad = TREE_BASE + depth * TREE_STEP;
     const key = 'dlz-'+zone.id+'-'+baseId;
     const collapsed = _collapsedSteps[key] !== false;
-    const full = isScopeSelected('zone', zone.id) || isFull(zone);
-    const part = !full && isPartial(zone);
+    const full = isFull(zone, 'zone');
+    const part = isPartial(zone, 'zone');
     const devHtml = (zone.devices||[]).map(d=>renderDevice(d, depth+1)).join('');
     const emptyNote = (!zone.devices || !zone.devices.length) ? '<span style="font-size:10px;color:#444;margin-left:4px;">empty</span>' : '';
     return '<div data-dl-zone="'+escH(zone.id)+'" data-base-id="'+escH(baseId)+'">' +
@@ -1727,8 +1750,8 @@ function deviceActionTree(tree, selectedIds, baseId, scope = {}) {
     const pad = TREE_BASE + depth * TREE_STEP;
     const key = 'dlg-'+g.id+'-'+baseId;
     const collapsed = _collapsedSteps[key] !== false;
-    const full = isScopeSelected('group', g.id) || isFull(g);
-    const part = !full && isPartial(g);
+    const full = isFull(g, 'group');
+    const part = isPartial(g, 'group');
     const zonesHtml = (g.zones||[]).map(z=>renderZone(z, depth+1)).join('');
     return '<div data-dl-group="'+escH(g.id)+'" data-base-id="'+escH(baseId)+'">' +
       '<div style="display:flex;align-items:center;gap:5px;padding:3px 6px;padding-left:'+pad+'px;">' +
@@ -1744,8 +1767,8 @@ function deviceActionTree(tree, selectedIds, baseId, scope = {}) {
     const pad = TREE_BASE + depth * TREE_STEP;
     const key = 'dlf-'+f.id+'-'+baseId;
     const collapsed = !!_collapsedSteps[key];
-    const full = isScopeSelected('floor', f.id) || isFull(f);
-    const part = !full && isPartial(f);
+    const full = isFull(f, 'floor');
+    const part = isPartial(f, 'floor');
     const groupsHtml = (f.groups||[]).map(g=>renderGroup(g, depth+1)).join('');
     const ungroupedHtml = (f.ungrouped||[]).map(z=>renderZone(z, depth+1)).join('');
     return '<div data-dl-floor="'+escH(f.id)+'" data-base-id="'+escH(baseId)+'">' +
