@@ -1,5 +1,5 @@
 /* ================================================================
- * HA-Overwatch — automations.js  v0.05.35.12
+ * HA-Overwatch — automations.js  v0.05.35.14
  * Admin-only Automation Editor.
  * HA is source of truth — reads/writes directly via server proxy.
  * ================================================================ */
@@ -466,6 +466,8 @@ function normaliseActionControls(a) {
   if (!Array.isArray(a.floor_ids)) a.floor_ids = [];
   if (!Array.isArray(a.group_ids)) a.group_ids = [];
   if (!Array.isArray(a.zone_ids)) a.zone_ids = [];
+  if (typeof a.maintain_on !== 'boolean') a.maintain_on = false;
+  if (!a.maintain_interval) a.maintain_interval = '00:00:15';
   return a;
 }
 function actionEntityCount(a) {
@@ -527,12 +529,17 @@ function actionTurnOffControlsHtml(a) {
   if (!canTurnOff) return '';
   const clear = a.clear_mode || 'none';
   const clearTimed = ['after_delay','source_clears','conditions'].includes(clear);
+  const canMaintain = ['light','siren','entity','camera_view'].includes(a.type) && (a.service || 'turn_on') === 'turn_on' && clear !== 'none';
   return `<div style="background:rgba(255,255,255,0.035);border:1px solid rgba(255,255,255,0.08);border-radius:9px;padding:9px;margin-top:10px;">
     <div style="display:grid;grid-template-columns:1fr 160px;gap:8px;">
       <div><label style="${labelStyle}">Turn OFF</label><select id="act-clear-mode-${a.id}" style="${selectStyle}"><option value="none" ${clear==='none'?'selected':''}>Never</option><option value="after_delay" ${clear==='after_delay'?'selected':''}>After fixed time</option><option value="source_clears" ${clear==='source_clears'?'selected':''}>When source clears</option><option value="conditions" ${clear==='conditions'?'selected':''}>When selected conditions are met</option></select></div>
       <div id="act-clear-for-wrap-${a.id}" style="display:${clearTimed?'':'none'}"><label style="${labelStyle}">For</label><input id="act-clear-for-${a.id}" type="text" value="${escH(a.clear_for || '00:00:00')}" placeholder="HH:MM:SS" pattern="\\d{2}:\\d{2}:\\d{2}" style="${inputStyle}"/></div>
     </div>
     <div id="act-clear-cond-wrap-${a.id}" style="display:${clear==='conditions'?'block':'none'};margin-top:8px;border:1px solid rgba(255,255,255,0.07);border-radius:8px;padding:8px;background:rgba(255,255,255,0.025);"><label style="${labelStyle}">Conditions</label><select id="act-clear-match-${a.id}" style="${selectStyle};margin-bottom:6px;"><option value="all" ${a.clear_match!=='any'?'selected':''}>ALL selected conditions</option><option value="any" ${a.clear_match==='any'?'selected':''}>ANY selected condition</option></select><label style="display:flex;gap:6px;align-items:center;font-size:11px;color:#bbb;margin:4px 0;"><input type="checkbox" data-clear-cond="source_clear" ${((a.clear_conditions||['source_clear']).includes('source_clear'))?'checked':''}> Source/trigger entity is OFF/clear</label><label style="display:flex;gap:6px;align-items:center;font-size:11px;color:#bbb;margin:4px 0;"><input type="checkbox" data-clear-cond="alarm_not_triggered" ${((a.clear_conditions||[]).includes('alarm_not_triggered'))?'checked':''}> Alarm triggered sensors are OFF</label></div>
+    <div id="act-maintain-wrap-${a.id}" style="display:${canMaintain?'block':'none'};margin-top:10px;border-top:1px solid rgba(255,255,255,0.06);padding-top:8px;">
+      <label style="display:flex;gap:7px;align-items:center;font-size:12px;color:#ccc;cursor:pointer;"><input id="act-maintain-on-${a.id}" type="checkbox" ${a.maintain_on?'checked':''} style="accent-color:#0064d2;"> Keep ON until this action is allowed to turn OFF</label>
+      <div id="act-maintain-interval-wrap-${a.id}" style="display:${a.maintain_on?'grid':'none'};grid-template-columns:160px 1fr;gap:8px;align-items:end;margin-top:8px;"><div><label style="${labelStyle}">Check every</label><input id="act-maintain-interval-${a.id}" type="text" value="${escH(a.maintain_interval || '00:00:15')}" placeholder="HH:MM:SS" pattern="\\d{2}:\\d{2}:\\d{2}" style="${inputStyle}"/></div><div style="font-size:10px;color:#555;padding-bottom:8px;">Reasserts ON if the device turns itself off early.</div></div>
+    </div>
   </div>`;
 }
 
@@ -542,13 +549,13 @@ function actionLayoutHtml(a, label, inner) {
 
 function addAction(type) {
   const defaults = {
-    siren:  {entity_ids:[],floor_ids:[],group_ids:[],zone_ids:[],service:'turn_on'},
-    light:  {entity_ids:[],entity_ids_zone:[],entity_ids_other:[],floor_ids:[],group_ids:[],zone_ids:[],service:'turn_on'},
+    siren:  {entity_ids:[],floor_ids:[],group_ids:[],zone_ids:[],service:'turn_on',maintain_on:false,maintain_interval:'00:00:15'},
+    light:  {entity_ids:[],entity_ids_zone:[],entity_ids_other:[],floor_ids:[],group_ids:[],zone_ids:[],service:'turn_on',maintain_on:false,maintain_interval:'00:00:15'},
     notify: {target:'',message:'HA-Overwatch: Zone triggered.',title:''},
     arm:    {service:'alarm_arm_away',entity_id:''},
     camera: {entity_ids:[],floor_ids:[],group_ids:[],zone_ids:[],service:'snapshot',service_data:{}},
-    camera_view: {entity_ids:[],floor_ids:[],group_ids:[],zone_ids:[],service:'turn_on'},
-    entity: {entity_id:'',service:'turn_on'},
+    camera_view: {entity_ids:[],floor_ids:[],group_ids:[],zone_ids:[],service:'turn_on',maintain_on:false,maintain_interval:'00:00:15'},
+    entity: {entity_id:'',service:'turn_on',maintain_on:false,maintain_interval:'00:00:15'},
   };
   _draft.actions.push(normaliseActionControls({id:uid(),type,...(defaults[type]||{})}));
   renderEditorKeepScroll();
@@ -1687,151 +1694,63 @@ function deviceActionTree(tree, selectedIds, baseId, scope = {}) {
   function allDevIds(node) {
     if (node.devices) return node.devices.map(d=>d.entity_id);
     if (node.zones) return node.zones.flatMap(z=>(z.devices||[]).map(d=>d.entity_id));
-    const grpDevs = (node.groups||[]).flatMap(g=>(g.zones||[]).flatMap(z=>(z.devices||[]).map(d=>d.entity_id)));
-    const ungDevs = (node.ungrouped||[]).flatMap(z=>(z.devices||[]).map(d=>d.entity_id));
-    return [...grpDevs,...ungDevs];
+    return [...(node.groups||[]).flatMap(g=>(g.zones||[]).flatMap(z=>(z.devices||[]).map(d=>d.entity_id))), ...(node.ungrouped||[]).flatMap(z=>(z.devices||[]).map(d=>d.entity_id))];
   }
   function nodeZoneIds(node) {
     if (node.devices) return [node.id].filter(Boolean);
     if (node.zones) return (node.zones||[]).map(z=>z.id);
     return [...(node.groups||[]).flatMap(g=>(g.zones||[]).map(z=>z.id)), ...(node.ungrouped||[]).map(z=>z.id)].filter(Boolean);
   }
-  function nodeGroupIds(node) {
-    if (node.groups) return (node.groups||[]).map(g=>g.id);
-    return node.type === 'group' ? [node.id] : [];
-  }
+  function nodeGroupIds(node) { if (node.groups) return (node.groups||[]).map(g=>g.id); return node.type === 'group' ? [node.id] : []; }
   function isFull(node, type) {
     if (type === 'floor' && selectedFloors.includes(node.id)) return true;
     if (type === 'group' && selectedGroups.includes(node.id)) return true;
     if (type === 'zone' && selectedZones.includes(node.id)) return true;
-    const ids = allDevIds(node);
-    return ids.length>0 && ids.every(id=>selectedIds.includes(id));
+    const ids = allDevIds(node); return ids.length>0 && ids.every(id=>selectedIds.includes(id));
   }
   function isPartial(node, type) {
     if (isFull(node, type)) return false;
-    if (allDevIds(node).some(id=>selectedIds.includes(id))) return true;
-    if (nodeZoneIds(node).some(id=>selectedZones.includes(id))) return true;
-    if (nodeGroupIds(node).some(id=>selectedGroups.includes(id))) return true;
-    return false;
+    return allDevIds(node).some(id=>selectedIds.includes(id)) || nodeZoneIds(node).some(id=>selectedZones.includes(id)) || nodeGroupIds(node).some(id=>selectedGroups.includes(id));
   }
-  function collapseBtn(key, dataAttr, collapsed, extraData) {
-    return '<button '+dataAttr+'="'+key+'"'+(extraData||'')+' style="flex-shrink:0;background:none;border:none;color:#666;cursor:pointer;font-size:10px;padding:0 2px;line-height:1;">'+(collapsed?'▶':'▼')+'</button>';
-  }
+  function collapseBtn(key, dataAttr, collapsed, extraData) { return '<button '+dataAttr+'="'+key+'"'+(extraData||'')+' style="flex-shrink:0;background:none;border:none;color:#666;cursor:pointer;font-size:10px;padding:0 2px;line-height:1;">'+(collapsed?'▶':'▼')+'</button>'; }
   function renderDevice(d, depth) {
-    const pad = TREE_BASE + depth * TREE_STEP;
-    const sel = selectedIds.includes(d.entity_id);
-    const badge = entityStateBadge(d.entity_id, d.state, 'small');
-    return '<div data-dl-device data-scbl-item data-scbl-label="'+escH(d.name+' '+d.entity_id)+'" style="display:flex;align-items:center;gap:6px;padding:2px 6px;padding-left:'+pad+'px;">' +
-      '<span style="flex-shrink:0;width:14px;"></span>' +
-      '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;min-width:0;">' +
-      '<input type="checkbox" data-dl-cb="'+escH(d.entity_id)+'" data-base-id="'+escH(baseId)+'" '+(sel?'checked':'')+' style="accent-color:#0064d2;flex-shrink:0;">' +
-      '<span style="font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:48%;">'+escH(d.name)+'</span>' + badge +
-      '</label></div>';
+    const pad = TREE_BASE + depth * TREE_STEP, sel = selectedIds.includes(d.entity_id), badge = entityStateBadge(d.entity_id, d.state, 'small');
+    return '<div data-dl-device data-scbl-item data-scbl-label="'+escH(d.name+' '+d.entity_id)+'" style="display:flex;align-items:center;gap:6px;padding:2px 6px;padding-left:'+pad+'px;"><span style="flex-shrink:0;width:14px;"></span><label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;min-width:0;"><input type="checkbox" data-dl-cb="'+escH(d.entity_id)+'" data-base-id="'+escH(baseId)+'" '+(sel?'checked':'')+' style="accent-color:#0064d2;flex-shrink:0;"><span style="font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:48%;">'+escH(d.name)+'</span>'+badge+'</label></div>';
   }
   function renderZone(zone, depth) {
-    const pad = TREE_BASE + depth * TREE_STEP;
-    const key = 'dlz-'+zone.id+'-'+baseId;
-    const collapsed = _collapsedSteps[key] !== false;
-    const full = isFull(zone, 'zone');
-    const part = isPartial(zone, 'zone');
-    const devHtml = (zone.devices||[]).map(d=>renderDevice(d, depth+1)).join('');
-    const emptyNote = (!zone.devices || !zone.devices.length) ? '<span style="font-size:10px;color:#444;margin-left:4px;">empty</span>' : '';
-    return '<div data-dl-zone="'+escH(zone.id)+'" data-base-id="'+escH(baseId)+'">' +
-      '<div style="display:flex;align-items:center;gap:5px;padding:2px 6px;padding-left:'+pad+'px;">' +
-      (zone.devices?.length ? collapseBtn(key,'data-dlz-collapse',collapsed,' data-base-id="'+escH(baseId)+'"') : '<span style="flex-shrink:0;width:14px;"></span>') +
-      '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;min-width:0;">' +
-      '<input type="checkbox" data-dlz-cb="'+escH(zone.id)+'" data-base-id="'+escH(baseId)+'" '+(full?'checked':'')+' data-partial="'+(part?'1':'0')+'" style="accent-color:#0064d2;flex-shrink:0;">' +
-      '<span style="font-size:11px;color:#bbb;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+escH(zone.name||zone.id)+'</span>' + emptyNote +
-      '</label></div>' +
-      '<div data-ow-children="'+escH(key)+'"'+(collapsed?' style="display:none"':'')+'>'+devHtml+'</div>' +
-      '</div>';
+    const pad = TREE_BASE + depth * TREE_STEP, key='dlz-'+zone.id+'-'+baseId, collapsed=_collapsedSteps[key]!==false;
+    const full=isFull(zone,'zone'), part=isPartial(zone,'zone'), devHtml=(zone.devices||[]).map(d=>renderDevice(d,depth+1)).join('');
+    const emptyNote=(!zone.devices||!zone.devices.length)?'<span style="font-size:10px;color:#444;margin-left:4px;">empty</span>':'';
+    return '<div data-dl-zone="'+escH(zone.id)+'" data-base-id="'+escH(baseId)+'"><div style="display:flex;align-items:center;gap:5px;padding:2px 6px;padding-left:'+pad+'px;">'+(zone.devices?.length?collapseBtn(key,'data-dlz-collapse',collapsed,' data-base-id="'+escH(baseId)+'"'):'<span style="flex-shrink:0;width:14px;"></span>')+'<label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;min-width:0;"><input type="checkbox" data-dlz-cb="'+escH(zone.id)+'" data-base-id="'+escH(baseId)+'" '+(full?'checked':'')+' data-partial="'+(part?'1':'0')+'" style="accent-color:#0064d2;flex-shrink:0;"><span style="font-size:11px;color:#bbb;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+escH(zone.name||zone.id)+'</span>'+emptyNote+'</label></div><div data-ow-children="'+escH(key)+'"'+(collapsed?' style="display:none"':'')+'>'+devHtml+'</div></div>';
   }
   function renderGroup(g, depth) {
-    const pad = TREE_BASE + depth * TREE_STEP;
-    const key = 'dlg-'+g.id+'-'+baseId;
-    const collapsed = _collapsedSteps[key] !== false;
-    const full = isFull(g, 'group');
-    const part = isPartial(g, 'group');
-    const zonesHtml = (g.zones||[]).map(z=>renderZone(z, depth+1)).join('');
-    return '<div data-dl-group="'+escH(g.id)+'" data-base-id="'+escH(baseId)+'">' +
-      '<div style="display:flex;align-items:center;gap:5px;padding:3px 6px;padding-left:'+pad+'px;">' +
-      ((g.zones?.length) ? collapseBtn(key,'data-dlg-collapse',collapsed,' data-base-id="'+escH(baseId)+'"') : '<span style="flex-shrink:0;width:14px;"></span>') +
-      '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;min-width:0;">' +
-      '<input type="checkbox" data-dlg-cb="'+escH(g.id)+'" data-base-id="'+escH(baseId)+'" '+(full?'checked':'')+' data-partial="'+(part?'1':'0')+'" style="accent-color:#0064d2;flex-shrink:0;">' +
-      '<span style="font-size:11px;font-weight:600;color:#bbb;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+escH(g.name||g.id)+'</span>' +
-      '</label></div>' +
-      '<div data-ow-children="'+escH(key)+'"'+(collapsed?' style="display:none"':'')+'>'+zonesHtml+'</div>' +
-      '</div>';
+    const pad=TREE_BASE+depth*TREE_STEP,key='dlg-'+g.id+'-'+baseId,collapsed=_collapsedSteps[key]!==false,full=isFull(g,'group'),part=isPartial(g,'group');
+    const zonesHtml=(g.zones||[]).map(z=>renderZone(z,depth+1)).join('');
+    return '<div data-dl-group="'+escH(g.id)+'" data-base-id="'+escH(baseId)+'"><div style="display:flex;align-items:center;gap:5px;padding:3px 6px;padding-left:'+pad+'px;">'+((g.zones?.length)?collapseBtn(key,'data-dlg-collapse',collapsed,' data-base-id="'+escH(baseId)+'"'):'<span style="flex-shrink:0;width:14px;"></span>')+'<label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;min-width:0;"><input type="checkbox" data-dlg-cb="'+escH(g.id)+'" data-base-id="'+escH(baseId)+'" '+(full?'checked':'')+' data-partial="'+(part?'1':'0')+'" style="accent-color:#0064d2;flex-shrink:0;"><span style="font-size:11px;font-weight:600;color:#bbb;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+escH(g.name||g.id)+'</span></label></div><div data-ow-children="'+escH(key)+'"'+(collapsed?' style="display:none"':'')+'>'+zonesHtml+'</div></div>';
   }
   function renderFloor(f, depth) {
-    const pad = TREE_BASE + depth * TREE_STEP;
-    const key = 'dlf-'+f.id+'-'+baseId;
-    const collapsed = !!_collapsedSteps[key];
-    const full = isFull(f, 'floor');
-    const part = isPartial(f, 'floor');
-    const groupsHtml = (f.groups||[]).map(g=>renderGroup(g, depth+1)).join('');
-    const ungroupedHtml = (f.ungrouped||[]).map(z=>renderZone(z, depth+1)).join('');
-    return '<div data-dl-floor="'+escH(f.id)+'" data-base-id="'+escH(baseId)+'">' +
-      '<div style="display:flex;align-items:center;gap:5px;padding:3px 6px;padding-left:'+pad+'px;background:rgba(255,255,255,0.03);border-radius:4px;margin-bottom:2px;">' +
-      collapseBtn(key,'data-dlf-collapse',collapsed,' data-base-id="'+escH(baseId)+'"') +
-      '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;min-width:0;">' +
-      '<input type="checkbox" data-dlf-cb="'+escH(f.id)+'" data-base-id="'+escH(baseId)+'" '+(full?'checked':'')+' data-partial="'+(part?'1':'0')+'" style="accent-color:#0064d2;flex-shrink:0;">' +
-      '<span style="font-size:11px;font-weight:700;color:#aaa;text-transform:uppercase;letter-spacing:0.06em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+escH(f.name||f.id)+'</span>' +
-      '</label></div>' +
-      '<div data-ow-children="'+escH(key)+'"'+(collapsed?' style="display:none"':'')+'>'+groupsHtml+ungroupedHtml+'</div>' +
-      '</div>';
+    const pad=TREE_BASE+depth*TREE_STEP,key='dlf-'+f.id+'-'+baseId,collapsed=!!_collapsedSteps[key],full=isFull(f,'floor'),part=isPartial(f,'floor');
+    const html=(f.groups||[]).map(g=>renderGroup(g,depth+1)).join('')+(f.ungrouped||[]).map(z=>renderZone(z,depth+1)).join('');
+    return '<div data-dl-floor="'+escH(f.id)+'" data-base-id="'+escH(baseId)+'"><div style="display:flex;align-items:center;gap:5px;padding:3px 6px;padding-left:'+pad+'px;background:rgba(255,255,255,0.03);border-radius:4px;margin-bottom:2px;">'+collapseBtn(key,'data-dlf-collapse',collapsed,' data-base-id="'+escH(baseId)+'"')+'<label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;min-width:0;"><input type="checkbox" data-dlf-cb="'+escH(f.id)+'" data-base-id="'+escH(baseId)+'" '+(full?'checked':'')+' data-partial="'+(part?'1':'0')+'" style="accent-color:#0064d2;flex-shrink:0;"><span style="font-size:11px;font-weight:700;color:#aaa;text-transform:uppercase;letter-spacing:0.06em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+escH(f.name||f.id)+'</span></label></div><div data-ow-children="'+escH(key)+'"'+(collapsed?' style="display:none"':'')+'>'+html+'</div></div>';
   }
-  function renderNode(node, depth) {
-    if (node.type==='floor') return renderFloor(node, depth);
-    if (node.type==='group') return renderGroup(node, depth);
-    if (node.type==='ungrouped') return (node.zones||[]).map(z=>renderZone(z, depth)).join('');
-    return renderZone(node, depth);
-  }
+  function renderNode(node, depth) { if(node.type==='floor')return renderFloor(node,depth); if(node.type==='group')return renderGroup(node,depth); if(node.type==='ungrouped')return (node.zones||[]).map(z=>renderZone(z,depth)).join(''); return renderZone(node,depth); }
   return '<div class="ow-scbl" style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:8px;overflow:hidden;margin-bottom:8px;"><div style="padding:4px;">'+tree.map(n=>renderNode(n,0)).join('')+'</div></div>';
 }
 
 function wireDeviceActionTree(selectedIds, onUpdate, baseId) {
-  const el = _panelEl;
-  if (!el) return;
-  const rootSel = '[data-base-id="'+CSS.escape(baseId)+'"]';
-  function boxes(sel) { return [...el.querySelectorAll(sel + rootSel)]; }
-  function collectDeviceIds() { return boxes('[data-dl-cb]').filter(c=>c.checked).map(c=>c.dataset.dlCb); }
-  function collectScopeIds(attr) { return boxes('['+attr+']').filter(c=>c.checked).map(c=>c.getAttribute(attr)); }
-  function updatePartialStates() {
-    boxes('[data-dlz-cb], [data-dlg-cb], [data-dlf-cb]').forEach(cb=>{ cb.indeterminate = cb.dataset.partial === '1' && !cb.checked; });
-  }
-  function emit() {
-    updatePartialStates();
-    onUpdate(collectDeviceIds(), {
-      floor_ids: collectScopeIds('data-dlf-cb'),
-      group_ids: collectScopeIds('data-dlg-cb'),
-      zone_ids: collectScopeIds('data-dlz-cb'),
-    });
-  }
-  function wireCollapse(selector, dataName, prefix) {
-    boxes(selector).forEach(btn=>{
-      btn.onclick = e => {
-        e.stopPropagation(); e.preventDefault();
-        const key = prefix + btn.getAttribute(dataName) + '-' + baseId;
-        const ch = btn.parentElement?.nextElementSibling;
-        const isOpen = ch && ch.style.display !== 'none';
-        _collapsedSteps[key] = isOpen;
-        if (ch) ch.style.display = isOpen ? 'none' : '';
-        btn.textContent = isOpen ? '▶' : '▼';
-      };
-    });
-  }
-  function setDescendants(container, checked) {
-    container.querySelectorAll('[data-dl-cb]'+rootSel+', [data-dlz-cb]'+rootSel+', [data-dlg-cb]'+rootSel).forEach(c=>{ c.checked = checked; c.indeterminate = false; c.dataset.partial = '0'; });
-  }
-  wireCollapse('[data-dlf-collapse]','data-dlf-collapse','dlf-');
-  wireCollapse('[data-dlg-collapse]','data-dlg-collapse','dlg-');
-  wireCollapse('[data-dlz-collapse]','data-dlz-collapse','dlz-');
-  boxes('[data-dlf-cb]').forEach(cb=>cb.onchange=()=>{ const box=cb.closest('[data-dl-floor]'); if (box) setDescendants(box, cb.checked); emit(); });
-  boxes('[data-dlg-cb]').forEach(cb=>cb.onchange=()=>{ const box=cb.closest('[data-dl-group]'); if (box) setDescendants(box, cb.checked); emit(); });
-  boxes('[data-dlz-cb]').forEach(cb=>cb.onchange=()=>{ const box=cb.closest('[data-dl-zone]'); if (box) box.querySelectorAll('[data-dl-cb]'+rootSel).forEach(c=>c.checked=cb.checked); cb.indeterminate=false; cb.dataset.partial='0'; emit(); });
-  boxes('[data-dl-cb]').forEach(cb=>cb.onchange=emit);
-  updatePartialStates();
+  const el=_panelEl; if(!el)return; const rootSel='[data-base-id="'+CSS.escape(baseId)+'"]';
+  const boxes=sel=>[...el.querySelectorAll(sel+rootSel)];
+  const collectDeviceIds=()=>boxes('[data-dl-cb]').filter(c=>c.checked).map(c=>c.dataset.dlCb);
+  const collectScopeIds=attr=>boxes('['+attr+']').filter(c=>c.checked).map(c=>c.getAttribute(attr));
+  function updatePartialStates(){boxes('[data-dlz-cb], [data-dlg-cb], [data-dlf-cb]').forEach(cb=>{cb.indeterminate=cb.dataset.partial==='1'&&!cb.checked;});}
+  function emit(){updatePartialStates();onUpdate(collectDeviceIds(),{floor_ids:collectScopeIds('data-dlf-cb'),group_ids:collectScopeIds('data-dlg-cb'),zone_ids:collectScopeIds('data-dlz-cb')});}
+  function wireCollapse(selector,dataName,prefix){boxes(selector).forEach(btn=>{btn.onclick=e=>{e.stopPropagation();e.preventDefault();const key=prefix+btn.getAttribute(dataName)+'-'+baseId;const ch=btn.parentElement?.nextElementSibling;const isOpen=ch&&ch.style.display!=='none';_collapsedSteps[key]=isOpen;if(ch)ch.style.display=isOpen?'none':'';btn.textContent=isOpen?'▶':'▼';};});}
+  function setDescendants(container,checked){container.querySelectorAll('[data-dl-cb]'+rootSel+', [data-dlz-cb]'+rootSel+', [data-dlg-cb]'+rootSel).forEach(c=>{c.checked=checked;c.indeterminate=false;c.dataset.partial='0';});}
+  wireCollapse('[data-dlf-collapse]','data-dlf-collapse','dlf-');wireCollapse('[data-dlg-collapse]','data-dlg-collapse','dlg-');wireCollapse('[data-dlz-collapse]','data-dlz-collapse','dlz-');
+  boxes('[data-dlf-cb]').forEach(cb=>cb.onchange=()=>{const box=cb.closest('[data-dl-floor]');if(box)setDescendants(box,cb.checked);emit();});
+  boxes('[data-dlg-cb]').forEach(cb=>cb.onchange=()=>{const box=cb.closest('[data-dl-group]');if(box)setDescendants(box,cb.checked);emit();});
+  boxes('[data-dlz-cb]').forEach(cb=>cb.onchange=()=>{const box=cb.closest('[data-dl-zone]');if(box)box.querySelectorAll('[data-dl-cb]'+rootSel).forEach(c=>c.checked=cb.checked);cb.indeterminate=false;cb.dataset.partial='0';emit();});
+  boxes('[data-dl-cb]').forEach(cb=>cb.onchange=emit);updatePartialStates();
 }
 
 /* ════════════════════════════════════════════════════════════
@@ -2109,6 +2028,13 @@ function wireCommonActionFields(a) {
       if(!a.clear_conditions.length) a.clear_conditions=['source_clear'];
     };
   });
+  const maintainCb = _panelEl?.querySelector(`#act-maintain-on-${a.id}`);
+  const maintainWrap = _panelEl?.querySelector(`#act-maintain-interval-wrap-${a.id}`);
+  if (maintainCb) maintainCb.onchange = () => {
+    a.maintain_on = !!maintainCb.checked;
+    if (maintainWrap) maintainWrap.style.display = a.maintain_on ? 'grid' : 'none';
+  };
+  wireInput(`act-maintain-interval-${a.id}`, v=>a.maintain_interval=v || '00:00:15');
 }
 
 /* ════════════════════════════════════════════════════════════
