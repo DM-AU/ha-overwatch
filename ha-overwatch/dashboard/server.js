@@ -1,4 +1,4 @@
-// HA-Overwatch 0.05.35.09-automation-scope-sync: automation actions support per-action Only run, start delay, and fixed turn-off cleanup.
+// HA-Overwatch 0.05.35.11-automation-action-scope-status: automation actions support per-action Only run, start delay, and fixed turn-off cleanup.
 /* ============================================================
  * HA-Overwatch — server.js
  *
@@ -688,11 +688,6 @@ function waitForHARegistryRefresh(refreshId, timeoutMs = 5000) {
     };
     tick();
   });
-}
-function refreshHAStateCacheFromListener() {
-  if (!haListenerSend) return false;
-  try { haListenerSend({ type: "get_states" }); return true; }
-  catch { return false; }
 }
 
 // Full HA entity state cache — written by startHAListener, read by /ow/states endpoint
@@ -1444,11 +1439,9 @@ if (pathname === "/ow/alarms/responses/sync" && req.method === "POST") {
     const ok = refetchHARegistry();
     const refreshId = haRegistry.refresh_id || 0;
     const completed = ok ? await waitForHARegistryRefresh(refreshId, 5000) : false;
-    const states_refresh_requested = refreshHAStateCacheFromListener();
     json(res, {
       ok,
       completed,
-      states_refresh_requested,
       refresh_id: refreshId,
       loaded: haRegistry.loaded,
       refreshing: haRegistry.refreshing,
@@ -3738,14 +3731,30 @@ function pushAutomationAction(actions, a, actionObj) {
   else seq.forEach(step => actions.push(step));
 }
 
-function _resolveAutomationScopedEntityIds(a, key, zoneList, groupList, floorsList) {
+function _resolveAutomationScopedEntityIds(a, key, zoneList, groupList, floorList) {
   const out = new Set();
   const hiddenForZone = zone => new Set((zone?.ha_excluded_entities || zone?.hidden_entities || zone?.excluded_entities || []).map(String));
-  const addFromZone = zone => { const hidden = hiddenForZone(zone); (zone?.[key] || []).forEach(entityId => { if (entityId && !hidden.has(String(entityId)) && !_serverEntityHidden(entityId)) out.add(entityId); }); };
+  const addFromZone = zone => {
+    if (!zone) return;
+    const hidden = hiddenForZone(zone);
+    (zone[key] || []).forEach(entityId => {
+      if (entityId && !hidden.has(String(entityId)) && !_serverEntityHidden(entityId)) out.add(entityId);
+    });
+  };
   (a?.zone_ids || []).forEach(zid => addFromZone(zoneList.find(z => z.id === zid)));
-  (a?.group_ids || []).forEach(gid => { const g = groupList.find(g => g.id === gid); (g?.zone_ids || []).forEach(zid => addFromZone(zoneList.find(z => z.id === zid))); });
-  const floorIds = new Set(a?.floor_ids || []);
-  if (floorIds.size) { const floors = floorsList || loadFloors(); floors.forEach(f => { if (!floorIds.has(f.id)) return; const isFirst = floors.length === 0 || floors[0]?.id === f.id; zoneList.filter(z => z.floor_id === f.id || (!z.floor_id && isFirst)).forEach(addFromZone); }); }
+  (a?.group_ids || []).forEach(gid => {
+    const g = groupList.find(g => g.id === gid);
+    (g?.zone_ids || []).forEach(zid => addFromZone(zoneList.find(z => z.id === zid)));
+  });
+  const selectedFloors = new Set(a?.floor_ids || []);
+  if (selectedFloors.size) {
+    const floors = floorList || [];
+    floors.forEach((f, idx) => {
+      if (!selectedFloors.has(f.id)) return;
+      const isFirst = idx === 0;
+      zoneList.filter(z => z.floor_id === f.id || (!z.floor_id && isFirst)).forEach(addFromZone);
+    });
+  }
   return [...out];
 }
 
@@ -3847,10 +3856,10 @@ function buildHAAutomation(auto, allZones, allGroups) {
   for (const a of (auto.actions || [])) {
     if (a.type === 'siren') {
       const ids = [..._resolveAutomationScopedEntityIds(a, 'sirens', zoneList, groupList, floorList), ...(a.entity_ids||[]), ...(a.entity_ids_extra||[])].filter(Boolean);
-      if (ids.length) pushAutomationAction(actions, a, { action:`siren.${a.service||'turn_on'}`, target:{ entity_id:ids.length===1?ids[0]:ids } });
+      if (ids.length) pushAutomationAction(actions, a, { action:`siren.${a.service||'turn_on'}`, target:{ entity_id:[...new Set(ids)].length===1?[...new Set(ids)][0]:[...new Set(ids)] } });
     } else if (a.type === 'light') {
       const ids = [..._resolveAutomationScopedEntityIds(a, 'lights', zoneList, groupList, floorList), ...(a.entity_ids_zone||[]), ...(a.entity_ids_other||[]), ...(a.entity_ids||[])].filter(Boolean);
-      if (ids.length) pushAutomationAction(actions, a, { action:`light.${a.service||'turn_on'}`, target:{ entity_id:ids.length===1?ids[0]:ids } });
+      if (ids.length) pushAutomationAction(actions, a, { action:`light.${a.service||'turn_on'}`, target:{ entity_id:[...new Set(ids)].length===1?[...new Set(ids)][0]:[...new Set(ids)] } });
     } else if (a.type === 'notify') {
       const target = a.target||'notify.notify';
       const svc = target.startsWith('notify.')?target.slice(7):target;
@@ -3859,7 +3868,7 @@ function buildHAAutomation(auto, allZones, allGroups) {
       const ids = (a.entity_ids||[]).filter(Boolean);
       if (ids.length) {
         // New format: OW zone/group switches
-        pushAutomationAction(actions, a, { action:`switch.${a.service||'turn_on'}`, target:{ entity_id:ids.length===1?ids[0]:ids } });
+        pushAutomationAction(actions, a, { action:`switch.${a.service||'turn_on'}`, target:{ entity_id:[...new Set(ids)].length===1?[...new Set(ids)][0]:[...new Set(ids)] } });
       } else if (a.entity_id) {
         // Backward compat: old single alarm_control_panel entity
         pushAutomationAction(actions, a, { action:`alarm_control_panel.${a.service||'alarm_arm_away'}`, target:{ entity_id:a.entity_id } });
@@ -3867,14 +3876,14 @@ function buildHAAutomation(auto, allZones, allGroups) {
     } else if (a.type === 'camera') {
       const ids = [..._resolveAutomationScopedEntityIds(a, 'cameras', zoneList, groupList, floorList), ...(a.entity_ids||[])].filter(Boolean);
       if (ids.length && a.service) {
-        const act = { action:`camera.${a.service}`, target:{ entity_id:ids.length===1?ids[0]:ids } };
+        const act = { action:`camera.${a.service}`, target:{ entity_id:[...new Set(ids)].length===1?[...new Set(ids)][0]:[...new Set(ids)] } };
         if (a.service_data && Object.keys(a.service_data).length) act.data = a.service_data;
         pushAutomationAction(actions, a, act);
       }
     } else if (a.type === 'camera_view') {
       const ids = (a.entity_ids||[]).filter(Boolean);
       if (ids.length) {
-        pushAutomationAction(actions, a, { action:`switch.${a.service||'turn_on'}`, target:{ entity_id:ids.length===1?ids[0]:ids } });
+        pushAutomationAction(actions, a, { action:`switch.${a.service||'turn_on'}`, target:{ entity_id:[...new Set(ids)].length===1?[...new Set(ids)][0]:[...new Set(ids)] } });
       }
     } else if (a.type === 'entity') {
       if (a.entity_id) {
