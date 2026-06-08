@@ -1,5 +1,5 @@
 /* ================================================================
- * HA-Overwatch — automations.js  v0.05.35.14
+ * HA-Overwatch — automations.js  v0.05.35.15
  * Admin-only Automation Editor.
  * HA is source of truth — reads/writes directly via server proxy.
  * ================================================================ */
@@ -523,13 +523,17 @@ function actionCommonControlsHtml(a) {
     </div>
   </div>`;
 }
+function actionSupportsMaintainOn(a) {
+  const clear = a.clear_mode || 'none';
+  return ['light','siren','entity','camera_view'].includes(a.type) && (a.service || 'turn_on') === 'turn_on' && clear !== 'none';
+}
 function actionTurnOffControlsHtml(a) {
   normaliseActionControls(a);
   const canTurnOff = ['light','siren','entity','camera_view'].includes(a.type);
   if (!canTurnOff) return '';
   const clear = a.clear_mode || 'none';
   const clearTimed = ['after_delay','source_clears','conditions'].includes(clear);
-  const canMaintain = ['light','siren','entity','camera_view'].includes(a.type) && (a.service || 'turn_on') === 'turn_on' && clear !== 'none';
+  const canMaintain = actionSupportsMaintainOn(a);
   return `<div style="background:rgba(255,255,255,0.035);border:1px solid rgba(255,255,255,0.08);border-radius:9px;padding:9px;margin-top:10px;">
     <div style="display:grid;grid-template-columns:1fr 160px;gap:8px;">
       <div><label style="${labelStyle}">Turn OFF</label><select id="act-clear-mode-${a.id}" style="${selectStyle}"><option value="none" ${clear==='none'?'selected':''}>Never</option><option value="after_delay" ${clear==='after_delay'?'selected':''}>After fixed time</option><option value="source_clears" ${clear==='source_clears'?'selected':''}>When source clears</option><option value="conditions" ${clear==='conditions'?'selected':''}>When selected conditions are met</option></select></div>
@@ -1320,16 +1324,8 @@ function entityStateBadge(entityId, state, size='small') {
   const domain = String(entityId || '').split('.')[0];
   const fs = size === 'small' ? '9' : '10';
   const badge = (label, bg, color) => `<span style="font-size:${fs}px;padding:1px 4px;border-radius:3px;background:${bg};color:${color};flex-shrink:0;">${label}</span>`;
-  if (domain === 'person' || domain === 'device_tracker') {
-    return String(state) === 'home'
-      ? badge('Home','rgba(52,199,89,0.13)','#34c759')
-      : badge('Away','rgba(255,59,48,0.20)','#ff6b6b');
-  }
-  if (['light','switch','siren','fan','media_player','input_boolean','binary_sensor'].includes(domain)) {
-    return String(state) === 'on'
-      ? badge('ON','rgba(255,214,10,0.20)','#ffd60a')
-      : badge('OFF','rgba(255,59,48,0.20)','#ff6b6b');
-  }
+  if (domain === 'person' || domain === 'device_tracker') return String(state) === 'home' ? badge('Home','rgba(52,199,89,0.13)','#34c759') : badge('Away','rgba(255,59,48,0.20)','#ff6b6b');
+  if (['light','switch','siren','fan','media_player','input_boolean','binary_sensor'].includes(domain)) return String(state) === 'on' ? badge('ON','rgba(255,214,10,0.20)','#ffd60a') : badge('OFF','rgba(255,59,48,0.20)','#ff6b6b');
   return badge(String(state), 'rgba(255,255,255,0.05)', '#777');
 }
 
@@ -1688,69 +1684,30 @@ const TREE_BASE  = 4;   // px left-padding for floor header
 const TREE_STEP  = 16;  // px indent per depth level
 
 function deviceActionTree(tree, selectedIds, baseId, scope = {}) {
-  const selectedFloors = scope.floor_ids || [];
-  const selectedGroups = scope.group_ids || [];
-  const selectedZones  = scope.zone_ids || [];
-  function allDevIds(node) {
-    if (node.devices) return node.devices.map(d=>d.entity_id);
-    if (node.zones) return node.zones.flatMap(z=>(z.devices||[]).map(d=>d.entity_id));
-    return [...(node.groups||[]).flatMap(g=>(g.zones||[]).flatMap(z=>(z.devices||[]).map(d=>d.entity_id))), ...(node.ungrouped||[]).flatMap(z=>(z.devices||[]).map(d=>d.entity_id))];
-  }
-  function nodeZoneIds(node) {
-    if (node.devices) return [node.id].filter(Boolean);
-    if (node.zones) return (node.zones||[]).map(z=>z.id);
-    return [...(node.groups||[]).flatMap(g=>(g.zones||[]).map(z=>z.id)), ...(node.ungrouped||[]).map(z=>z.id)].filter(Boolean);
-  }
-  function nodeGroupIds(node) { if (node.groups) return (node.groups||[]).map(g=>g.id); return node.type === 'group' ? [node.id] : []; }
-  function isFull(node, type) {
-    if (type === 'floor' && selectedFloors.includes(node.id)) return true;
-    if (type === 'group' && selectedGroups.includes(node.id)) return true;
-    if (type === 'zone' && selectedZones.includes(node.id)) return true;
-    const ids = allDevIds(node); return ids.length>0 && ids.every(id=>selectedIds.includes(id));
-  }
-  function isPartial(node, type) {
-    if (isFull(node, type)) return false;
-    return allDevIds(node).some(id=>selectedIds.includes(id)) || nodeZoneIds(node).some(id=>selectedZones.includes(id)) || nodeGroupIds(node).some(id=>selectedGroups.includes(id));
-  }
-  function collapseBtn(key, dataAttr, collapsed, extraData) { return '<button '+dataAttr+'="'+key+'"'+(extraData||'')+' style="flex-shrink:0;background:none;border:none;color:#666;cursor:pointer;font-size:10px;padding:0 2px;line-height:1;">'+(collapsed?'▶':'▼')+'</button>'; }
-  function renderDevice(d, depth) {
-    const pad = TREE_BASE + depth * TREE_STEP, sel = selectedIds.includes(d.entity_id), badge = entityStateBadge(d.entity_id, d.state, 'small');
-    return '<div data-dl-device data-scbl-item data-scbl-label="'+escH(d.name+' '+d.entity_id)+'" style="display:flex;align-items:center;gap:6px;padding:2px 6px;padding-left:'+pad+'px;"><span style="flex-shrink:0;width:14px;"></span><label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;min-width:0;"><input type="checkbox" data-dl-cb="'+escH(d.entity_id)+'" data-base-id="'+escH(baseId)+'" '+(sel?'checked':'')+' style="accent-color:#0064d2;flex-shrink:0;"><span style="font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:48%;">'+escH(d.name)+'</span>'+badge+'</label></div>';
-  }
-  function renderZone(zone, depth) {
-    const pad = TREE_BASE + depth * TREE_STEP, key='dlz-'+zone.id+'-'+baseId, collapsed=_collapsedSteps[key]!==false;
-    const full=isFull(zone,'zone'), part=isPartial(zone,'zone'), devHtml=(zone.devices||[]).map(d=>renderDevice(d,depth+1)).join('');
-    const emptyNote=(!zone.devices||!zone.devices.length)?'<span style="font-size:10px;color:#444;margin-left:4px;">empty</span>':'';
-    return '<div data-dl-zone="'+escH(zone.id)+'" data-base-id="'+escH(baseId)+'"><div style="display:flex;align-items:center;gap:5px;padding:2px 6px;padding-left:'+pad+'px;">'+(zone.devices?.length?collapseBtn(key,'data-dlz-collapse',collapsed,' data-base-id="'+escH(baseId)+'"'):'<span style="flex-shrink:0;width:14px;"></span>')+'<label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;min-width:0;"><input type="checkbox" data-dlz-cb="'+escH(zone.id)+'" data-base-id="'+escH(baseId)+'" '+(full?'checked':'')+' data-partial="'+(part?'1':'0')+'" style="accent-color:#0064d2;flex-shrink:0;"><span style="font-size:11px;color:#bbb;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+escH(zone.name||zone.id)+'</span>'+emptyNote+'</label></div><div data-ow-children="'+escH(key)+'"'+(collapsed?' style="display:none"':'')+'>'+devHtml+'</div></div>';
-  }
-  function renderGroup(g, depth) {
-    const pad=TREE_BASE+depth*TREE_STEP,key='dlg-'+g.id+'-'+baseId,collapsed=_collapsedSteps[key]!==false,full=isFull(g,'group'),part=isPartial(g,'group');
-    const zonesHtml=(g.zones||[]).map(z=>renderZone(z,depth+1)).join('');
-    return '<div data-dl-group="'+escH(g.id)+'" data-base-id="'+escH(baseId)+'"><div style="display:flex;align-items:center;gap:5px;padding:3px 6px;padding-left:'+pad+'px;">'+((g.zones?.length)?collapseBtn(key,'data-dlg-collapse',collapsed,' data-base-id="'+escH(baseId)+'"'):'<span style="flex-shrink:0;width:14px;"></span>')+'<label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;min-width:0;"><input type="checkbox" data-dlg-cb="'+escH(g.id)+'" data-base-id="'+escH(baseId)+'" '+(full?'checked':'')+' data-partial="'+(part?'1':'0')+'" style="accent-color:#0064d2;flex-shrink:0;"><span style="font-size:11px;font-weight:600;color:#bbb;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+escH(g.name||g.id)+'</span></label></div><div data-ow-children="'+escH(key)+'"'+(collapsed?' style="display:none"':'')+'>'+zonesHtml+'</div></div>';
-  }
-  function renderFloor(f, depth) {
-    const pad=TREE_BASE+depth*TREE_STEP,key='dlf-'+f.id+'-'+baseId,collapsed=!!_collapsedSteps[key],full=isFull(f,'floor'),part=isPartial(f,'floor');
-    const html=(f.groups||[]).map(g=>renderGroup(g,depth+1)).join('')+(f.ungrouped||[]).map(z=>renderZone(z,depth+1)).join('');
-    return '<div data-dl-floor="'+escH(f.id)+'" data-base-id="'+escH(baseId)+'"><div style="display:flex;align-items:center;gap:5px;padding:3px 6px;padding-left:'+pad+'px;background:rgba(255,255,255,0.03);border-radius:4px;margin-bottom:2px;">'+collapseBtn(key,'data-dlf-collapse',collapsed,' data-base-id="'+escH(baseId)+'"')+'<label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;min-width:0;"><input type="checkbox" data-dlf-cb="'+escH(f.id)+'" data-base-id="'+escH(baseId)+'" '+(full?'checked':'')+' data-partial="'+(part?'1':'0')+'" style="accent-color:#0064d2;flex-shrink:0;"><span style="font-size:11px;font-weight:700;color:#aaa;text-transform:uppercase;letter-spacing:0.06em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+escH(f.name||f.id)+'</span></label></div><div data-ow-children="'+escH(key)+'"'+(collapsed?' style="display:none"':'')+'>'+html+'</div></div>';
-  }
-  function renderNode(node, depth) { if(node.type==='floor')return renderFloor(node,depth); if(node.type==='group')return renderGroup(node,depth); if(node.type==='ungrouped')return (node.zones||[]).map(z=>renderZone(z,depth)).join(''); return renderZone(node,depth); }
+  const selectedFloors = scope.floor_ids || [], selectedGroups = scope.group_ids || [], selectedZones = scope.zone_ids || [];
+  function allDevIds(node){ if(node.devices)return node.devices.map(d=>d.entity_id); if(node.zones)return node.zones.flatMap(z=>(z.devices||[]).map(d=>d.entity_id)); return [...(node.groups||[]).flatMap(g=>(g.zones||[]).flatMap(z=>(z.devices||[]).map(d=>d.entity_id))), ...(node.ungrouped||[]).flatMap(z=>(z.devices||[]).map(d=>d.entity_id))]; }
+  function nodeZoneIds(node){ if(node.devices)return [node.id].filter(Boolean); if(node.zones)return (node.zones||[]).map(z=>z.id); return [...(node.groups||[]).flatMap(g=>(g.zones||[]).map(z=>z.id)), ...(node.ungrouped||[]).map(z=>z.id)].filter(Boolean); }
+  function nodeGroupIds(node){ if(node.groups)return (node.groups||[]).map(g=>g.id); return node.type==='group'?[node.id]:[]; }
+  function isFull(node,type){ if(type==='floor'&&selectedFloors.includes(node.id))return true; if(type==='group'&&selectedGroups.includes(node.id))return true; if(type==='zone'&&selectedZones.includes(node.id))return true; const ids=allDevIds(node); return ids.length>0&&ids.every(id=>selectedIds.includes(id)); }
+  function isPartial(node,type){ if(isFull(node,type))return false; return allDevIds(node).some(id=>selectedIds.includes(id))||nodeZoneIds(node).some(id=>selectedZones.includes(id))||nodeGroupIds(node).some(id=>selectedGroups.includes(id)); }
+  function collapseBtn(key,dataAttr,collapsed,extraData){ return '<button '+dataAttr+'="'+key+'"'+(extraData||'')+' style="flex-shrink:0;background:none;border:none;color:#666;cursor:pointer;font-size:10px;padding:0 2px;line-height:1;">'+(collapsed?'▶':'▼')+'</button>'; }
+  function renderDevice(d,depth){ const pad=TREE_BASE+depth*TREE_STEP,sel=selectedIds.includes(d.entity_id),badge=entityStateBadge(d.entity_id,d.state,'small'); return '<div data-dl-device data-scbl-item data-scbl-label="'+escH(d.name+' '+d.entity_id)+'" style="display:flex;align-items:center;gap:6px;padding:2px 6px;padding-left:'+pad+'px;"><span style="flex-shrink:0;width:14px;"></span><label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;min-width:0;"><input type="checkbox" data-dl-cb="'+escH(d.entity_id)+'" data-base-id="'+escH(baseId)+'" '+(sel?'checked':'')+' style="accent-color:#0064d2;flex-shrink:0;"><span style="font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:48%;">'+escH(d.name)+'</span>'+badge+'</label></div>'; }
+  function renderZone(zone,depth){ const pad=TREE_BASE+depth*TREE_STEP,key='dlz-'+zone.id+'-'+baseId,collapsed=_collapsedSteps[key]!==false,full=isFull(zone,'zone'),part=isPartial(zone,'zone'); const devHtml=(zone.devices||[]).map(d=>renderDevice(d,depth+1)).join(''); const empty=(!zone.devices||!zone.devices.length)?'<span style="font-size:10px;color:#444;margin-left:4px;">empty</span>':''; return '<div data-dl-zone="'+escH(zone.id)+'" data-base-id="'+escH(baseId)+'"><div style="display:flex;align-items:center;gap:5px;padding:2px 6px;padding-left:'+pad+'px;">'+(zone.devices?.length?collapseBtn(key,'data-dlz-collapse',collapsed,' data-base-id="'+escH(baseId)+'"'):'<span style="flex-shrink:0;width:14px;"></span>')+'<label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;min-width:0;"><input type="checkbox" data-dlz-cb="'+escH(zone.id)+'" data-base-id="'+escH(baseId)+'" '+(full?'checked':'')+' data-partial="'+(part?'1':'0')+'" style="accent-color:#0064d2;flex-shrink:0;"><span style="font-size:11px;color:#bbb;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+escH(zone.name||zone.id)+'</span>'+empty+'</label></div><div data-ow-children="'+escH(key)+'"'+(collapsed?' style="display:none"':'')+'>'+devHtml+'</div></div>'; }
+  function renderGroup(g,depth){ const pad=TREE_BASE+depth*TREE_STEP,key='dlg-'+g.id+'-'+baseId,collapsed=_collapsedSteps[key]!==false,full=isFull(g,'group'),part=isPartial(g,'group'),zonesHtml=(g.zones||[]).map(z=>renderZone(z,depth+1)).join(''); return '<div data-dl-group="'+escH(g.id)+'" data-base-id="'+escH(baseId)+'"><div style="display:flex;align-items:center;gap:5px;padding:3px 6px;padding-left:'+pad+'px;">'+((g.zones?.length)?collapseBtn(key,'data-dlg-collapse',collapsed,' data-base-id="'+escH(baseId)+'"'):'<span style="flex-shrink:0;width:14px;"></span>')+'<label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;min-width:0;"><input type="checkbox" data-dlg-cb="'+escH(g.id)+'" data-base-id="'+escH(baseId)+'" '+(full?'checked':'')+' data-partial="'+(part?'1':'0')+'" style="accent-color:#0064d2;flex-shrink:0;"><span style="font-size:11px;font-weight:600;color:#bbb;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+escH(g.name||g.id)+'</span></label></div><div data-ow-children="'+escH(key)+'"'+(collapsed?' style="display:none"':'')+'>'+zonesHtml+'</div></div>'; }
+  function renderFloor(f,depth){ const pad=TREE_BASE+depth*TREE_STEP,key='dlf-'+f.id+'-'+baseId,collapsed=!!_collapsedSteps[key],full=isFull(f,'floor'),part=isPartial(f,'floor'),html=(f.groups||[]).map(g=>renderGroup(g,depth+1)).join('')+(f.ungrouped||[]).map(z=>renderZone(z,depth+1)).join(''); return '<div data-dl-floor="'+escH(f.id)+'" data-base-id="'+escH(baseId)+'"><div style="display:flex;align-items:center;gap:5px;padding:3px 6px;padding-left:'+pad+'px;background:rgba(255,255,255,0.03);border-radius:4px;margin-bottom:2px;">'+collapseBtn(key,'data-dlf-collapse',collapsed,' data-base-id="'+escH(baseId)+'"')+'<label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;min-width:0;"><input type="checkbox" data-dlf-cb="'+escH(f.id)+'" data-base-id="'+escH(baseId)+'" '+(full?'checked':'')+' data-partial="'+(part?'1':'0')+'" style="accent-color:#0064d2;flex-shrink:0;"><span style="font-size:11px;font-weight:700;color:#aaa;text-transform:uppercase;letter-spacing:0.06em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+escH(f.name||f.id)+'</span></label></div><div data-ow-children="'+escH(key)+'"'+(collapsed?' style="display:none"':'')+'>'+html+'</div></div>'; }
+  function renderNode(node,depth){ if(node.type==='floor')return renderFloor(node,depth); if(node.type==='group')return renderGroup(node,depth); if(node.type==='ungrouped')return (node.zones||[]).map(z=>renderZone(z,depth)).join(''); return renderZone(node,depth); }
   return '<div class="ow-scbl" style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:8px;overflow:hidden;margin-bottom:8px;"><div style="padding:4px;">'+tree.map(n=>renderNode(n,0)).join('')+'</div></div>';
 }
-
-function wireDeviceActionTree(selectedIds, onUpdate, baseId) {
-  const el=_panelEl; if(!el)return; const rootSel='[data-base-id="'+CSS.escape(baseId)+'"]';
-  const boxes=sel=>[...el.querySelectorAll(sel+rootSel)];
-  const collectDeviceIds=()=>boxes('[data-dl-cb]').filter(c=>c.checked).map(c=>c.dataset.dlCb);
-  const collectScopeIds=attr=>boxes('['+attr+']').filter(c=>c.checked).map(c=>c.getAttribute(attr));
-  function updatePartialStates(){boxes('[data-dlz-cb], [data-dlg-cb], [data-dlf-cb]').forEach(cb=>{cb.indeterminate=cb.dataset.partial==='1'&&!cb.checked;});}
+function wireDeviceActionTree(selectedIds,onUpdate,baseId){
+  const el=_panelEl;if(!el)return;const rootSel='[data-base-id="'+CSS.escape(baseId)+'"]';const boxes=sel=>[...el.querySelectorAll(sel+rootSel)];
+  const collectDeviceIds=()=>boxes('[data-dl-cb]').filter(c=>c.checked).map(c=>c.dataset.dlCb);const collectScopeIds=attr=>boxes('['+attr+']').filter(c=>c.checked).map(c=>c.getAttribute(attr));
+  function recomputeBox(container, childSel, cbSel){const cb=container.querySelector(':scope > div '+cbSel+rootSel); if(!cb)return; const kids=[...container.querySelectorAll(childSel+rootSel)]; if(!kids.length){cb.indeterminate=false;return;} const checked=kids.filter(k=>k.checked).length, partial=kids.some(k=>k.indeterminate); cb.indeterminate=(checked>0&&checked<kids.length)||partial; if(checked===kids.length&&!partial)cb.checked=true; else if(checked===0&&!partial)cb.checked=false;}
+  function updatePartialStates(){boxes('[data-dlz-cb], [data-dlg-cb], [data-dlf-cb]').forEach(cb=>{cb.indeterminate=cb.dataset.partial==='1'&&!cb.checked;}); [...el.querySelectorAll('[data-dl-zone]'+rootSel)].forEach(z=>recomputeBox(z,'[data-dl-cb]','[data-dlz-cb]')); [...el.querySelectorAll('[data-dl-group]'+rootSel)].forEach(g=>recomputeBox(g,'[data-dlz-cb], [data-dl-cb]','[data-dlg-cb]')); [...el.querySelectorAll('[data-dl-floor]'+rootSel)].forEach(f=>recomputeBox(f,'[data-dlg-cb], [data-dlz-cb], [data-dl-cb]','[data-dlf-cb]'));}
   function emit(){updatePartialStates();onUpdate(collectDeviceIds(),{floor_ids:collectScopeIds('data-dlf-cb'),group_ids:collectScopeIds('data-dlg-cb'),zone_ids:collectScopeIds('data-dlz-cb')});}
   function wireCollapse(selector,dataName,prefix){boxes(selector).forEach(btn=>{btn.onclick=e=>{e.stopPropagation();e.preventDefault();const key=prefix+btn.getAttribute(dataName)+'-'+baseId;const ch=btn.parentElement?.nextElementSibling;const isOpen=ch&&ch.style.display!=='none';_collapsedSteps[key]=isOpen;if(ch)ch.style.display=isOpen?'none':'';btn.textContent=isOpen?'▶':'▼';};});}
   function setDescendants(container,checked){container.querySelectorAll('[data-dl-cb]'+rootSel+', [data-dlz-cb]'+rootSel+', [data-dlg-cb]'+rootSel).forEach(c=>{c.checked=checked;c.indeterminate=false;c.dataset.partial='0';});}
   wireCollapse('[data-dlf-collapse]','data-dlf-collapse','dlf-');wireCollapse('[data-dlg-collapse]','data-dlg-collapse','dlg-');wireCollapse('[data-dlz-collapse]','data-dlz-collapse','dlz-');
-  boxes('[data-dlf-cb]').forEach(cb=>cb.onchange=()=>{const box=cb.closest('[data-dl-floor]');if(box)setDescendants(box,cb.checked);emit();});
-  boxes('[data-dlg-cb]').forEach(cb=>cb.onchange=()=>{const box=cb.closest('[data-dl-group]');if(box)setDescendants(box,cb.checked);emit();});
-  boxes('[data-dlz-cb]').forEach(cb=>cb.onchange=()=>{const box=cb.closest('[data-dl-zone]');if(box)box.querySelectorAll('[data-dl-cb]'+rootSel).forEach(c=>c.checked=cb.checked);cb.indeterminate=false;cb.dataset.partial='0';emit();});
-  boxes('[data-dl-cb]').forEach(cb=>cb.onchange=emit);updatePartialStates();
+  boxes('[data-dlf-cb]').forEach(cb=>cb.onchange=()=>{const box=cb.closest('[data-dl-floor]');if(box)setDescendants(box,cb.checked);emit();}); boxes('[data-dlg-cb]').forEach(cb=>cb.onchange=()=>{const box=cb.closest('[data-dl-group]');if(box)setDescendants(box,cb.checked);emit();}); boxes('[data-dlz-cb]').forEach(cb=>cb.onchange=()=>{const box=cb.closest('[data-dl-zone]');if(box)box.querySelectorAll('[data-dl-cb]'+rootSel).forEach(c=>c.checked=cb.checked);cb.indeterminate=false;cb.dataset.partial='0';emit();}); boxes('[data-dl-cb]').forEach(cb=>cb.onchange=emit); updatePartialStates();
 }
 
 /* ════════════════════════════════════════════════════════════
@@ -2017,8 +1974,10 @@ function wireCommonActionFields(a) {
     a.clear_mode=v || 'none';
     const wrap=_panelEl?.querySelector(`#act-clear-for-wrap-${a.id}`);
     const condWrap=_panelEl?.querySelector(`#act-clear-cond-wrap-${a.id}`);
+    const maintainWrap=_panelEl?.querySelector(`#act-maintain-wrap-${a.id}`);
     if(wrap) wrap.style.display = ['after_delay','source_clears','conditions'].includes(a.clear_mode) ? '' : 'none';
     if(condWrap) condWrap.style.display = a.clear_mode === 'conditions' ? 'block' : 'none';
+    if(maintainWrap) maintainWrap.style.display = actionSupportsMaintainOn(a) ? 'block' : 'none';
   });
   wireInput(`act-clear-for-${a.id}`, v=>a.clear_for=v || '00:00:00');
   wireSelect(`act-clear-match-${a.id}`, v=>a.clear_match=v || 'all');
