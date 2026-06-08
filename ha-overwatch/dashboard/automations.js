@@ -1,5 +1,5 @@
 /* ================================================================
- * HA-Overwatch — automations.js  v0.05.35.15
+ * HA-Overwatch — automations.js  v0.05.35.16
  * Admin-only Automation Editor.
  * HA is source of truth — reads/writes directly via server proxy.
  * ================================================================ */
@@ -466,8 +466,8 @@ function normaliseActionControls(a) {
   if (!Array.isArray(a.floor_ids)) a.floor_ids = [];
   if (!Array.isArray(a.group_ids)) a.group_ids = [];
   if (!Array.isArray(a.zone_ids)) a.zone_ids = [];
-  if (typeof a.maintain_on !== 'boolean') a.maintain_on = false;
-  if (!a.maintain_interval) a.maintain_interval = '00:00:15';
+  delete a.maintain_on;
+  delete a.maintain_interval;
   return a;
 }
 function actionEntityCount(a) {
@@ -523,27 +523,18 @@ function actionCommonControlsHtml(a) {
     </div>
   </div>`;
 }
-function actionSupportsMaintainOn(a) {
-  const clear = a.clear_mode || 'none';
-  return ['light','siren','entity','camera_view'].includes(a.type) && (a.service || 'turn_on') === 'turn_on' && clear !== 'none';
-}
 function actionTurnOffControlsHtml(a) {
   normaliseActionControls(a);
   const canTurnOff = ['light','siren','entity','camera_view'].includes(a.type);
   if (!canTurnOff) return '';
   const clear = a.clear_mode || 'none';
   const clearTimed = ['after_delay','source_clears','conditions'].includes(clear);
-  const canMaintain = actionSupportsMaintainOn(a);
   return `<div style="background:rgba(255,255,255,0.035);border:1px solid rgba(255,255,255,0.08);border-radius:9px;padding:9px;margin-top:10px;">
     <div style="display:grid;grid-template-columns:1fr 160px;gap:8px;">
       <div><label style="${labelStyle}">Turn OFF</label><select id="act-clear-mode-${a.id}" style="${selectStyle}"><option value="none" ${clear==='none'?'selected':''}>Never</option><option value="after_delay" ${clear==='after_delay'?'selected':''}>After fixed time</option><option value="source_clears" ${clear==='source_clears'?'selected':''}>When source clears</option><option value="conditions" ${clear==='conditions'?'selected':''}>When selected conditions are met</option></select></div>
       <div id="act-clear-for-wrap-${a.id}" style="display:${clearTimed?'':'none'}"><label style="${labelStyle}">For</label><input id="act-clear-for-${a.id}" type="text" value="${escH(a.clear_for || '00:00:00')}" placeholder="HH:MM:SS" pattern="\\d{2}:\\d{2}:\\d{2}" style="${inputStyle}"/></div>
     </div>
     <div id="act-clear-cond-wrap-${a.id}" style="display:${clear==='conditions'?'block':'none'};margin-top:8px;border:1px solid rgba(255,255,255,0.07);border-radius:8px;padding:8px;background:rgba(255,255,255,0.025);"><label style="${labelStyle}">Conditions</label><select id="act-clear-match-${a.id}" style="${selectStyle};margin-bottom:6px;"><option value="all" ${a.clear_match!=='any'?'selected':''}>ALL selected conditions</option><option value="any" ${a.clear_match==='any'?'selected':''}>ANY selected condition</option></select><label style="display:flex;gap:6px;align-items:center;font-size:11px;color:#bbb;margin:4px 0;"><input type="checkbox" data-clear-cond="source_clear" ${((a.clear_conditions||['source_clear']).includes('source_clear'))?'checked':''}> Source/trigger entity is OFF/clear</label><label style="display:flex;gap:6px;align-items:center;font-size:11px;color:#bbb;margin:4px 0;"><input type="checkbox" data-clear-cond="alarm_not_triggered" ${((a.clear_conditions||[]).includes('alarm_not_triggered'))?'checked':''}> Alarm triggered sensors are OFF</label></div>
-    <div id="act-maintain-wrap-${a.id}" style="display:${canMaintain?'block':'none'};margin-top:10px;border-top:1px solid rgba(255,255,255,0.06);padding-top:8px;">
-      <label style="display:flex;gap:7px;align-items:center;font-size:12px;color:#ccc;cursor:pointer;"><input id="act-maintain-on-${a.id}" type="checkbox" ${a.maintain_on?'checked':''} style="accent-color:#0064d2;"> Keep ON until this action is allowed to turn OFF</label>
-      <div id="act-maintain-interval-wrap-${a.id}" style="display:${a.maintain_on?'grid':'none'};grid-template-columns:160px 1fr;gap:8px;align-items:end;margin-top:8px;"><div><label style="${labelStyle}">Check every</label><input id="act-maintain-interval-${a.id}" type="text" value="${escH(a.maintain_interval || '00:00:15')}" placeholder="HH:MM:SS" pattern="\\d{2}:\\d{2}:\\d{2}" style="${inputStyle}"/></div><div style="font-size:10px;color:#555;padding-bottom:8px;">Reasserts ON if the device turns itself off early.</div></div>
-    </div>
   </div>`;
 }
 
@@ -553,13 +544,13 @@ function actionLayoutHtml(a, label, inner) {
 
 function addAction(type) {
   const defaults = {
-    siren:  {entity_ids:[],floor_ids:[],group_ids:[],zone_ids:[],service:'turn_on',maintain_on:false,maintain_interval:'00:00:15'},
-    light:  {entity_ids:[],entity_ids_zone:[],entity_ids_other:[],floor_ids:[],group_ids:[],zone_ids:[],service:'turn_on',maintain_on:false,maintain_interval:'00:00:15'},
+    siren:  {entity_ids:[],floor_ids:[],group_ids:[],zone_ids:[],service:'turn_on'},
+    light:  {entity_ids:[],entity_ids_zone:[],entity_ids_other:[],floor_ids:[],group_ids:[],zone_ids:[],service:'turn_on'},
     notify: {target:'',message:'HA-Overwatch: Zone triggered.',title:''},
     arm:    {service:'alarm_arm_away',entity_id:''},
     camera: {entity_ids:[],floor_ids:[],group_ids:[],zone_ids:[],service:'snapshot',service_data:{}},
-    camera_view: {entity_ids:[],floor_ids:[],group_ids:[],zone_ids:[],service:'turn_on',maintain_on:false,maintain_interval:'00:00:15'},
-    entity: {entity_id:'',service:'turn_on',maintain_on:false,maintain_interval:'00:00:15'},
+    camera_view: {entity_ids:[],floor_ids:[],group_ids:[],zone_ids:[],service:'turn_on'},
+    entity: {entity_id:'',service:'turn_on'},
   };
   _draft.actions.push(normaliseActionControls({id:uid(),type,...(defaults[type]||{})}));
   renderEditorKeepScroll();
@@ -1974,10 +1965,8 @@ function wireCommonActionFields(a) {
     a.clear_mode=v || 'none';
     const wrap=_panelEl?.querySelector(`#act-clear-for-wrap-${a.id}`);
     const condWrap=_panelEl?.querySelector(`#act-clear-cond-wrap-${a.id}`);
-    const maintainWrap=_panelEl?.querySelector(`#act-maintain-wrap-${a.id}`);
     if(wrap) wrap.style.display = ['after_delay','source_clears','conditions'].includes(a.clear_mode) ? '' : 'none';
     if(condWrap) condWrap.style.display = a.clear_mode === 'conditions' ? 'block' : 'none';
-    if(maintainWrap) maintainWrap.style.display = actionSupportsMaintainOn(a) ? 'block' : 'none';
   });
   wireInput(`act-clear-for-${a.id}`, v=>a.clear_for=v || '00:00:00');
   wireSelect(`act-clear-match-${a.id}`, v=>a.clear_match=v || 'all');
@@ -1987,13 +1976,6 @@ function wireCommonActionFields(a) {
       if(!a.clear_conditions.length) a.clear_conditions=['source_clear'];
     };
   });
-  const maintainCb = _panelEl?.querySelector(`#act-maintain-on-${a.id}`);
-  const maintainWrap = _panelEl?.querySelector(`#act-maintain-interval-wrap-${a.id}`);
-  if (maintainCb) maintainCb.onchange = () => {
-    a.maintain_on = !!maintainCb.checked;
-    if (maintainWrap) maintainWrap.style.display = a.maintain_on ? 'grid' : 'none';
-  };
-  wireInput(`act-maintain-interval-${a.id}`, v=>a.maintain_interval=v || '00:00:15');
 }
 
 /* ════════════════════════════════════════════════════════════
