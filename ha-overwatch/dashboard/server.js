@@ -1,4 +1,4 @@
-// HA-Overwatch 0.05.35.16-parallel-actions-no-maintain: automation actions support per-action Only run, start delay, and fixed turn-off cleanup.
+// HA-Overwatch 0.05.35.18-source-clears-restart-mode: automation actions support per-action Only run, start delay, and fixed turn-off cleanup.
 /* ============================================================
  * HA-Overwatch — server.js
  *
@@ -3906,7 +3906,9 @@ function buildHAAutomation(auto, allZones, allGroups) {
     alias:       `HA-Overwatch — ${auto.name}`,
     description: 'Created by HA-Overwatch',
     variables:   owMeta,
-    mode:        "single",
+    // Source-clears actions need restart mode so new trigger events reset the clear/cooldown timer.
+    // Keep all other automations as single to preserve existing behaviour.
+    mode:        (auto.actions || []).some(a => String(a?.clear_mode || 'none') === 'source_clears') ? "restart" : "single",
     triggers:    triggers,
     conditions:  conditions,
     actions:     actions,
