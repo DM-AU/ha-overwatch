@@ -1,4 +1,4 @@
-// HA-Overwatch 0.05.35.17.01-source-clear-restart: automation actions support per-action Only run, start delay, and fixed turn-off cleanup.
+// HA-Overwatch 0.05.35.16-parallel-actions-no-maintain: automation actions support per-action Only run, start delay, and fixed turn-off cleanup.
 /* ============================================================
  * HA-Overwatch — server.js
  *
@@ -3693,33 +3693,16 @@ function _turnOffActionFor(actionObj) {
   if (!['light','siren','switch'].includes(domain)) return null;
   return { action: `${domain}.turn_off`, target: actionObj.target || {} };
 }
-function _durationToSeconds(value) {
-  const s = String(value || '00:00:00');
-  const m = s.match(/^(\d+):(\d{2}):(\d{2})$/);
-  if (!m) return 0;
-  return (Number(m[1]) * 3600) + (Number(m[2]) * 60) + Number(m[3]);
-}
-function _haEntityListLiteral(entityIds) {
-  return `[${[...(new Set(entityIds || []))].filter(Boolean).map(id => `'${String(id).replace(/'/g, "\\'")}'`).join(', ')}]`;
-}
-function _sourceClearTemplate(sourceEntityIds) {
-  const ids = [...new Set(sourceEntityIds || [])].filter(Boolean);
-  if (!ids.length) return "{{ is_state(trigger.entity_id, 'off') }}";
-  return `{{ expand(${_haEntityListLiteral(ids)}) | selectattr('state','eq','on') | list | count == 0 }}`;
-}
-function _clearTemplateForAction(a, sourceEntityIds = []) {
+function _clearTemplateForAction(a) {
   const conds = Array.isArray(a?.clear_conditions) && a.clear_conditions.length ? a.clear_conditions : ['source_clear'];
   const parts = [];
-  if (conds.includes('source_clear')) {
-    const tpl = _sourceClearTemplate(sourceEntityIds).replace(/^{{\s*|\s*}}$/g, '');
-    parts.push(tpl);
-  }
-  if (conds.includes('alarm_not_triggered')) parts.push("states.binary_sensor | selectattr('entity_id','match','binary_sensor\\.overwatch_alarm_.*triggered') | selectattr('state','eq','on') | list | count == 0");
-  if (!parts.length) parts.push(_sourceClearTemplate(sourceEntityIds).replace(/^{{\s*|\s*}}$/g, ''));
+  if (conds.includes('source_clear')) parts.push("is_state(trigger.entity_id, 'off')");
+  if (conds.includes('alarm_not_triggered')) parts.push("states.binary_sensor | selectattr('entity_id','match','binary_sensor\.overwatch_alarm_.*triggered') | selectattr('state','eq','on') | list | count == 0");
+  if (!parts.length) parts.push("is_state(trigger.entity_id, 'off')");
   const op = (a?.clear_match === 'any') ? ' or ' : ' and ';
   return `{{ ${parts.join(op)} }}`;
 }
-function _pushDynamicTurnOff(seq, a, actionObj, sourceEntityIds = []) {
+function _pushDynamicTurnOff(seq, a, actionObj) {
   const clearMode = String(a?.clear_mode || 'none');
   const offAction = _turnOffActionFor(actionObj);
   if (!offAction || clearMode === 'none') return;
@@ -3730,25 +3713,51 @@ function _pushDynamicTurnOff(seq, a, actionObj, sourceEntityIds = []) {
     return;
   }
   if (clearMode === 'source_clears' || clearMode === 'conditions') {
-    const tpl = clearMode === 'source_clears' ? _sourceClearTemplate(sourceEntityIds) : _clearTemplateForAction(a, sourceEntityIds);
+    const tpl = clearMode === 'source_clears' ? "{{ is_state(trigger.entity_id, 'off') }}" : _clearTemplateForAction(a);
     seq.push({ wait_template: tpl, continue_on_timeout: false });
     if (clearFor !== '00:00:00') seq.push({ delay: clearFor });
     seq.push({ condition: 'template', value_template: tpl });
     seq.push(offAction);
   }
 }
-function buildAutomationActionBranch(a, actionObj, sourceEntityIds = []) {
+function buildAutomationActionBranch(a, actionObj) {
   const seq = [];
   const startDelay = _autoDuration(a?.trigger_for);
   if (startDelay) seq.push({ delay: startDelay });
   seq.push(actionObj);
-  _pushDynamicTurnOff(seq, a, actionObj, sourceEntityIds);
+  _pushDynamicTurnOff(seq, a, actionObj);
   const conditions = _automationActionConditions(a);
   if (conditions.length) return { choose: [{ conditions, sequence: seq }] };
   return { sequence: seq };
 }
-function pushAutomationAction(actions, a, actionObj, sourceEntityIds = []) {
-  actions.push(buildAutomationActionBranch(a, actionObj, sourceEntityIds));
+function pushAutomationAction(actions, a, actionObj) {
+  actions.push(buildAutomationActionBranch(a, actionObj));
+}
+
+function _resolveAutomationScopedEntityIds(a, key, zoneList, groupList, floorList) {
+  const out = new Set();
+  const hiddenForZone = zone => new Set((zone?.ha_excluded_entities || zone?.hidden_entities || zone?.excluded_entities || []).map(String));
+  const addFromZone = zone => {
+    if (!zone) return;
+    const hidden = hiddenForZone(zone);
+    (zone[key] || []).forEach(entityId => {
+      if (entityId && !hidden.has(String(entityId)) && !_serverEntityHidden(entityId)) out.add(entityId);
+    });
+  };
+  (a?.zone_ids || []).forEach(zid => addFromZone(zoneList.find(z => z.id === zid)));
+  (a?.group_ids || []).forEach(gid => {
+    const g = groupList.find(g => g.id === gid);
+    (g?.zone_ids || []).forEach(zid => addFromZone(zoneList.find(z => z.id === zid)));
+  });
+  const selectedFloors = new Set(a?.floor_ids || []);
+  if (selectedFloors.size) {
+    (floorList || []).forEach((f, idx) => {
+      if (!selectedFloors.has(f.id)) return;
+      const isFirst = idx === 0;
+      zoneList.filter(z => z.floor_id === f.id || (!z.floor_id && isFirst)).forEach(addFromZone);
+    });
+  }
+  return [...out];
 }
 
 /* ── Build HA automation config from OW draft ─────────────── */
@@ -3770,7 +3779,6 @@ function buildHAAutomation(auto, allZones, allGroups) {
   const triggers   = [];
   const conditions = [];
   const actions    = [];
-  const sourceClearEntityIds = [];
 
   // OW metadata stored in 'variables' — a valid HA field, not shown in UI, survives round-trips
   const owMeta = { ow_id: auto.id, ow_name: auto.name, ow_draft: auto };
@@ -3796,9 +3804,6 @@ function buildHAAutomation(auto, allZones, allGroups) {
           ? `switch.overwatch_zone_${slug}`
           : `binary_sensor.overwatch_zone_${slug}_triggered`);
       });
-      if (!isArm && (t.event === 'triggered' || !t.event)) {
-        entityIds.forEach(eid => { if (eid && !sourceClearEntityIds.includes(eid)) sourceClearEntityIds.push(eid); });
-      }
       if (entityIds.length > 0) {
         const trig = { trigger:"state", entity_id: entityIds.length===1?entityIds[0]:entityIds, to:toState };
         if (forDur) trig.for = forDur;
@@ -3857,7 +3862,7 @@ function buildHAAutomation(auto, allZones, allGroups) {
     return { entity_id: u.length === 1 ? u[0] : u };
   }
   function addActionBranch(a, actionObj) {
-    actionBranches.push(buildAutomationActionBranch(a, actionObj, sourceClearEntityIds));
+    actionBranches.push(buildAutomationActionBranch(a, actionObj));
   }
 
   for (const a of (auto.actions || [])) {
@@ -3901,7 +3906,7 @@ function buildHAAutomation(auto, allZones, allGroups) {
     alias:       `HA-Overwatch — ${auto.name}`,
     description: 'Created by HA-Overwatch',
     variables:   owMeta,
-    mode:        (auto.actions || []).some(a => String(a?.clear_mode || 'none') === 'source_clears') ? "restart" : "single",
+    mode:        "single",
     triggers:    triggers,
     conditions:  conditions,
     actions:     actions,
