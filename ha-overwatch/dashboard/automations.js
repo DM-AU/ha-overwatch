@@ -1,5 +1,5 @@
 /* ================================================================
- * HA-Overwatch — automations.js  v0.05.35.24
+ * HA-Overwatch — automations.js  v0.05.35.25
  * Admin-only Automation Editor.
  * HA is source of truth — reads/writes directly via server proxy.
  * ================================================================ */
@@ -470,102 +470,7 @@ function normaliseActionControls(a) {
   delete a.maintain_interval;
   return a;
 }
-
-function expandHierarchicalActionScopes(a) {
-  if (!a || typeof a !== 'object') return a;
-  if (!Array.isArray(a.floor_ids)) a.floor_ids = [];
-  if (!Array.isArray(a.group_ids)) a.group_ids = [];
-  if (!Array.isArray(a.zone_ids)) a.zone_ids = [];
-
-  const uniq = arr => [...new Set((arr || []).filter(Boolean))];
-  const add = (arr, ids) => uniq([...(arr || []), ...(Array.isArray(ids) ? ids : [ids])]);
-  const zlist = zones();
-  const glist = groups();
-  const flist = ow().floors || [];
-  const firstFloorId = flist[0]?.id;
-  const zoneSlugLocal = z => nameSlug(z?.name || '') || z?.id;
-  const groupSlugLocal = g => nameSlug(g?.name || '') || g?.id;
-  const zoneSwitch = z => z ? `switch.overwatch_zone_${zoneSlugLocal(z)}` : '';
-  const groupSwitch = g => g ? `switch.overwatch_zone_group_${groupSlugLocal(g)}` : '';
-  const floorSwitch = f => f ? `switch.overwatch_zone_floor_${f.id}` : '';
-  const camSwitch = camId => 'switch.overwatch_camera_' + String(camId || '').replace(/^camera\./,'').toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_+|_+$/g,'');
-  const camZoneSwitch = z => z ? `switch.overwatch_camera_zone_${zoneSlugLocal(z)}` : '';
-  const camGroupSwitch = g => g ? `switch.overwatch_camera_group_${groupSlugLocal(g)}` : '';
-  const camFloorSwitch = f => f ? `switch.overwatch_camera_floor_${f.id}` : '';
-  const zonesForGroup = gid => (glist.find(g => g.id === gid)?.zone_ids || []).map(id => zlist.find(z => z.id === id)).filter(Boolean);
-  const zonesForFloor = fid => {
-    const isFirst = !fid || fid === firstFloorId || flist.length === 0;
-    return zlist.filter(z => z.floor_id === fid || (!z.floor_id && isFirst));
-  };
-  const selectedIds = uniq([...(a.entity_ids || []), ...(a.entity_ids_zone || []), ...(a.entity_ids_other || []), ...(a.entity_ids_extra || [])]);
-  const has = id => !!id && selectedIds.includes(id);
-
-  // Infer durable scopes from selected aggregate switches where legacy/static actions already have them.
-  flist.forEach(f => {
-    if ((a.type === 'arm' && has(floorSwitch(f))) || (a.type === 'camera_view' && has(camFloorSwitch(f)))) a.floor_ids = add(a.floor_ids, f.id);
-  });
-  glist.forEach(g => {
-    if ((a.type === 'arm' && has(groupSwitch(g))) || (a.type === 'camera_view' && has(camGroupSwitch(g)))) a.group_ids = add(a.group_ids, g.id);
-  });
-  zlist.forEach(z => {
-    if ((a.type === 'arm' && has(zoneSwitch(z))) || (a.type === 'camera_view' && has(camZoneSwitch(z)))) a.zone_ids = add(a.zone_ids, z.id);
-  });
-
-  const scopedZones = uniq([
-    ...(a.floor_ids || []).flatMap(fid => zonesForFloor(fid).map(z => z.id)),
-    ...(a.group_ids || []).flatMap(gid => zonesForGroup(gid).map(z => z.id)),
-    ...(a.zone_ids || [])
-  ]).map(id => zlist.find(z => z.id === id)).filter(Boolean);
-
-  // Resolve selected scopes to current descendants. This is what makes newly-created
-  // subordinate zones/entities appear selected when a parent scope was selected earlier.
-  if (a.type === 'light') {
-    a.entity_ids_zone = add(a.entity_ids_zone || [], scopedZones.flatMap(z => z.lights || []));
-  } else if (a.type === 'siren') {
-    a.entity_ids = add(a.entity_ids || [], scopedZones.flatMap(z => z.sirens || []));
-  } else if (a.type === 'camera') {
-    a.entity_ids = add(a.entity_ids || [], scopedZones.flatMap(z => z.cameras || []));
-  } else if (a.type === 'camera_view') {
-    const masterSelected = has('switch.overwatch_camera_all');
-    if (masterSelected) {
-      a.floor_ids = add(a.floor_ids, flist.map(f => f.id));
-      a.group_ids = add(a.group_ids, glist.map(g => g.id));
-      a.zone_ids = add(a.zone_ids, zlist.map(z => z.id));
-    }
-    const currentZones = masterSelected ? zlist : scopedZones;
-    a.entity_ids = add(a.entity_ids || [], [
-      ...(masterSelected ? ['switch.overwatch_camera_all'] : []),
-      ...(a.floor_ids || []).map(fid => camFloorSwitch(flist.find(f => f.id === fid))),
-      ...(a.group_ids || []).map(gid => camGroupSwitch(glist.find(g => g.id === gid))),
-      ...(a.zone_ids || []).map(zid => camZoneSwitch(zlist.find(z => z.id === zid))),
-      ...currentZones.flatMap(z => (z.cameras || []).map(camSwitch))
-    ]);
-  } else if (a.type === 'arm') {
-    const masterSelected = has('switch.overwatch_master') || has('switch.overwatch_zone_master');
-    if (masterSelected) {
-      a.floor_ids = add(a.floor_ids, flist.map(f => f.id));
-      a.group_ids = add(a.group_ids, glist.map(g => g.id));
-      a.zone_ids = add(a.zone_ids, zlist.map(z => z.id));
-    }
-    const currentZones = masterSelected ? zlist : scopedZones;
-    a.entity_ids = add(a.entity_ids || [], [
-      ...(masterSelected ? ['switch.overwatch_master'] : []),
-      ...(a.floor_ids || []).map(fid => floorSwitch(flist.find(f => f.id === fid))),
-      ...(a.group_ids || []).map(gid => groupSwitch(glist.find(g => g.id === gid))),
-      ...(a.zone_ids || []).map(zid => zoneSwitch(zlist.find(z => z.id === zid))),
-      ...currentZones.map(zoneSwitch)
-    ]);
-  }
-
-  a.floor_ids = uniq(a.floor_ids);
-  a.group_ids = uniq(a.group_ids);
-  a.zone_ids = uniq(a.zone_ids);
-  ['entity_ids','entity_ids_zone','entity_ids_other','entity_ids_extra'].forEach(k => { if (Array.isArray(a[k])) a[k] = uniq(a[k]); });
-  return a;
-}
-
 function actionEntityCount(a) {
-  expandHierarchicalActionScopes(a);
   const ids = new Set();
   ['entity_ids','entity_ids_zone','entity_ids_other','entity_ids_extra'].forEach(k => (a[k]||[]).forEach(id=>ids.add(id)));
   if (a.entity_id) ids.add(a.entity_id);
@@ -1542,8 +1447,6 @@ function conditionCard(c) {
  * ACTION CARDS  (with move up/down)
  * ═══════════════════════════════════════════════════════════ */
 function actionCard(a, idx, total) {
-  normaliseActionControls(a);
-  expandHierarchicalActionScopes(a);
   let inner = '';
   const moveControls = `
     <div style="display:flex;gap:4px;margin-left:8px;">
@@ -1702,7 +1605,10 @@ function actionCard(a, idx, total) {
       const indent = groupIndent || 6;
       const slug = nameSlug(z.name)||z.id;
       const eid = 'switch.overwatch_zone_' + slug;
-      const isSel = (a.entity_ids||[]).includes(eid);
+      const parentGroupId = String(groupId || '').split('-')[0];
+      const parentGroup = groups().find(gr => gr.id === parentGroupId);
+      const parentGroupEid = parentGroup ? 'switch.overwatch_zone_group_' + (nameSlug(parentGroup.name)||parentGroup.id) : '';
+      const isSel = (a.entity_ids||[]).includes(eid) || (!!parentGroupEid && (a.entity_ids||[]).includes(parentGroupEid));
       // padding-left = group indent + 14px (button) + 10px (step) = indent+24
       return '<div style="display:flex;align-items:center;padding:2px 6px;padding-left:'+(indent+14)+'px;">' +
         '<span style="width:14px;flex-shrink:0;"></span>' +
@@ -1768,12 +1674,12 @@ function actionCard(a, idx, total) {
             const groupsHtml = fl.groups.map(g=>{
               const gC = _collapsedSteps['cvg-'+fl.id+'-'+g.id]!==false;
               const gVal = g.sw?.entity_id || '';
-              const gChecked = gVal && selected.includes(gVal);
+              const gChecked = fChecked || (gVal && selected.includes(gVal));
               const zonesHtml = g.zones.map(z=>{
                 const zC = _collapsedSteps['cvz-'+z.id]!==false;
                 const zVal = z.sw?.entity_id || '';
-                const zChecked = zVal && selected.includes(zVal);
-                const camsHtml = z.cameras.map(cam => `<div data-cv-camera-row style="display:flex;align-items:center;padding:2px 6px 2px 46px;"><span style="width:12px;flex-shrink:0;"></span><label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;min-width:0;">${renderCamCb(cam.entity_id, selected.includes(cam.entity_id), 'data-cv-camera-cb')}<span style="font-size:11px;color:#bbb;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escH(cam.name)}</span>${entityStateBadge(cam.entity_id, cam.state, 'small')}</label></div>`).join('');
+                const zChecked = gChecked || (zVal && selected.includes(zVal));
+                const camsHtml = z.cameras.map(cam => `<div data-cv-camera-row style="display:flex;align-items:center;padding:2px 6px 2px 46px;"><span style="width:12px;flex-shrink:0;"></span><label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;min-width:0;">${renderCamCb(cam.entity_id, zChecked || selected.includes(cam.entity_id), 'data-cv-camera-cb')}<span style="font-size:11px;color:#bbb;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escH(cam.name)}</span>${entityStateBadge(cam.entity_id, cam.state, 'small')}</label></div>`).join('');
                 return `<div data-cv-zone="${escH(z.id)}"><div style="display:flex;align-items:center;gap:5px;padding:2px 6px 2px 30px;">${z.cameras.length?`<button data-cvz-collapse="${escH(z.id)}" style="background:none;border:none;color:#555;cursor:pointer;font-size:9px;padding:0 2px;">${zC?'▶':'▼'}</button>`:'<span style="width:12px;"></span>'}<label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;min-width:0;">${zVal?renderCamCb(zVal, zChecked, 'data-cv-zone-cb'):'<input type="checkbox" data-cv-zone-cb style="accent-color:#0064d2;flex-shrink:0;">'}<span style="font-size:11px;color:#bbb;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escH(z.name)}</span>${zVal?'<span style="font-size:10px;color:#444;">zone</span>':''}</label></div><div data-ow-children="cvz-${escH(z.id)}"${zC?' style="display:none"':''}>${camsHtml}</div></div>`;
               }).join('');
               return `<div data-cv-group="${escH(g.id)}"><div style="display:flex;align-items:center;gap:5px;padding:2px 6px 2px 14px;">${g.zones.length?`<button data-cvg-collapse="${escH(fl.id+'-'+g.id)}" style="background:none;border:none;color:#555;cursor:pointer;font-size:9px;padding:0 2px;">${gC?'▶':'▼'}</button>`:'<span style="width:12px;"></span>'}<label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;min-width:0;">${gVal?renderCamCb(gVal, gChecked, 'data-cv-group-cb'):'<input type="checkbox" data-cv-group-cb style="accent-color:#0064d2;flex-shrink:0;">'}<span style="font-size:11px;font-weight:600;color:#ccc;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escH(g.name)}</span>${gVal?'<span style="font-size:10px;color:#444;">group</span>':''}</label></div><div data-ow-children="cvg-${escH(fl.id+'-'+g.id)}"${gC?' style="display:none"':''}>${zonesHtml}</div></div>`;
@@ -1967,7 +1873,8 @@ function wireActionFields(a) {
           if(!zoneCbs.length)return;
           const checked=zoneCbs.filter(c=>c.checked).length;
           grpCb.indeterminate = checked>0 && checked<zoneCbs.length;
-          if(!grpCb.indeterminate) grpCb.checked = checked===zoneCbs.length;
+          if(grpCb.indeterminate) grpCb.checked = false;
+          else grpCb.checked = checked===zoneCbs.length;
         });
         // Floor level: check if some but not all group+zone checkboxes are checked
         armBox.querySelectorAll('[data-armf-cb]').forEach(flCb=>{
@@ -1994,8 +1901,8 @@ function wireActionFields(a) {
             flDiv.querySelectorAll('[data-arm-grp-cb]').forEach(cb=>cb.checked=flCb.checked);
             flDiv.querySelectorAll('[data-arm-zone-cb]').forEach(cb=>cb.checked=flCb.checked);
           }
-          a.entity_ids=collectArmIds();
           updateArmIndeterminate();
+          a.entity_ids=collectArmIds();
         };
       });
 
@@ -2005,22 +1912,22 @@ function wireActionFields(a) {
           const gid=grpCb.dataset.armGrpCb;
           const grpDiv=armBox.querySelector(`[data-arm-group="${CSS.escape(gid)}"]`);
           if(grpDiv) grpDiv.querySelectorAll('[data-arm-zone-cb]').forEach(cb=>cb.checked=grpCb.checked);
-          a.entity_ids=collectArmIds();
           updateArmIndeterminate();
+          a.entity_ids=collectArmIds();
         };
       });
 
       // Wire zone checkboxes — update parent group indeterminate state
       armBox.querySelectorAll('[data-arm-zone-cb]').forEach(zoneCb=>{
         zoneCb.onchange=()=>{
-          a.entity_ids=collectArmIds();
           updateArmIndeterminate();
+          a.entity_ids=collectArmIds();
         };
       });
 
       // Master switch
       armBox.querySelectorAll('[data-arm-cb]').forEach(cb=>{
-        cb.onchange=()=>{ a.entity_ids=collectArmIds(); };
+        cb.onchange=()=>{ updateArmIndeterminate(); a.entity_ids=collectArmIds(); };
       });
 
       // Set initial indeterminate state
@@ -2044,7 +1951,8 @@ function wireActionFields(a) {
         const n = kids.filter(c=>c.checked).length;
         const partial = n>0 && n<kids.length;
         parent.indeterminate = partial || kids.some(c=>c.indeterminate);
-        if (!parent.indeterminate) parent.checked = n===kids.length;
+        if (parent.indeterminate) parent.checked = false;
+        else parent.checked = n===kids.length;
       }
       function updatePartial() {
         [...camviewBox.querySelectorAll('[data-cv-zone]')].forEach(z=>recompute(z,'[data-cv-zone-cb]'));
@@ -2055,7 +1963,8 @@ function wireActionFields(a) {
           const all = [...camviewBox.querySelectorAll('[data-camview-cb]')].filter(c=>c!==master && c.value);
           const n = all.filter(c=>c.checked).length;
           master.indeterminate = n>0 && n<all.length;
-          if (!master.indeterminate && all.length) master.checked = n===all.length;
+          if (master.indeterminate) master.checked = false;
+          else if (all.length) master.checked = n===all.length;
         }
       }
       function cascadeFrom(cb, selector) {
@@ -2063,11 +1972,11 @@ function wireActionFields(a) {
         if (!container) return;
         container.querySelectorAll('[data-camview-cb], [data-cv-floor-cb], [data-cv-group-cb], [data-cv-zone-cb]').forEach(c=>{ if(c!==cb){ c.checked=cb.checked; c.indeterminate=false; } });
       }
-      camviewBox.querySelectorAll('[data-cv-master-cb]').forEach(cb=>cb.onchange=()=>{ camviewBox.querySelectorAll('[data-camview-cb], [data-cv-floor-cb], [data-cv-group-cb], [data-cv-zone-cb]').forEach(c=>{c.checked=cb.checked;c.indeterminate=false;}); a.entity_ids=checkedIds(); updatePartial(); });
-      camviewBox.querySelectorAll('[data-cv-floor-cb]').forEach(cb=>cb.onchange=()=>{ cascadeFrom(cb,'[data-cv-floor]'); a.entity_ids=checkedIds(); updatePartial(); });
-      camviewBox.querySelectorAll('[data-cv-group-cb]').forEach(cb=>cb.onchange=()=>{ cascadeFrom(cb,'[data-cv-group]'); a.entity_ids=checkedIds(); updatePartial(); });
-      camviewBox.querySelectorAll('[data-cv-zone-cb]').forEach(cb=>cb.onchange=()=>{ cascadeFrom(cb,'[data-cv-zone]'); a.entity_ids=checkedIds(); updatePartial(); });
-      camviewBox.querySelectorAll('[data-camview-cb]').forEach(cb=>{ if (!cb.onchange) cb.onchange=()=>{ a.entity_ids=checkedIds(); updatePartial(); }; });
+      camviewBox.querySelectorAll('[data-cv-master-cb]').forEach(cb=>cb.onchange=()=>{ camviewBox.querySelectorAll('[data-camview-cb], [data-cv-floor-cb], [data-cv-group-cb], [data-cv-zone-cb]').forEach(c=>{c.checked=cb.checked;c.indeterminate=false;}); updatePartial(); a.entity_ids=checkedIds(); });
+      camviewBox.querySelectorAll('[data-cv-floor-cb]').forEach(cb=>cb.onchange=()=>{ cascadeFrom(cb,'[data-cv-floor]'); updatePartial(); a.entity_ids=checkedIds(); });
+      camviewBox.querySelectorAll('[data-cv-group-cb]').forEach(cb=>cb.onchange=()=>{ cascadeFrom(cb,'[data-cv-group]'); updatePartial(); a.entity_ids=checkedIds(); });
+      camviewBox.querySelectorAll('[data-cv-zone-cb]').forEach(cb=>cb.onchange=()=>{ cascadeFrom(cb,'[data-cv-zone]'); updatePartial(); a.entity_ids=checkedIds(); });
+      camviewBox.querySelectorAll('[data-camview-cb]').forEach(cb=>{ if (!cb.onchange) cb.onchange=()=>{ updatePartial(); a.entity_ids=checkedIds(); }; });
       updatePartial();
     }
     wireSelect(`act-camview-svc-${a.id}`,v=>a.service=v);
