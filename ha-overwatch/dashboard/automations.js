@@ -1,5 +1,5 @@
 /* ================================================================
- * HA-Overwatch — automations.js  v0.05.35.20
+ * HA-Overwatch — automations.js  v0.05.35.24
  * Admin-only Automation Editor.
  * HA is source of truth — reads/writes directly via server proxy.
  * ================================================================ */
@@ -470,7 +470,102 @@ function normaliseActionControls(a) {
   delete a.maintain_interval;
   return a;
 }
+
+function expandHierarchicalActionScopes(a) {
+  if (!a || typeof a !== 'object') return a;
+  if (!Array.isArray(a.floor_ids)) a.floor_ids = [];
+  if (!Array.isArray(a.group_ids)) a.group_ids = [];
+  if (!Array.isArray(a.zone_ids)) a.zone_ids = [];
+
+  const uniq = arr => [...new Set((arr || []).filter(Boolean))];
+  const add = (arr, ids) => uniq([...(arr || []), ...(Array.isArray(ids) ? ids : [ids])]);
+  const zlist = zones();
+  const glist = groups();
+  const flist = ow().floors || [];
+  const firstFloorId = flist[0]?.id;
+  const zoneSlugLocal = z => nameSlug(z?.name || '') || z?.id;
+  const groupSlugLocal = g => nameSlug(g?.name || '') || g?.id;
+  const zoneSwitch = z => z ? `switch.overwatch_zone_${zoneSlugLocal(z)}` : '';
+  const groupSwitch = g => g ? `switch.overwatch_zone_group_${groupSlugLocal(g)}` : '';
+  const floorSwitch = f => f ? `switch.overwatch_zone_floor_${f.id}` : '';
+  const camSwitch = camId => 'switch.overwatch_camera_' + String(camId || '').replace(/^camera\./,'').toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_+|_+$/g,'');
+  const camZoneSwitch = z => z ? `switch.overwatch_camera_zone_${zoneSlugLocal(z)}` : '';
+  const camGroupSwitch = g => g ? `switch.overwatch_camera_group_${groupSlugLocal(g)}` : '';
+  const camFloorSwitch = f => f ? `switch.overwatch_camera_floor_${f.id}` : '';
+  const zonesForGroup = gid => (glist.find(g => g.id === gid)?.zone_ids || []).map(id => zlist.find(z => z.id === id)).filter(Boolean);
+  const zonesForFloor = fid => {
+    const isFirst = !fid || fid === firstFloorId || flist.length === 0;
+    return zlist.filter(z => z.floor_id === fid || (!z.floor_id && isFirst));
+  };
+  const selectedIds = uniq([...(a.entity_ids || []), ...(a.entity_ids_zone || []), ...(a.entity_ids_other || []), ...(a.entity_ids_extra || [])]);
+  const has = id => !!id && selectedIds.includes(id);
+
+  // Infer durable scopes from selected aggregate switches where legacy/static actions already have them.
+  flist.forEach(f => {
+    if ((a.type === 'arm' && has(floorSwitch(f))) || (a.type === 'camera_view' && has(camFloorSwitch(f)))) a.floor_ids = add(a.floor_ids, f.id);
+  });
+  glist.forEach(g => {
+    if ((a.type === 'arm' && has(groupSwitch(g))) || (a.type === 'camera_view' && has(camGroupSwitch(g)))) a.group_ids = add(a.group_ids, g.id);
+  });
+  zlist.forEach(z => {
+    if ((a.type === 'arm' && has(zoneSwitch(z))) || (a.type === 'camera_view' && has(camZoneSwitch(z)))) a.zone_ids = add(a.zone_ids, z.id);
+  });
+
+  const scopedZones = uniq([
+    ...(a.floor_ids || []).flatMap(fid => zonesForFloor(fid).map(z => z.id)),
+    ...(a.group_ids || []).flatMap(gid => zonesForGroup(gid).map(z => z.id)),
+    ...(a.zone_ids || [])
+  ]).map(id => zlist.find(z => z.id === id)).filter(Boolean);
+
+  // Resolve selected scopes to current descendants. This is what makes newly-created
+  // subordinate zones/entities appear selected when a parent scope was selected earlier.
+  if (a.type === 'light') {
+    a.entity_ids_zone = add(a.entity_ids_zone || [], scopedZones.flatMap(z => z.lights || []));
+  } else if (a.type === 'siren') {
+    a.entity_ids = add(a.entity_ids || [], scopedZones.flatMap(z => z.sirens || []));
+  } else if (a.type === 'camera') {
+    a.entity_ids = add(a.entity_ids || [], scopedZones.flatMap(z => z.cameras || []));
+  } else if (a.type === 'camera_view') {
+    const masterSelected = has('switch.overwatch_camera_all');
+    if (masterSelected) {
+      a.floor_ids = add(a.floor_ids, flist.map(f => f.id));
+      a.group_ids = add(a.group_ids, glist.map(g => g.id));
+      a.zone_ids = add(a.zone_ids, zlist.map(z => z.id));
+    }
+    const currentZones = masterSelected ? zlist : scopedZones;
+    a.entity_ids = add(a.entity_ids || [], [
+      ...(masterSelected ? ['switch.overwatch_camera_all'] : []),
+      ...(a.floor_ids || []).map(fid => camFloorSwitch(flist.find(f => f.id === fid))),
+      ...(a.group_ids || []).map(gid => camGroupSwitch(glist.find(g => g.id === gid))),
+      ...(a.zone_ids || []).map(zid => camZoneSwitch(zlist.find(z => z.id === zid))),
+      ...currentZones.flatMap(z => (z.cameras || []).map(camSwitch))
+    ]);
+  } else if (a.type === 'arm') {
+    const masterSelected = has('switch.overwatch_master') || has('switch.overwatch_zone_master');
+    if (masterSelected) {
+      a.floor_ids = add(a.floor_ids, flist.map(f => f.id));
+      a.group_ids = add(a.group_ids, glist.map(g => g.id));
+      a.zone_ids = add(a.zone_ids, zlist.map(z => z.id));
+    }
+    const currentZones = masterSelected ? zlist : scopedZones;
+    a.entity_ids = add(a.entity_ids || [], [
+      ...(masterSelected ? ['switch.overwatch_master'] : []),
+      ...(a.floor_ids || []).map(fid => floorSwitch(flist.find(f => f.id === fid))),
+      ...(a.group_ids || []).map(gid => groupSwitch(glist.find(g => g.id === gid))),
+      ...(a.zone_ids || []).map(zid => zoneSwitch(zlist.find(z => z.id === zid))),
+      ...currentZones.map(zoneSwitch)
+    ]);
+  }
+
+  a.floor_ids = uniq(a.floor_ids);
+  a.group_ids = uniq(a.group_ids);
+  a.zone_ids = uniq(a.zone_ids);
+  ['entity_ids','entity_ids_zone','entity_ids_other','entity_ids_extra'].forEach(k => { if (Array.isArray(a[k])) a[k] = uniq(a[k]); });
+  return a;
+}
+
 function actionEntityCount(a) {
+  expandHierarchicalActionScopes(a);
   const ids = new Set();
   ['entity_ids','entity_ids_zone','entity_ids_other','entity_ids_extra'].forEach(k => (a[k]||[]).forEach(id=>ids.add(id)));
   if (a.entity_id) ids.add(a.entity_id);
@@ -1447,6 +1542,8 @@ function conditionCard(c) {
  * ACTION CARDS  (with move up/down)
  * ═══════════════════════════════════════════════════════════ */
 function actionCard(a, idx, total) {
+  normaliseActionControls(a);
+  expandHierarchicalActionScopes(a);
   let inner = '';
   const moveControls = `
     <div style="display:flex;gap:4px;margin-left:8px;">
