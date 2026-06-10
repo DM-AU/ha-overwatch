@@ -1,4 +1,4 @@
-// HA-Overwatch 0.05.35.19-run-mode-diagnostics: automation actions support per-action Only run, start delay, and fixed turn-off cleanup.
+// HA-Overwatch 0.05.35.23-source-clear-trigger-sources: automation actions support per-action Only run, start delay, and fixed turn-off cleanup.
 /* ============================================================
  * HA-Overwatch — server.js
  *
@@ -3693,16 +3693,36 @@ function _turnOffActionFor(actionObj) {
   if (!['light','siren','switch'].includes(domain)) return null;
   return { action: `${domain}.turn_off`, target: actionObj.target || {} };
 }
-function _clearTemplateForAction(a) {
+function _jinjaString(value) {
+  return String(value || '').replace(/'/g, "\\'");
+}
+function _sourceClearExpr(sourceClearSources = []) {
+  const seen = new Set();
+  const parts = [];
+  (sourceClearSources || []).forEach(src => {
+    const entityId = String(src?.entity_id || '').trim();
+    const activeState = String(src?.active_state || 'on').trim();
+    if (!entityId) return;
+    const key = `${entityId}::${activeState}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    parts.push(`not is_state('${_jinjaString(entityId)}', '${_jinjaString(activeState)}')`);
+  });
+  return parts.length ? parts.join(' and ') : "is_state(trigger.entity_id, 'off')";
+}
+function _sourceClearTemplate(sourceClearSources = []) {
+  return `{{ ${_sourceClearExpr(sourceClearSources)} }}`;
+}
+function _clearTemplateForAction(a, sourceClearSources = []) {
   const conds = Array.isArray(a?.clear_conditions) && a.clear_conditions.length ? a.clear_conditions : ['source_clear'];
   const parts = [];
-  if (conds.includes('source_clear')) parts.push("is_state(trigger.entity_id, 'off')");
+  if (conds.includes('source_clear')) parts.push(_sourceClearExpr(sourceClearSources));
   if (conds.includes('alarm_not_triggered')) parts.push("states.binary_sensor | selectattr('entity_id','match','binary_sensor\.overwatch_alarm_.*triggered') | selectattr('state','eq','on') | list | count == 0");
-  if (!parts.length) parts.push("is_state(trigger.entity_id, 'off')");
+  if (!parts.length) parts.push(_sourceClearExpr(sourceClearSources));
   const op = (a?.clear_match === 'any') ? ' or ' : ' and ';
   return `{{ ${parts.join(op)} }}`;
 }
-function _pushDynamicTurnOff(seq, a, actionObj) {
+function _pushDynamicTurnOff(seq, a, actionObj, sourceClearSources = []) {
   const clearMode = String(a?.clear_mode || 'none');
   const offAction = _turnOffActionFor(actionObj);
   if (!offAction || clearMode === 'none') return;
@@ -3713,25 +3733,25 @@ function _pushDynamicTurnOff(seq, a, actionObj) {
     return;
   }
   if (clearMode === 'source_clears' || clearMode === 'conditions') {
-    const tpl = clearMode === 'source_clears' ? "{{ is_state(trigger.entity_id, 'off') }}" : _clearTemplateForAction(a);
+    const tpl = clearMode === 'source_clears' ? _sourceClearTemplate(sourceClearSources) : _clearTemplateForAction(a, sourceClearSources);
     seq.push({ wait_template: tpl, continue_on_timeout: false });
     if (clearFor !== '00:00:00') seq.push({ delay: clearFor });
     seq.push({ condition: 'template', value_template: tpl });
     seq.push(offAction);
   }
 }
-function buildAutomationActionBranch(a, actionObj) {
+function buildAutomationActionBranch(a, actionObj, sourceClearSources = []) {
   const seq = [];
   const startDelay = _autoDuration(a?.trigger_for);
   if (startDelay) seq.push({ delay: startDelay });
   seq.push(actionObj);
-  _pushDynamicTurnOff(seq, a, actionObj);
+  _pushDynamicTurnOff(seq, a, actionObj, sourceClearSources);
   const conditions = _automationActionConditions(a);
   if (conditions.length) return { choose: [{ conditions, sequence: seq }] };
   return { sequence: seq };
 }
-function pushAutomationAction(actions, a, actionObj) {
-  actions.push(buildAutomationActionBranch(a, actionObj));
+function pushAutomationAction(actions, a, actionObj, sourceClearSources = []) {
+  actions.push(buildAutomationActionBranch(a, actionObj, sourceClearSources));
 }
 
 function _resolveAutomationScopedEntityIds(a, key, zoneList, groupList, floorList) {
@@ -3785,6 +3805,17 @@ function buildHAAutomation(auto, allZones, allGroups) {
   const triggers   = [];
   const conditions = [];
   const actions    = [];
+  const sourceClearSources = [];
+  function _uniqList(ids) { return [...new Set((ids || []).filter(Boolean))]; }
+  function _addSourceClearSources(entityIds, activeState) {
+    _uniqList(Array.isArray(entityIds) ? entityIds : [entityIds]).forEach(entityId => {
+      sourceClearSources.push({ entity_id: entityId, active_state: activeState || 'on' });
+    });
+  }
+  function _zoneIdsForFloor(fid) {
+    const isFirstFloor = floorList.length === 0 || floorList[0]?.id === fid;
+    return zoneList.filter(z => z.floor_id === fid || (!z.floor_id && isFirstFloor)).map(z => z.id);
+  }
 
   // OW metadata stored in 'variables' — a valid HA field, not shown in UI, survives round-trips
   const owMeta = { ow_id: auto.id, ow_name: auto.name, ow_draft: auto };
@@ -3797,7 +3828,14 @@ function buildHAAutomation(auto, allZones, allGroups) {
       const toState = isArm
         ? (t.state === 'armed' ? 'on' : 'off')
         : (t.event === 'triggered' ? 'on' : 'off');
-      const entityIds = [];
+      let entityIds = [];
+      (t.floor_ids || []).forEach(fid => {
+        if (isArm) {
+          entityIds.push(`switch.overwatch_zone_floor_${fid}`);
+        } else {
+          _zoneIdsForFloor(fid).forEach(zid => entityIds.push(`binary_sensor.overwatch_zone_${zoneSlugById(zid)}_triggered`));
+        }
+      });
       (t.group_ids || []).forEach(gid => {
         const slug = groupSlugById(gid);
         entityIds.push(isArm
@@ -3810,34 +3848,47 @@ function buildHAAutomation(auto, allZones, allGroups) {
           ? `switch.overwatch_zone_${slug}`
           : `binary_sensor.overwatch_zone_${slug}_triggered`);
       });
+      entityIds = _uniqList(entityIds);
       if (entityIds.length > 0) {
+        _addSourceClearSources(entityIds, toState);
         const trig = { trigger:"state", entity_id: entityIds.length===1?entityIds[0]:entityIds, to:toState };
         if (forDur) trig.for = forDur;
         triggers.push(trig);
       } else {
-        triggers.push({ trigger:"state", entity_id:"binary_sensor.overwatch_zone_master_triggered", to:"on" });
+        const fallback = isArm ? "switch.overwatch_zone_master" : "binary_sensor.overwatch_zone_master_triggered";
+        _addSourceClearSources(fallback, toState);
+        triggers.push({ trigger:"state", entity_id:fallback, to:toState });
       }
     } else if (t.type === 'person' || t.type === 'device') {
       if ((t.entity_ids||[]).length) {
-        const trig = { trigger:"state", entity_id:t.entity_ids.length===1?t.entity_ids[0]:t.entity_ids, to:t.state||'home' };
+        const entityIds = _uniqList(t.entity_ids);
+        const toState = t.state || 'home';
+        _addSourceClearSources(entityIds, toState);
+        const trig = { trigger:"state", entity_id:entityIds.length===1?entityIds[0]:entityIds, to:toState };
         if (forDur) trig.for = forDur;
         triggers.push(trig);
       }
     } else if (t.type === 'entity') {
       if (t.entity_id) {
-        const trig = { trigger:"state", entity_id:t.entity_id, to:t.to||'on' };
+        const toState = t.to || 'on';
+        _addSourceClearSources(t.entity_id, toState);
+        const trig = { trigger:"state", entity_id:t.entity_id, to:toState };
         if (forDur) trig.for = forDur;
         triggers.push(trig);
       }
     } else if (t.type === 'door' || t.type === 'window' || t.type === 'sensor') {
       if ((t.entity_ids||[]).length) {
-        const trig = { trigger:"state", entity_id:t.entity_ids.length===1?t.entity_ids[0]:t.entity_ids, to:t.state||'on' };
+        const entityIds = _uniqList(t.entity_ids);
+        const toState = t.state || 'on';
+        _addSourceClearSources(entityIds, toState);
+        const trig = { trigger:"state", entity_id:entityIds.length===1?entityIds[0]:entityIds, to:toState };
         if (forDur) trig.for = forDur;
         triggers.push(trig);
       }
     }
   }
 
+  
   for (const c of (auto.conditions || [])) {
     if (c.type === 'time') {
       if (c.time_mode === 'entity' && c.time_entity) {
@@ -3868,7 +3919,7 @@ function buildHAAutomation(auto, allZones, allGroups) {
     return { entity_id: u.length === 1 ? u[0] : u };
   }
   function addActionBranch(a, actionObj) {
-    actionBranches.push(buildAutomationActionBranch(a, actionObj));
+    actionBranches.push(buildAutomationActionBranch(a, actionObj, sourceClearSources));
   }
 
   for (const a of (auto.actions || [])) {
