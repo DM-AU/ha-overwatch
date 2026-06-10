@@ -1,5 +1,5 @@
 /* ─── CONFIG DEFAULTS ─────────────────────────────────────── */
-/* v0.05.35.21: floorplan faults visible while disarmed; zone popup click-toggle/drag guard. */
+/* v0.05.35.22: floorplan disarmed faults retained; robust zone popup click-toggle with drag guard. */
 let uiConfig = {
   floorplan: "img/floorplan.png",
   sidebar_position: "right",
@@ -1973,9 +1973,9 @@ function _renderZonesInternal(targetSvg) {
     const isDisabled   = zoneState === "disabled";
     const isHidden     = zone.hidden === true;
     const isTriggered  = haConnected && zoneState === "triggered";
-    // Fault visibility is independent of armed/disarmed state. getZoneState()
-    // intentionally returns "disabled" for disarmed zones, so compute raw
-    // sensor availability here for map display.
+    // Fault display must be independent from armed/disarmed state. getZoneState()
+    // returns "disabled" before evaluating sensors when the zone is disarmed,
+    // so render-time fault detection checks sensor availability directly.
     const zoneFaultSensors = (zone.sensors || []).filter(e => !isEntityGhosted(e));
     const zoneFaultStatesReady = haStatesLoaded || Object.keys(haStates).length > 50;
     const hasUnavailableSensor = zoneFaultStatesReady && zoneFaultSensors.some(id => {
@@ -2250,8 +2250,8 @@ function openZonePopup(zoneId, clientX, clientY) {
   // Defer by one frame so the opening click doesn't immediately close it
   requestAnimationFrame(() => {
     function _outsideClose(e) {
-      // Zone polygons are handled by the map click-toggle logic. Do not close here
-      // first, otherwise clicking the same zone cannot reliably toggle the popup closed.
+      // Zone polygon clicks are handled by the map click-toggle logic.
+      // Ignoring them here prevents the outside-close handler from eating same-zone toggles.
       if (e.target?.classList?.contains('zone-polygon')) return;
       if (_zonePopupEl && !_zonePopupEl.contains(e.target)) {
         closeZonePopup();
@@ -2651,14 +2651,37 @@ function bindZonesSvgEvents() {
     const sx = e.clientX, sy = e.clientY;
     const fp = screenToFloorplan(sx, sy);
 
-    // In live mode — defer zone popup until pointerup so map drags do not open it.
+    // In live mode — use document-level pointerup so normal map panning still works.
+    // A simple click toggles the zone popup; a drag/pan never opens it.
     if (!editorMode) {
       if (target.classList.contains("zone-polygon")) {
         const zoneId = target.dataset.zoneId;
         const zone   = zones.find(z => z.id === zoneId);
         if (zone?.hidden) { e.stopPropagation(); return; }
-        svg._owLiveZonePointer = { zoneId, x: sx, y: sy, moved: false, clientX: e.clientX, clientY: e.clientY };
-        // Do not stop propagation: the outer map pan handler must still be able to drag.
+        const liveTap = { zoneId, startX: e.clientX, startY: e.clientY, lastX: e.clientX, lastY: e.clientY, moved: false };
+        const moveGuard = ev => {
+          liveTap.lastX = ev.clientX; liveTap.lastY = ev.clientY;
+          if (Math.abs(ev.clientX - liveTap.startX) > 7 || Math.abs(ev.clientY - liveTap.startY) > 7) liveTap.moved = true;
+        };
+        const endGuard = ev => {
+          document.removeEventListener('pointermove', moveGuard, true);
+          document.removeEventListener('pointerup', endGuard, true);
+          document.removeEventListener('pointercancel', cancelGuard, true);
+          if (liveTap.moved) return;
+          const z = zones.find(x => x.id === liveTap.zoneId);
+          if (!z || z.hidden) return;
+          if (_zonePopupEl && _zonePopupZoneId === liveTap.zoneId) closeZonePopup();
+          else openZonePopup(liveTap.zoneId, ev.clientX || liveTap.lastX, ev.clientY || liveTap.lastY);
+        };
+        const cancelGuard = () => {
+          document.removeEventListener('pointermove', moveGuard, true);
+          document.removeEventListener('pointerup', endGuard, true);
+          document.removeEventListener('pointercancel', cancelGuard, true);
+        };
+        document.addEventListener('pointermove', moveGuard, true);
+        document.addEventListener('pointerup', endGuard, true);
+        document.addEventListener('pointercancel', cancelGuard, true);
+        // Do not stop propagation; the map pan handler must still receive this event.
       }
       return;
     }
@@ -2728,7 +2751,7 @@ function bindZonesSvgEvents() {
       const zone   = zones.find(z => z.id === zoneId);
       if (zone?.hidden) { e.stopPropagation(); return; }
 
-      // LIVE MODE is handled above by pointerdown/pointerup click-toggle logic.
+      // LIVE MODE is handled above by the pointerdown document-level click-toggle guard.
       if (!editorMode) return;
 
       // Point editing is isolated to the selected zone. Other zones cannot be selected or dragged.
@@ -2773,15 +2796,7 @@ function bindZonesSvgEvents() {
   });
 
   svg.addEventListener("pointermove", e => {
-    if (!editorMode) {
-      const livePtr = svg._owLiveZonePointer;
-      if (livePtr) {
-        const dx = Math.abs(e.clientX - livePtr.x);
-        const dy = Math.abs(e.clientY - livePtr.y);
-        if (dx > 7 || dy > 7) livePtr.moved = true;
-      }
-      return;
-    }
+    if (!editorMode) return;
     const sx = e.clientX, sy = e.clientY;
     if (draggingHandle) {
       const zone = zones.find(z => z.id === draggingHandle.zoneId);
@@ -2801,19 +2816,6 @@ function bindZonesSvgEvents() {
   });
 
   svg.addEventListener("pointerup", e => {
-    if (!editorMode) {
-      const livePtr = svg._owLiveZonePointer;
-      svg._owLiveZonePointer = null;
-      if (livePtr && !livePtr.moved) {
-        const zone = zones.find(z => z.id === livePtr.zoneId);
-        if (zone && !zone.hidden) {
-          if (_zonePopupEl && _zonePopupZoneId === livePtr.zoneId) closeZonePopup();
-          else openZonePopup(livePtr.zoneId, livePtr.clientX, livePtr.clientY);
-          e.stopPropagation();
-        }
-      }
-      return;
-    }
     if (draggingHandle || draggingZone) {
       try { svg.releasePointerCapture(e.pointerId); } catch {}
     }
@@ -2821,8 +2823,6 @@ function bindZonesSvgEvents() {
     draggingZone   = null;
     dragStart      = null;
   });
-
-  svg.addEventListener("pointercancel", () => { svg._owLiveZonePointer = null; });
 
   svg.addEventListener("dblclick", e => {
     if (!editorMode || !isCreatingZone || !currentNewZone) return;
