@@ -1,5 +1,5 @@
 /* ================================================================
- * HA-Overwatch — automations.js  v0.05.35.19
+ * HA-Overwatch — automations.js  v0.05.35.20
  * Admin-only Automation Editor.
  * HA is source of truth — reads/writes directly via server proxy.
  * ================================================================ */
@@ -726,37 +726,19 @@ function automationDiagnosticsHtml(auto) {
   const triggerIds = automationTriggerEntityPreview(auto);
   const branches = (auto?.actions || []).map(a => actionSummary(a));
   const warnings = [];
-  if ((auto?.actions || []).some(a => String(a?.clear_mode || 'none') === 'source_clears')) {
-    warnings.push('Source-clear cooldowns use restart mode so new trigger events reset the timer. Source-clear templates still follow the current generator behaviour.');
-  }
+  if ((auto?.actions || []).some(a => String(a?.clear_mode || 'none') === 'source_clears')) warnings.push('Source-clear cooldowns use restart mode so new trigger events reset the timer. Source-clear templates still follow the current generator behaviour.');
   return `<div style="background:rgba(255,255,255,0.025);border:1px solid rgba(255,255,255,0.07);border-radius:9px;padding:10px;margin-top:10px;">
-    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;">
-      <div style="font-size:12px;font-weight:700;color:#ddd;">Generated behaviour preview</div>
-      <span style="font-size:10px;color:${mode==='restart'?'#ff9500':'#777'};border:1px solid rgba(255,255,255,0.09);border-radius:10px;padding:2px 7px;">mode: ${escH(mode)}</span>
-    </div>
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;"><div style="font-size:12px;font-weight:700;color:#ddd;">Generated behaviour preview</div><span style="font-size:10px;color:${mode==='restart'?'#ff9500':'#777'};border:1px solid rgba(255,255,255,0.09);border-radius:10px;padding:2px 7px;">mode: ${escH(mode)}</span></div>
     <div style="font-size:11px;color:#888;line-height:1.45;margin-bottom:8px;">${escH(automationModeReason(auto))}</div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
       <div><div style="${labelStyle}">Trigger entities</div><div style="font-size:11px;color:#aaa;line-height:1.45;">${triggerIds.length ? triggerIds.map(escH).join('<br>') : '<span style="color:#555;">None resolved yet</span>'}</div></div>
       <div><div style="${labelStyle}">Action branches</div><div style="font-size:11px;color:#aaa;line-height:1.45;">${branches.length ? branches.map(escH).join('<br>') : '<span style="color:#555;">No actions yet</span>'}</div></div>
-    </div>
-    ${warnings.length ? `<div style="margin-top:8px;font-size:10px;color:#ffcc66;line-height:1.4;">${warnings.map(escH).join('<br>')}</div>` : ''}
-  </div>`;
+    </div>${warnings.length ? `<div style="margin-top:8px;font-size:10px;color:#ffcc66;line-height:1.4;">${warnings.map(escH).join('<br>')}</div>` : ''}</div>`;
 }
 function automationRunModeHtml(auto) {
   const selected = String(auto?.run_mode || 'auto');
   const effective = automationEffectiveMode(auto);
-  return `<div style="background:rgba(255,255,255,0.025);border:1px solid rgba(255,255,255,0.07);border-radius:9px;padding:10px;margin-top:10px;">
-    <div style="display:grid;grid-template-columns:220px 1fr;gap:10px;align-items:end;">
-      <div><label style="${labelStyle}">Run mode</label><select id="owAutoRunMode" style="${selectStyle}">
-        <option value="auto" ${selected==='auto'?'selected':''}>Auto recommended</option>
-        <option value="single" ${selected==='single'?'selected':''}>Single</option>
-        <option value="restart" ${selected==='restart'?'selected':''}>Restart</option>
-        <option value="queued" ${selected==='queued'?'selected':''}>Queued</option>
-        <option value="parallel" ${selected==='parallel'?'selected':''}>Parallel</option>
-      </select></div>
-      <div style="font-size:11px;color:#999;line-height:1.4;padding-bottom:7px;">Effective mode: <b style="color:${effective==='restart'?'#ff9500':'#ccc'};">${escH(effective)}</b> — ${escH(automationModeReason(auto))}</div>
-    </div>
-  </div>`;
+  return `<div style="background:rgba(255,255,255,0.025);border:1px solid rgba(255,255,255,0.07);border-radius:9px;padding:10px;margin-top:10px;"><div style="display:grid;grid-template-columns:220px 1fr;gap:10px;align-items:end;"><div><label style="${labelStyle}">Run mode</label><select id="owAutoRunMode" style="${selectStyle}"><option value="auto" ${selected==='auto'?'selected':''}>Auto recommended</option><option value="single" ${selected==='single'?'selected':''}>Single</option><option value="restart" ${selected==='restart'?'selected':''}>Restart</option><option value="queued" ${selected==='queued'?'selected':''}>Queued</option><option value="parallel" ${selected==='parallel'?'selected':''}>Parallel</option></select></div><div style="font-size:11px;color:#999;line-height:1.4;padding-bottom:7px;">Effective mode: <b style="color:${effective==='restart'?'#ff9500':'#ccc'};">${escH(effective)}</b> — ${escH(automationModeReason(auto))}</div></div></div>`;
 }
 
 function renderEditor() {
@@ -1652,72 +1634,59 @@ function actionCard(a, idx, total) {
   }
 
   if (a.type === 'camera_view') {
-    // OW camera view switches - show using hierarchy from zone tree  
     const camViewAll = allEntities().filter(e=>e.entity_id.startsWith('switch.overwatch_camera_')).sort((a,b)=>a.entity_id.localeCompare(b.entity_id));
-    // Build tree: floor switches → group switches → zone switches → individual camera switches
-    const camViewByFloor = [];
-    const floors2 = ow().floors||[];
-    if (floors2.length) {
-      floors2.forEach(f=>{
-        const floorSw = camViewAll.find(e=>e.entity_id===`switch.overwatch_camera_floor_${nameSlug(f.name)||f.id}`);
-        const groups2 = groups().filter(g=>(g.zone_ids||[]).some(zid=>{const z=zones().find(z=>z.id===zid);return z&&(!z.floor_id||z.floor_id===f.id);}));
-        const groupRows = groups2.map(g=>{
-          const gsw = camViewAll.find(e=>e.entity_id===`switch.overwatch_camera_group_${nameSlug(g.name)||g.id}`);
-          const gZones=(g.zone_ids||[]).map(id=>zones().find(z=>z.id===id)).filter(z=>z&&(!z.floor_id||z.floor_id===f.id));
-          return {type:'group',id:g.id,name:g.name,sw:gsw,zones:gZones};
-        });
-        camViewByFloor.push({name:f.name,id:f.id,sw:floorSw,groups:groupRows});
-      });
-    }
-    const masterSw = camViewAll.find(e=>e.entity_id==='switch.overwatch_camera_all');
+    const findSw = (...ids) => camViewAll.find(e => ids.filter(Boolean).includes(e.entity_id));
+    const objectSlug = o => nameSlug(o?.name || '') || o?.id;
+    const camSwitchId = camId => 'switch.overwatch_camera_' + String(camId || '').replace(/^camera\./,'').toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_+|_+$/g,'');
+    const camName = camId => haStates()[camId]?.attributes?.friendly_name || camId.split('.').pop().replace(/_/g,' ');
+    const zoneCamRows = z => (z.cameras || []).map(camId => {
+      const sw = findSw(camSwitchId(camId));
+      return sw ? { entity_id: sw.entity_id, name: camName(camId), source: camId, state: sw.state } : null;
+    }).filter(Boolean);
+    const floorList = ow().floors || [];
+    const firstFloorId = floorList[0]?.id;
+    const belongsToFloor = (z, f) => z && (z.floor_id === f.id || (!z.floor_id && f.id === firstFloorId));
+    const selected = a.entity_ids || [];
+    const masterSw = findSw('switch.overwatch_camera_all');
+    const floorRows = floorList.map(f => {
+      const floorSw = findSw(`switch.overwatch_camera_floor_${f.id}`, `switch.overwatch_camera_floor_${objectSlug(f)}`);
+      const groupRows = groups().map(g => {
+        const gZones = (g.zone_ids || []).map(id => zones().find(z=>z.id===id)).filter(z => belongsToFloor(z, f));
+        if (!gZones.length) return null;
+        const gsw = findSw(`switch.overwatch_camera_group_${g.id}`, `switch.overwatch_camera_group_${objectSlug(g)}`);
+        return { id:g.id, name:g.name || g.id, sw:gsw, zones:gZones.map(z => ({ id:z.id, name:z.name || z.id, sw:findSw(`switch.overwatch_camera_zone_${z.id}`, `switch.overwatch_camera_zone_${objectSlug(z)}`), cameras:zoneCamRows(z) })) };
+      }).filter(Boolean);
+      return { id:f.id, name:f.name || f.id, sw:floorSw, groups:groupRows };
+    }).filter(f => f.groups.length);
+    const renderCamCb = (entityId, checked, extraAttrs='') => `<input type="checkbox" data-camview-cb value="${escH(entityId)}" ${extraAttrs} ${checked?'checked':''} style="accent-color:#0064d2;flex-shrink:0;">`;
     inner = `
       <div style="margin-bottom:10px;">
         <label style="${labelStyle}">Camera views (HA-Overwatch switches)</label>
         <div id="act-camview-zones-${a.id}" style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:8px;padding:6px;">
-          ${masterSw ? `<label style="display:flex;align-items:center;gap:8px;padding:4px 6px;cursor:pointer;border-radius:4px;background:rgba(255,255,255,0.04);margin-bottom:4px;"><input type="checkbox" data-camview-cb value="${escH(masterSw.entity_id)}" ${(a.entity_ids||[]).includes(masterSw.entity_id)?'checked':''} style="accent-color:#0064d2;"><span style="font-size:12px;font-weight:600;color:#ccc;">All cameras (master)</span></label>` : ''}
-          ${camViewByFloor.map(fl=>{
+          ${masterSw ? `<label style="display:flex;align-items:center;gap:8px;padding:4px 6px;cursor:pointer;border-radius:4px;background:rgba(255,255,255,0.04);margin-bottom:4px;">${renderCamCb(masterSw.entity_id, selected.includes(masterSw.entity_id), 'data-cv-master-cb')}<span style="font-size:12px;font-weight:600;color:#ccc;">All cameras (master)</span></label>` : ''}
+          ${floorRows.map(fl=>{
             const fCollapsed=!!_collapsedSteps['cvf-'+fl.id];
-            const flSwEntity=fl.sw?.entity_id;
-            const fAllSel=flSwEntity&&(a.entity_ids||[]).includes(flSwEntity);
-            const groupsHtml=fl.groups.map(g=>{
-              const gSel=(a.entity_ids||[]).includes(g.sw?.entity_id);
-              const gC=_collapsedSteps['cvg-'+fl.id+'-'+g.id]!==false;
-              const zonesSw=g.zones.map(z=>{
-                const zSw=camViewAll.find(e=>e.entity_id==='switch.overwatch_camera_zone_'+(nameSlug(z.name)||z.id));
-                const zSel=(a.entity_ids||[]).includes(zSw?.entity_id);
-                return zSw?'<div style="display:flex;align-items:center;padding:2px 6px 2px 22px;"><span style="width:12px;flex-shrink:0;"></span><label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;"><input type="checkbox" data-camview-cb value="'+escH(zSw.entity_id)+'" '+(zSel?'checked':'')+' style="accent-color:#0064d2;"><span style="font-size:11px;color:#bbb;">'+escH(z.name||z.id)+'</span></label></div>':'';
+            const fVal = fl.sw?.entity_id || '';
+            const fChecked = fVal && selected.includes(fVal);
+            const groupsHtml = fl.groups.map(g=>{
+              const gC = _collapsedSteps['cvg-'+fl.id+'-'+g.id]!==false;
+              const gVal = g.sw?.entity_id || '';
+              const gChecked = gVal && selected.includes(gVal);
+              const zonesHtml = g.zones.map(z=>{
+                const zC = _collapsedSteps['cvz-'+z.id]!==false;
+                const zVal = z.sw?.entity_id || '';
+                const zChecked = zVal && selected.includes(zVal);
+                const camsHtml = z.cameras.map(cam => `<div data-cv-camera-row style="display:flex;align-items:center;padding:2px 6px 2px 46px;"><span style="width:12px;flex-shrink:0;"></span><label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;min-width:0;">${renderCamCb(cam.entity_id, selected.includes(cam.entity_id), 'data-cv-camera-cb')}<span style="font-size:11px;color:#bbb;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escH(cam.name)}</span>${entityStateBadge(cam.entity_id, cam.state, 'small')}</label></div>`).join('');
+                return `<div data-cv-zone="${escH(z.id)}"><div style="display:flex;align-items:center;gap:5px;padding:2px 6px 2px 30px;">${z.cameras.length?`<button data-cvz-collapse="${escH(z.id)}" style="background:none;border:none;color:#555;cursor:pointer;font-size:9px;padding:0 2px;">${zC?'▶':'▼'}</button>`:'<span style="width:12px;"></span>'}<label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;min-width:0;">${zVal?renderCamCb(zVal, zChecked, 'data-cv-zone-cb'):'<input type="checkbox" data-cv-zone-cb style="accent-color:#0064d2;flex-shrink:0;">'}<span style="font-size:11px;color:#bbb;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escH(z.name)}</span>${zVal?'<span style="font-size:10px;color:#444;">zone</span>':''}</label></div><div data-ow-children="cvz-${escH(z.id)}"${zC?' style="display:none"':''}>${camsHtml}</div></div>`;
               }).join('');
-              return '<div>' +
-                '<div style="display:flex;align-items:center;gap:5px;padding:2px 6px 2px 12px;">' +
-                (g.zones.length?'<button data-cvg-collapse="'+escH(fl.id+'-'+g.id)+'" style="background:none;border:none;color:#555;cursor:pointer;font-size:9px;padding:0 2px;">'+(gC?'▶':'▼')+'</button>':'<span style="width:12px;"></span>')+
-                '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;">'+(g.sw?'<input type="checkbox" data-camview-cb value="'+escH(g.sw.entity_id)+'" '+(gSel?'checked':'')+' style="accent-color:#0064d2;">':'')+
-                '<span style="font-size:11px;font-weight:600;color:#ccc;">'+escH(g.name)+'</span></label></div>' +
-                '<div data-ow-children="cvg-'+escH(fl.id+'-'+g.id)+'"'+(gC?' style="display:none"':'')+'>' + zonesSw + '</div></div>';
+              return `<div data-cv-group="${escH(g.id)}"><div style="display:flex;align-items:center;gap:5px;padding:2px 6px 2px 14px;">${g.zones.length?`<button data-cvg-collapse="${escH(fl.id+'-'+g.id)}" style="background:none;border:none;color:#555;cursor:pointer;font-size:9px;padding:0 2px;">${gC?'▶':'▼'}</button>`:'<span style="width:12px;"></span>'}<label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;min-width:0;">${gVal?renderCamCb(gVal, gChecked, 'data-cv-group-cb'):'<input type="checkbox" data-cv-group-cb style="accent-color:#0064d2;flex-shrink:0;">'}<span style="font-size:11px;font-weight:600;color:#ccc;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escH(g.name)}</span>${gVal?'<span style="font-size:10px;color:#444;">group</span>':''}</label></div><div data-ow-children="cvg-${escH(fl.id+'-'+g.id)}"${gC?' style="display:none"':''}>${zonesHtml}</div></div>`;
             }).join('');
-            // All camview entities on this floor (floor switch + group switches)
-            const allFlCamEids=[flSwEntity,...fl.groups.map(g=>g.sw?.entity_id)].filter(Boolean);
-            const cvfAllSel=allFlCamEids.length&&allFlCamEids.every(e=>(a.entity_ids||[]).includes(e));
-            return '<div>' +
-              '<div style="display:flex;align-items:center;gap:5px;padding:3px 6px;background:rgba(255,255,255,0.03);border-radius:4px;margin-bottom:2px;">' +
-              '<button data-cvf-collapse="'+escH(fl.id)+'" style="background:none;border:none;color:#666;cursor:pointer;font-size:10px;padding:0 2px;">'+(fCollapsed?'▶':'▼')+'</button>' +
-              '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;">' +
-              '<input type="checkbox" data-cvfall-cb="'+escH(fl.id)+'" '+( cvfAllSel?'checked':'')+' style="accent-color:#0064d2;flex-shrink:0;">' +
-              '<span style="font-size:11px;font-weight:700;color:#aaa;text-transform:uppercase;letter-spacing:0.06em;">'+escH(fl.name)+'</span>' +
-              (flSwEntity?'<span style="font-size:10px;color:#444;margin-left:4px;">floor switch</span>':'') +
-              '</label></div>' +
-              '<div data-ow-children="cvf-'+escH(fl.id)+'"'+(fCollapsed?' style="display:none"':'')+'>' + groupsHtml + '</div></div>';
+            return `<div data-cv-floor="${escH(fl.id)}"><div style="display:flex;align-items:center;gap:5px;padding:3px 6px;background:rgba(255,255,255,0.03);border-radius:4px;margin-bottom:2px;"><button data-cvf-collapse="${escH(fl.id)}" style="background:none;border:none;color:#666;cursor:pointer;font-size:10px;padding:0 2px;">${fCollapsed?'▶':'▼'}</button><label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;min-width:0;">${fVal?renderCamCb(fVal, fChecked, 'data-cv-floor-cb'):'<input type="checkbox" data-cv-floor-cb style="accent-color:#0064d2;flex-shrink:0;">'}<span style="font-size:11px;font-weight:700;color:#aaa;text-transform:uppercase;letter-spacing:0.06em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escH(fl.name)}</span>${fVal?'<span style="font-size:10px;color:#444;">floor</span>':''}</label></div><div data-ow-children="cvf-${escH(fl.id)}"${fCollapsed?' style="display:none"':''}>${groupsHtml}</div></div>`;
           }).join('')}
-          ${!camViewByFloor.length && !masterSw ? '<div style="color:#555;font-size:11px;">No OW camera view switches found.</div>' : ''}
+          ${!floorRows.length && !masterSw ? '<div style="color:#555;font-size:11px;">No OW camera view switches found.</div>' : ''}
         </div>
       </div>
-      <div>
-        <label style="${labelStyle}">Action</label>
-        <select id="act-camview-svc-${a.id}" style="${selectStyle}">
-          <option value="turn_on"  ${a.service==='turn_on' ||!a.service?'selected':''}>Turn ON (show cameras)</option>
-          <option value="turn_off" ${a.service==='turn_off'?'selected':''}>Turn OFF (hide cameras)</option>
-          <option value="toggle"   ${a.service==='toggle'  ?'selected':''}>Toggle</option>
-        </select>
-      </div>`;
+      <div><label style="${labelStyle}">Action</label><select id="act-camview-svc-${a.id}" style="${selectStyle}"><option value="turn_on"  ${a.service==='turn_on' ||!a.service?'selected':''}>Turn ON (show cameras)</option><option value="turn_off" ${a.service==='turn_off'?'selected':''}>Turn OFF (hide cameras)</option><option value="toggle"   ${a.service==='toggle'  ?'selected':''}>Toggle</option></select></div>`;
   }
   if (a.type === 'entity') {
     inner = `
@@ -1963,62 +1932,46 @@ function wireActionFields(a) {
     wireSelect(`act-arm-svc-${a.id}`,v=>a.service=v);
   }
   if (a.type==='camera_view') {
-    // Collapse buttons
-    _panelEl?.querySelectorAll('[data-cvf-collapse]').forEach(btn=>{
-      btn.onclick=e=>{e.stopPropagation();e.preventDefault();const key='cvf-'+btn.dataset.cvfCollapse;const ch=btn.parentElement?.nextElementSibling;const nowC=ch&&ch.style.display==='none';_collapsedSteps[key]=!nowC;if(ch)ch.style.display=nowC?'':'none';btn.textContent=nowC?'▼':'▶';};
-    });
-    _panelEl?.querySelectorAll('[data-cvg-collapse]').forEach(btn=>{
-      btn.onclick=e=>{e.stopPropagation();e.preventDefault();const key='cvg-'+btn.dataset.cvgCollapse;const ch=btn.parentElement?.nextElementSibling;const nowC=ch&&ch.style.display==='none';_collapsedSteps[key]=!nowC;if(ch)ch.style.display=nowC?'':'none';btn.textContent=nowC?'▼':'▶';};
-    });
-
+    _panelEl?.querySelectorAll('[data-cvf-collapse]').forEach(btn=>{btn.onclick=e=>{e.stopPropagation();e.preventDefault();const key='cvf-'+btn.dataset.cvfCollapse;const ch=btn.parentElement?.nextElementSibling;const open=ch&&ch.style.display!=='none';_collapsedSteps[key]=open;if(ch)ch.style.display=open?'none':'';btn.textContent=open?'▶':'▼';};});
+    _panelEl?.querySelectorAll('[data-cvg-collapse]').forEach(btn=>{btn.onclick=e=>{e.stopPropagation();e.preventDefault();const key='cvg-'+btn.dataset.cvgCollapse;const ch=btn.parentElement?.nextElementSibling;const open=ch&&ch.style.display!=='none';_collapsedSteps[key]=open;if(ch)ch.style.display=open?'none':'';btn.textContent=open?'▶':'▼';};});
+    _panelEl?.querySelectorAll('[data-cvz-collapse]').forEach(btn=>{btn.onclick=e=>{e.stopPropagation();e.preventDefault();const key='cvz-'+btn.dataset.cvzCollapse;const ch=btn.parentElement?.nextElementSibling;const open=ch&&ch.style.display!=='none';_collapsedSteps[key]=open;if(ch)ch.style.display=open?'none':'';btn.textContent=open?'▶':'▼';};});
     const camviewBox=_panelEl?.querySelector(`#act-camview-zones-${a.id}`);
     if(camviewBox) {
-      function collectCVIds() {
-        return [...camviewBox.querySelectorAll('[data-camview-cb]:checked')].map(c=>c.value);
+      const checkedIds=()=>[...camviewBox.querySelectorAll('[data-camview-cb]:checked')].map(c=>c.value).filter(Boolean);
+      const childBoxes=el=>[...el.querySelectorAll('[data-camview-cb], [data-cv-floor-cb], [data-cv-group-cb], [data-cv-zone-cb]')].filter(c=>c!==el);
+      function recompute(container, parentSelector) {
+        const parent = container.querySelector(':scope > div '+parentSelector);
+        if (!parent) return;
+        const kids = [...container.querySelectorAll(':scope > [data-ow-children] [data-camview-cb]')].filter(c=>c.value);
+        if (!kids.length) { parent.indeterminate=false; return; }
+        const n = kids.filter(c=>c.checked).length;
+        const partial = n>0 && n<kids.length;
+        parent.indeterminate = partial || kids.some(c=>c.indeterminate);
+        if (!parent.indeterminate) parent.checked = n===kids.length;
       }
-
-      // Find all camview-cb checkboxes in a container
-      function cvCbsIn(container) {
-        return [...container.querySelectorAll('[data-camview-cb]')];
-      }
-
-      // Update floor "select all" checkbox based on children
-      function updateCVFloor(startEl) {
-        const floorHeader = startEl.closest('[data-sg-floor],[data-dl-floor]');
-        if (!floorHeader) {
-          // Use data-ow-children approach — find the floor via cvfall-cb
-          // The floor checkbox is data-cvfall-cb, find its ow-children sibling
-          camviewBox.querySelectorAll('[data-cvfall-cb]').forEach(flCb=>{
-            const flId = flCb.dataset.cvfallCb;
-            const chDiv = camviewBox.querySelector(`[data-ow-children="cvf-${CSS.escape(flId)}"]`);
-            if (!chDiv) return;
-            if (!chDiv.contains(startEl)) return;
-            const all = cvCbsIn(chDiv);
-            const n = all.filter(c=>c.checked).length;
-            flCb.indeterminate = n > 0 && n < all.length;
-            if (!flCb.indeterminate) flCb.checked = (n === all.length);
-          });
+      function updatePartial() {
+        [...camviewBox.querySelectorAll('[data-cv-zone]')].forEach(z=>recompute(z,'[data-cv-zone-cb]'));
+        [...camviewBox.querySelectorAll('[data-cv-group]')].forEach(g=>recompute(g,'[data-cv-group-cb]'));
+        [...camviewBox.querySelectorAll('[data-cv-floor]')].forEach(f=>recompute(f,'[data-cv-floor-cb]'));
+        const master = camviewBox.querySelector('[data-cv-master-cb]');
+        if (master) {
+          const all = [...camviewBox.querySelectorAll('[data-camview-cb]')].filter(c=>c!==master && c.value);
+          const n = all.filter(c=>c.checked).length;
+          master.indeterminate = n>0 && n<all.length;
+          if (!master.indeterminate && all.length) master.checked = n===all.length;
         }
       }
-
-      // Floor "select all" checkbox — cascade all
-      camviewBox.querySelectorAll('[data-cvfall-cb]').forEach(flCb=>{
-        flCb.onchange=()=>{
-          const flId=flCb.dataset.cvfallCb;
-          const chDiv=camviewBox.querySelector(`[data-ow-children="cvf-${CSS.escape(flId)}"]`);
-          if(chDiv) cvCbsIn(chDiv).forEach(cb=>cb.checked=flCb.checked);
-          flCb.indeterminate=false;
-          a.entity_ids=collectCVIds();
-        };
-      });
-
-      // All individual camview checkboxes — update parent floor
-      camviewBox.querySelectorAll('[data-camview-cb]').forEach(cb=>{
-        cb.onchange=()=>{
-          updateCVFloor(cb);
-          a.entity_ids=collectCVIds();
-        };
-      });
+      function cascadeFrom(cb, selector) {
+        const container = cb.closest(selector);
+        if (!container) return;
+        container.querySelectorAll('[data-camview-cb], [data-cv-floor-cb], [data-cv-group-cb], [data-cv-zone-cb]').forEach(c=>{ if(c!==cb){ c.checked=cb.checked; c.indeterminate=false; } });
+      }
+      camviewBox.querySelectorAll('[data-cv-master-cb]').forEach(cb=>cb.onchange=()=>{ camviewBox.querySelectorAll('[data-camview-cb], [data-cv-floor-cb], [data-cv-group-cb], [data-cv-zone-cb]').forEach(c=>{c.checked=cb.checked;c.indeterminate=false;}); a.entity_ids=checkedIds(); updatePartial(); });
+      camviewBox.querySelectorAll('[data-cv-floor-cb]').forEach(cb=>cb.onchange=()=>{ cascadeFrom(cb,'[data-cv-floor]'); a.entity_ids=checkedIds(); updatePartial(); });
+      camviewBox.querySelectorAll('[data-cv-group-cb]').forEach(cb=>cb.onchange=()=>{ cascadeFrom(cb,'[data-cv-group]'); a.entity_ids=checkedIds(); updatePartial(); });
+      camviewBox.querySelectorAll('[data-cv-zone-cb]').forEach(cb=>cb.onchange=()=>{ cascadeFrom(cb,'[data-cv-zone]'); a.entity_ids=checkedIds(); updatePartial(); });
+      camviewBox.querySelectorAll('[data-camview-cb]').forEach(cb=>{ if (!cb.onchange) cb.onchange=()=>{ a.entity_ids=checkedIds(); updatePartial(); }; });
+      updatePartial();
     }
     wireSelect(`act-camview-svc-${a.id}`,v=>a.service=v);
   }
