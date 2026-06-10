@@ -1,5 +1,5 @@
 /* ================================================================
- * HA-Overwatch — automations.js  v0.05.35.16
+ * HA-Overwatch — automations.js  v0.05.35.19
  * Admin-only Automation Editor.
  * HA is source of truth — reads/writes directly via server proxy.
  * ================================================================ */
@@ -504,7 +504,6 @@ function actionSummary(a) {
 function actionCommonControlsHtml(a) {
   normaliseActionControls(a);
   return `<div style="background:rgba(255,255,255,0.035);border:1px solid rgba(255,255,255,0.08);border-radius:9px;padding:9px;margin-bottom:10px;">
-    <div style="font-size:12px;color:#ddd;line-height:1.35;margin-bottom:9px;">${escH(actionSummary(a))}</div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;">
       <div><label style="${labelStyle}">Turn ON after automation has been triggered for</label><input id="act-for-${a.id}" type="text" value="${escH(a.trigger_for || '00:00:00')}" placeholder="HH:MM:SS" pattern="\\d{2}:\\d{2}:\\d{2}" style="${inputStyle}"/></div>
       <div><label style="${labelStyle}">Only run</label><select id="act-cond-mode-${a.id}" style="${selectStyle}">
@@ -686,9 +685,84 @@ function emptyState() {
 /* ════════════════════════════════════════════════════════════
  * EDITOR VIEW
  * ═══════════════════════════════════════════════════════════ */
+
+function automationRecommendedMode(auto) {
+  const hasSourceClears = (auto?.actions || []).some(a => String(a?.clear_mode || 'none') === 'source_clears');
+  return hasSourceClears ? 'restart' : 'single';
+}
+function automationEffectiveMode(auto) {
+  const mode = String(auto?.run_mode || 'auto');
+  return mode === 'auto' ? automationRecommendedMode(auto) : mode;
+}
+function automationModeReason(auto) {
+  const mode = String(auto?.run_mode || 'auto');
+  if (mode !== 'auto') return `Manual override: ${mode}.`;
+  return automationRecommendedMode(auto) === 'restart'
+    ? 'One or more actions use “Turn OFF when source clears”, so new triggers reset the cooldown.'
+    : 'No source-clear cooldown actions detected; single mode avoids duplicate runs.';
+}
+function automationTriggerEntityPreview(auto) {
+  const ids = [];
+  (auto?.triggers || []).forEach(t => {
+    if (t.type === 'zone' || t.type === 'zone_arm') {
+      const isArm = t.type === 'zone_arm';
+      (t.group_ids || []).forEach(gid => {
+        const g = groups().find(x => x.id === gid);
+        const slug = nameSlug(g?.name || gid);
+        ids.push(isArm ? `switch.overwatch_zone_group_${slug}` : `binary_sensor.overwatch_zone_group_${slug}_triggered`);
+      });
+      (t.zone_ids || []).forEach(zid => {
+        const z = zones().find(x => x.id === zid);
+        const slug = nameSlug(z?.name || zid);
+        ids.push(isArm ? `switch.overwatch_zone_${slug}` : `binary_sensor.overwatch_zone_${slug}_triggered`);
+      });
+    } else if (Array.isArray(t.entity_ids)) ids.push(...t.entity_ids);
+    else if (t.entity_id) ids.push(t.entity_id);
+  });
+  return [...new Set(ids.filter(Boolean))];
+}
+function automationDiagnosticsHtml(auto) {
+  const mode = automationEffectiveMode(auto);
+  const triggerIds = automationTriggerEntityPreview(auto);
+  const branches = (auto?.actions || []).map(a => actionSummary(a));
+  const warnings = [];
+  if ((auto?.actions || []).some(a => String(a?.clear_mode || 'none') === 'source_clears')) {
+    warnings.push('Source-clear cooldowns use restart mode so new trigger events reset the timer. Source-clear templates still follow the current generator behaviour.');
+  }
+  return `<div style="background:rgba(255,255,255,0.025);border:1px solid rgba(255,255,255,0.07);border-radius:9px;padding:10px;margin-top:10px;">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;">
+      <div style="font-size:12px;font-weight:700;color:#ddd;">Generated behaviour preview</div>
+      <span style="font-size:10px;color:${mode==='restart'?'#ff9500':'#777'};border:1px solid rgba(255,255,255,0.09);border-radius:10px;padding:2px 7px;">mode: ${escH(mode)}</span>
+    </div>
+    <div style="font-size:11px;color:#888;line-height:1.45;margin-bottom:8px;">${escH(automationModeReason(auto))}</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+      <div><div style="${labelStyle}">Trigger entities</div><div style="font-size:11px;color:#aaa;line-height:1.45;">${triggerIds.length ? triggerIds.map(escH).join('<br>') : '<span style="color:#555;">None resolved yet</span>'}</div></div>
+      <div><div style="${labelStyle}">Action branches</div><div style="font-size:11px;color:#aaa;line-height:1.45;">${branches.length ? branches.map(escH).join('<br>') : '<span style="color:#555;">No actions yet</span>'}</div></div>
+    </div>
+    ${warnings.length ? `<div style="margin-top:8px;font-size:10px;color:#ffcc66;line-height:1.4;">${warnings.map(escH).join('<br>')}</div>` : ''}
+  </div>`;
+}
+function automationRunModeHtml(auto) {
+  const selected = String(auto?.run_mode || 'auto');
+  const effective = automationEffectiveMode(auto);
+  return `<div style="background:rgba(255,255,255,0.025);border:1px solid rgba(255,255,255,0.07);border-radius:9px;padding:10px;margin-top:10px;">
+    <div style="display:grid;grid-template-columns:220px 1fr;gap:10px;align-items:end;">
+      <div><label style="${labelStyle}">Run mode</label><select id="owAutoRunMode" style="${selectStyle}">
+        <option value="auto" ${selected==='auto'?'selected':''}>Auto recommended</option>
+        <option value="single" ${selected==='single'?'selected':''}>Single</option>
+        <option value="restart" ${selected==='restart'?'selected':''}>Restart</option>
+        <option value="queued" ${selected==='queued'?'selected':''}>Queued</option>
+        <option value="parallel" ${selected==='parallel'?'selected':''}>Parallel</option>
+      </select></div>
+      <div style="font-size:11px;color:#999;line-height:1.4;padding-bottom:7px;">Effective mode: <b style="color:${effective==='restart'?'#ff9500':'#ccc'};">${escH(effective)}</b> — ${escH(automationModeReason(auto))}</div>
+    </div>
+  </div>`;
+}
+
 function renderEditor() {
   if (!_panelEl || !_draft) return;
   const isNew = _editing === 'new';
+  if (!_draft.run_mode) _draft.run_mode = 'auto';
   const col = _collapsed;
 
   _panelEl.innerHTML = `
@@ -707,6 +781,8 @@ function renderEditor() {
         <input id="owAutoName" type="text" placeholder='e.g. "Alert on front door trigger"' value="${escH(_draft.name)}"
           style="${inputStyle}font-size:13px;padding:9px 12px;"/>
         <div style="font-size:11px;color:#444;margin-top:5px;">Saved as: <span style="color:#555;">HA-Overwatch — <span id="owAutoNamePreview">${escH(_draft.name||'…')}</span></span></div>
+        ${automationRunModeHtml(_draft)}
+        ${automationDiagnosticsHtml(_draft)}
       </div>
       ${editorSection('⚡','Triggers','When this happens…','triggers',col.triggers,
         _draft.triggers.map(t=>triggerCard(t)).join('')||emptyStepMsg('No triggers yet.'),
@@ -740,6 +816,8 @@ function renderEditor() {
   const nameEl=_panelEl.querySelector('#owAutoName');
   const previewEl=_panelEl.querySelector('#owAutoNamePreview');
   nameEl.oninput=()=>{_draft.name=nameEl.value;if(previewEl)previewEl.textContent=nameEl.value||'…';};
+  const runModeEl=_panelEl.querySelector('#owAutoRunMode');
+  if (runModeEl) runModeEl.onchange=()=>{ _draft.run_mode = runModeEl.value || 'auto'; renderEditorKeepScroll(); };
 
   _panelEl.querySelectorAll('[data-section-toggle]').forEach(btn=>{
     btn.onclick=()=>{_collapsed[btn.dataset.sectionToggle]=!_collapsed[btn.dataset.sectionToggle];renderEditorKeepScroll();};
@@ -1655,7 +1733,7 @@ function actionCard(a, idx, total) {
   const labels={siren:'Siren',light:'Light',camera:'Camera',camera_view:'Camera View',notify:'Notify',arm:'Arm/Disarm',entity:'Other Entity'};
   normaliseActionControls(a);
   inner = actionLayoutHtml(a, labels[a.type]||a.type, inner);
-  return stepCard(a.id, labels[a.type]||a.type, inner, 'action', moveControls);
+  return stepCard(a.id, labels[a.type]||a.type, inner, 'action', moveControls, actionSummary(a));
 }
 
 /* ════════════════════════════════════════════════════════════
@@ -2077,7 +2155,7 @@ function wireSelect(id,fn){const el=_panelEl?.querySelector(`#${CSS.escape(id)}`
 function wireInput(id,fn){const el=_panelEl?.querySelector(`#${CSS.escape(id)}`);if(el)el.oninput=()=>fn(el.value);}
 
 /* ── Step card ──────────────────────────────────────────────── */
-function stepCard(stepId, label, inner, removeType, extraControls='') {
+function stepCard(stepId, label, inner, removeType, extraControls='', summary='') {
   const colors={trigger:'#0064d2',cond:'#9b59b6',action:'#27ae60'};
   const color=colors[removeType]||'#555';
   const ra={trigger:`data-remove-trigger="${escH(stepId)}"`,cond:`data-remove-cond="${escH(stepId)}"`,action:`data-remove-action="${escH(stepId)}"`}[removeType]||'';
@@ -2088,6 +2166,7 @@ function stepCard(stepId, label, inner, removeType, extraControls='') {
       ${extraControls}
       <button ${ra} style="background:none;border:none;color:#3a3a3a;cursor:pointer;font-size:14px;padding:0 2px;line-height:1;margin-left:8px;" onmouseenter="this.style.color='#ff453a'" onmouseleave="this.style.color='#3a3a3a'">✕</button>
     </div>
+    ${summary ? `<div style="font-size:12px;color:#cfcfcf;line-height:1.4;background:rgba(255,255,255,0.035);border:1px solid rgba(255,255,255,0.07);border-radius:7px;padding:8px 9px;${collapsed?'':'margin-bottom:10px;'}">${escH(summary)}</div>` : ''}
     ${collapsed?'':`<div>${inner}</div>`}
   </div>`;
 }
