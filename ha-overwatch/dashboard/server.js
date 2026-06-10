@@ -1,4 +1,4 @@
-// HA-Overwatch 0.05.35.23-source-clear-trigger-sources: automation actions support per-action Only run, start delay, and fixed turn-off cleanup.
+// HA-Overwatch 0.05.35.26-automation-service-continue-on-error: automation actions support per-action Only run, start delay, and fixed turn-off cleanup.
 /* ============================================================
  * HA-Overwatch — server.js
  *
@@ -3694,7 +3694,7 @@ function _turnOffActionFor(actionObj) {
   return { action: `${domain}.turn_off`, target: actionObj.target || {} };
 }
 function _jinjaString(value) {
-  return String(value || '').replace(/'/g, "\\'");
+  return String(value || '').replace(/'/g, "\'");
 }
 function _sourceClearExpr(sourceClearSources = []) {
   const seen = new Set();
@@ -3722,6 +3722,10 @@ function _clearTemplateForAction(a, sourceClearSources = []) {
   const op = (a?.clear_match === 'any') ? ' or ' : ' and ';
   return `{{ ${parts.join(op)} }}`;
 }
+function _withContinueOnError(actionObj) {
+  if (actionObj && actionObj.action) actionObj.continue_on_error = true;
+  return actionObj;
+}
 function _pushDynamicTurnOff(seq, a, actionObj, sourceClearSources = []) {
   const clearMode = String(a?.clear_mode || 'none');
   const offAction = _turnOffActionFor(actionObj);
@@ -3729,7 +3733,7 @@ function _pushDynamicTurnOff(seq, a, actionObj, sourceClearSources = []) {
   const clearFor = _autoDuration(a?.clear_for) || '00:00:00';
   if (clearMode === 'after_delay') {
     if (clearFor !== '00:00:00') seq.push({ delay: clearFor });
-    seq.push(offAction);
+    seq.push(_withContinueOnError(offAction));
     return;
   }
   if (clearMode === 'source_clears' || clearMode === 'conditions') {
@@ -3737,14 +3741,14 @@ function _pushDynamicTurnOff(seq, a, actionObj, sourceClearSources = []) {
     seq.push({ wait_template: tpl, continue_on_timeout: false });
     if (clearFor !== '00:00:00') seq.push({ delay: clearFor });
     seq.push({ condition: 'template', value_template: tpl });
-    seq.push(offAction);
+    seq.push(_withContinueOnError(offAction));
   }
 }
 function buildAutomationActionBranch(a, actionObj, sourceClearSources = []) {
   const seq = [];
   const startDelay = _autoDuration(a?.trigger_for);
   if (startDelay) seq.push({ delay: startDelay });
-  seq.push(actionObj);
+  seq.push(_withContinueOnError(actionObj));
   _pushDynamicTurnOff(seq, a, actionObj, sourceClearSources);
   const conditions = _automationActionConditions(a);
   if (conditions.length) return { choose: [{ conditions, sequence: seq }] };
@@ -3830,23 +3834,16 @@ function buildHAAutomation(auto, allZones, allGroups) {
         : (t.event === 'triggered' ? 'on' : 'off');
       let entityIds = [];
       (t.floor_ids || []).forEach(fid => {
-        if (isArm) {
-          entityIds.push(`switch.overwatch_zone_floor_${fid}`);
-        } else {
-          _zoneIdsForFloor(fid).forEach(zid => entityIds.push(`binary_sensor.overwatch_zone_${zoneSlugById(zid)}_triggered`));
-        }
+        if (isArm) entityIds.push(`switch.overwatch_zone_floor_${fid}`);
+        else _zoneIdsForFloor(fid).forEach(zid => entityIds.push(`binary_sensor.overwatch_zone_${zoneSlugById(zid)}_triggered`));
       });
       (t.group_ids || []).forEach(gid => {
         const slug = groupSlugById(gid);
-        entityIds.push(isArm
-          ? `switch.overwatch_zone_group_${slug}`
-          : `binary_sensor.overwatch_zone_group_${slug}_triggered`);
+        entityIds.push(isArm ? `switch.overwatch_zone_group_${slug}` : `binary_sensor.overwatch_zone_group_${slug}_triggered`);
       });
       (t.zone_ids || []).forEach(zid => {
         const slug = zoneSlugById(zid);
-        entityIds.push(isArm
-          ? `switch.overwatch_zone_${slug}`
-          : `binary_sensor.overwatch_zone_${slug}_triggered`);
+        entityIds.push(isArm ? `switch.overwatch_zone_${slug}` : `binary_sensor.overwatch_zone_${slug}_triggered`);
       });
       entityIds = _uniqList(entityIds);
       if (entityIds.length > 0) {
