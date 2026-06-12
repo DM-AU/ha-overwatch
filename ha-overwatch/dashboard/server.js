@@ -1,4 +1,4 @@
-// HA-Overwatch 0.05.35.26-automation-service-continue-on-error: automation actions support per-action Only run, start delay, and fixed turn-off cleanup.
+// HA-Overwatch 0.05.35.27-automation-trace-error-monitor: automation actions support per-action Only run, start delay, and fixed turn-off cleanup.
 /* ============================================================
  * HA-Overwatch — server.js
  *
@@ -910,6 +910,118 @@ function parseAutomationsYaml(yamlText) {
   return results;
 }
 
+
+
+/* ─── AUTOMATION TRACE / ERROR MONITOR ────────────────────── */
+const AUTOMATION_ERROR_LOG_REL = path.join("config", "automation_errors.json");
+const AUTOMATION_TRACE_SCAN_REL = path.join("config", "automation_trace_scan.json");
+const AUTOMATION_TRACE_SCAN_INTERVAL_MS = Math.max(60000, parseInt(process.env.OW_TRACE_SCAN_INTERVAL_MS || "300000", 10));
+const AUTOMATION_ERROR_MAX_ENTRIES = Math.max(100, parseInt(process.env.OW_AUTOMATION_ERROR_MAX_ENTRIES || "500", 10));
+let automationTraceScanTimer = null;
+function _readJsonFile(filePath, fallback) { try { return JSON.parse(fs.readFileSync(filePath, "utf8")); } catch { return fallback; } }
+function _writeJsonFile(filePath, data) { fs.mkdirSync(path.dirname(filePath), { recursive: true }); fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf8"); }
+function automationErrorLogPath() { return safeDataPath(AUTOMATION_ERROR_LOG_REL); }
+function automationTraceScanStatePath() { return safeDataPath(AUTOMATION_TRACE_SCAN_REL); }
+function loadAutomationErrors() { const data = _readJsonFile(automationErrorLogPath(), []); return Array.isArray(data) ? data : []; }
+function saveAutomationErrors(entries) { _writeJsonFile(automationErrorLogPath(), (entries || []).sort((a,b)=>String(b.time || '').localeCompare(String(a.time || ''))).slice(0, AUTOMATION_ERROR_MAX_ENTRIES)); }
+function loadAutomationTraceScanState() { const data = _readJsonFile(automationTraceScanStatePath(), { seen: [] }); if (!Array.isArray(data.seen)) data.seen = []; return data; }
+function saveAutomationTraceScanState(state) { state.seen = [...new Set(state.seen || [])].slice(-2000); state.last_scan = new Date().toISOString(); _writeJsonFile(automationTraceScanStatePath(), state); }
+function automationTraceCandidatePaths() {
+  return [...new Set([
+    process.env.OW_HA_TRACE_FILE,
+    path.join(DATA_DIR, ".storage", "trace.saved_traces"),
+    path.join(DATA_DIR, "..", ".storage", "trace.saved_traces"),
+    path.join(DATA_DIR, "..", "..", ".storage", "trace.saved_traces"),
+    "/config/.storage/trace.saved_traces",
+    "/homeassistant/.storage/trace.saved_traces",
+    "/mnt/data/supervisor/homeassistant/.storage/trace.saved_traces",
+  ].filter(Boolean).map(p => path.resolve(p)))];
+}
+function findAutomationTraceFile() { return automationTraceCandidatePaths().find(p => { try { return fs.existsSync(p) && fs.statSync(p).isFile(); } catch { return false; } }) || null; }
+function _safeString(v) { if (v === null || v === undefined) return ""; if (typeof v === "string") return v; try { return JSON.stringify(v); } catch { return String(v); } }
+function _walkTraceObjects(root, cb, pathParts = [], depth = 0) {
+  if (depth > 16 || root === null || root === undefined) return;
+  if (Array.isArray(root)) { root.forEach((item, idx) => _walkTraceObjects(item, cb, pathParts.concat(String(idx)), depth + 1)); return; }
+  if (typeof root !== "object") return;
+  cb(root, pathParts);
+  Object.entries(root).forEach(([k, v]) => { if (v && typeof v === "object") _walkTraceObjects(v, cb, pathParts.concat(k), depth + 1); });
+}
+function _traceLooksLikeRun(obj) { return !!(obj && typeof obj === "object" && (obj.trace || obj.script_execution || obj.last_step || obj.run_id || obj.context || obj.timestamp || obj.config)); }
+function _extractAutomationTraceInfo(trace, tracePath) {
+  const config = trace.config || trace.trace?.config || trace.automation_config || {};
+  const variables = trace.variables || trace.trace?.variables || config.variables || {};
+  const owDraft = variables.ow_draft || config.variables?.ow_draft || {};
+  const owId = variables.ow_id || config.variables?.ow_id || owDraft.id || trace.ow_id || "";
+  const owName = variables.ow_name || config.variables?.ow_name || owDraft.name || trace.ow_name || config.alias || trace.alias || "";
+  const alias = config.alias || trace.alias || trace.automation_alias || owName || "";
+  const entityId = trace.entity_id || trace.automation_entity_id || trace.item_id || tracePath.find(p => p.startsWith("automation.")) || "";
+  const runId = trace.run_id || trace.trace_id || trace.context?.id || tracePath.join("/");
+  const time = trace.timestamp || trace.last_triggered || trace.start_time || trace.run_start || trace.context?.created_at || new Date().toISOString();
+  const scriptExecution = String(trace.script_execution || trace.trace?.script_execution || trace.result?.script_execution || "");
+  return { owId, owName, alias, entityId, runId, time, scriptExecution };
+}
+function _isOwAutomationTrace(info) {
+  return !!(info.owId || String(info.alias || "").startsWith("HA-Overwatch") || String(info.owName || "").startsWith("HA-Overwatch") || String(info.entityId || "").startsWith("automation.ha_overwatch"));
+}
+function _extractTraceFailure(trace) {
+  const failures = [];
+  const exec = String(trace.script_execution || trace.trace?.script_execution || trace.result?.script_execution || "").toLowerCase();
+  if (exec && exec !== "finished" && exec !== "cancelled" && /fail|error|exception|timeout|stopped|abort/.test(exec)) failures.push({ message: `script_execution=${exec}`, key: "script_execution" });
+  _walkTraceObjects(trace, (obj, p) => {
+    for (const key of ["error", "exception", "error_message", "message"]) {
+      if (obj[key] && /error|fail|exception|unavailable|not found|timeout|invalid|service/i.test(_safeString(obj[key]))) failures.push({ message: _safeString(obj[key]).slice(0, 500), key, step: p.join("/") });
+    }
+    const result = _safeString(obj.result || obj.status || obj.state || "");
+    if (/error|failed|exception|timeout/i.test(result)) failures.push({ message: result.slice(0, 500), key: "result", step: p.join("/") });
+  });
+  return failures;
+}
+function _extractFailedServiceAndEntity(trace) {
+  let service = "", entityId = "", step = "";
+  _walkTraceObjects(trace, (obj, p) => {
+    if (service && entityId) return;
+    const rawAction = obj.action || obj.service || obj.call_service || (obj.domain && obj.service ? `${obj.domain}.${obj.service}` : "");
+    const targetEntity = obj.entity_id || obj.target?.entity_id || obj.data?.entity_id || obj.service_data?.entity_id || "";
+    if (rawAction && !service) { service = Array.isArray(rawAction) ? rawAction.join(",") : String(rawAction); step = p.join("/"); }
+    if (targetEntity && !entityId) { entityId = Array.isArray(targetEntity) ? targetEntity.join(",") : String(targetEntity); step = step || p.join("/"); }
+  });
+  return { service, entityId, step };
+}
+function collectAutomationTraceErrors() {
+  const traceFile = findAutomationTraceFile();
+  if (!traceFile) return { ok: false, traceFile: null, scanned: 0, added: 0, message: "trace.saved_traces not found" };
+  const raw = _readJsonFile(traceFile, null);
+  if (!raw) return { ok: false, traceFile, scanned: 0, added: 0, message: "trace.saved_traces unreadable" };
+  const state = loadAutomationTraceScanState();
+  const seen = new Set(state.seen || []);
+  const existing = loadAutomationErrors();
+  const existingKeys = new Set(existing.map(e => e.key).filter(Boolean));
+  const additions = [];
+  let scanned = 0;
+  _walkTraceObjects(raw.data || raw, (obj, pathParts) => {
+    if (!_traceLooksLikeRun(obj)) return;
+    scanned++;
+    const info = _extractAutomationTraceInfo(obj, pathParts);
+    if (!_isOwAutomationTrace(info)) return;
+    const failures = _extractTraceFailure(obj);
+    if (!failures.length) return;
+    const svc = _extractFailedServiceAndEntity(obj);
+    const key = [info.owId || info.entityId || info.alias || "unknown", info.runId || info.time || pathParts.join("/"), failures[0].step || failures[0].key || "failure"].join("::");
+    if (seen.has(key) || existingKeys.has(key)) return;
+    seen.add(key);
+    additions.push({ id:`autoerr_${Date.now()}_${Math.random().toString(36).slice(2,8)}`, key, time:info.time, level:"error", category:"automation", source:"ha_trace", ow_id:info.owId, ow_name:info.owName || info.alias, ha_entity_id:info.entityId, run_id:info.runId, status:info.scriptExecution || failures[0].key || "error", failed_step:failures[0].step || svc.step || "", service:svc.service, entity_id:svc.entityId, message:failures[0].message || "Automation trace indicates a failed run" });
+  });
+  if (additions.length) saveAutomationErrors(existing.concat(additions));
+  state.seen = [...seen]; state.trace_file = traceFile; state.scanned = scanned; state.added_last_scan = additions.length; saveAutomationTraceScanState(state);
+  if (additions.length) bumpDataVersion();
+  return { ok: true, traceFile, scanned, added: additions.length };
+}
+function startAutomationTraceMonitor() {
+  if (automationTraceScanTimer) clearInterval(automationTraceScanTimer);
+  setTimeout(() => { try { console.log("[HA-Overwatch] automation trace scan", collectAutomationTraceErrors()); } catch (e) { console.warn(`[HA-Overwatch] automation trace scan failed: ${e.message}`); } }, 15000);
+  automationTraceScanTimer = setInterval(() => { try { collectAutomationTraceErrors(); } catch (e) { console.warn(`[HA-Overwatch] automation trace scan failed: ${e.message}`); } }, AUTOMATION_TRACE_SCAN_INTERVAL_MS);
+}
+
 /* ─── REQUEST HANDLER ─────────────────────────────────────── */
 const server = http.createServer(async (req, res) => {
   // CORS preflight
@@ -952,6 +1064,36 @@ const server = http.createServer(async (req, res) => {
       appDir:  APP_DIR,
       dataDir: DATA_DIR,
     });
+    return;
+  }
+
+
+  /* ── /ow/automation-errors ───────────────────────────────── */
+  if (pathname === "/ow/automation-errors" && req.method === "GET") {
+    try {
+      const url = new URL(req.url, `http://localhost:${PORT}`);
+      const owId = url.searchParams.get("ow_id") || "";
+      const limit = Math.max(1, Math.min(500, parseInt(url.searchParams.get("limit") || "100", 10)));
+      let entries = loadAutomationErrors();
+      if (owId) entries = entries.filter(e => e.ow_id === owId || e.ha_entity_id === owId || e.ow_name === owId);
+      json(res, { ok: true, entries: entries.slice(0, limit), count: entries.length });
+    } catch (e) { err(res, e.message); }
+    return;
+  }
+
+  /* ── /ow/automation-errors/scan ──────────────────────────── */
+  if (pathname === "/ow/automation-errors/scan" && req.method === "POST") {
+    try { json(res, collectAutomationTraceErrors()); }
+    catch (e) { err(res, e.message); }
+    return;
+  }
+
+  /* ── /ow/automation-errors/status ────────────────────────── */
+  if (pathname === "/ow/automation-errors/status" && req.method === "GET") {
+    try {
+      const state = loadAutomationTraceScanState();
+      json(res, { ok: true, traceFile: findAutomationTraceFile(), candidates: automationTraceCandidatePaths(), state, errorCount: loadAutomationErrors().length });
+    } catch (e) { err(res, e.message); }
     return;
   }
 
@@ -1876,6 +2018,7 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log(`[HA-Overwatch] Data directory: ${DATA_DIR}`);
   writeCustomComponent();
   setTimeout(startHAListener, 3000);
+  startAutomationTraceMonitor();
 });
 
 /* ─── EMBEDDED CUSTOM COMPONENT FILES ─────────────────────── */
@@ -3694,7 +3837,7 @@ function _turnOffActionFor(actionObj) {
   return { action: `${domain}.turn_off`, target: actionObj.target || {} };
 }
 function _jinjaString(value) {
-  return String(value || '').replace(/'/g, "\'");
+  return String(value || '').replace(/'/g, "\\'");
 }
 function _sourceClearExpr(sourceClearSources = []) {
   const seen = new Set();
@@ -3717,7 +3860,7 @@ function _clearTemplateForAction(a, sourceClearSources = []) {
   const conds = Array.isArray(a?.clear_conditions) && a.clear_conditions.length ? a.clear_conditions : ['source_clear'];
   const parts = [];
   if (conds.includes('source_clear')) parts.push(_sourceClearExpr(sourceClearSources));
-  if (conds.includes('alarm_not_triggered')) parts.push("states.binary_sensor | selectattr('entity_id','match','binary_sensor\.overwatch_alarm_.*triggered') | selectattr('state','eq','on') | list | count == 0");
+  if (conds.includes('alarm_not_triggered')) parts.push("states.binary_sensor | selectattr('entity_id','match','binary_sensor\\.overwatch_alarm_.*triggered') | selectattr('state','eq','on') | list | count == 0");
   if (!parts.length) parts.push(_sourceClearExpr(sourceClearSources));
   const op = (a?.clear_match === 'any') ? ' or ' : ' and ';
   return `{{ ${parts.join(op)} }}`;
