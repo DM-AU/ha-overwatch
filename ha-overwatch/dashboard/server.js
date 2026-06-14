@@ -1,4 +1,4 @@
-// HA-Overwatch 0.05.35.27-automation-trace-error-monitor: automation actions support per-action Only run, start delay, and fixed turn-off cleanup.
+// HA-Overwatch 0.05.35.28-turn-off-sidecar: source-clear cleanup generated as paired Turn OFF automation using trigger-level for/template triggers.
 /* ============================================================
  * HA-Overwatch — server.js
  *
@@ -1648,53 +1648,75 @@ if (pathname === "/ow/alarms/responses/sync" && req.method === "POST") {
         err(res, "HA not configured", 503); return;
       }
 
-      // Build a valid HA automation config object from our draft format
-      const haAuto = buildHAAutomation(auto, loadZones(), loadGroups());
-      const haJson = JSON.stringify(haAuto);
-      const autoId = String(auto.id); // use our stable uid as HA automation id
+      const haAutos = buildHAAutomationSet(auto, loadZones(), loadGroups());
+      const generatedIds = new Set(haAutos.map(a => String(a.id)));
+      const staleTurnOffId = _automationTurnOffId(auto.id);
 
-      // Determine host/port/token
-      let hostname, port, basePath, token;
+      let hostname, port, basePath, token, lib;
       if (process.env.SUPERVISOR_TOKEN) {
-        hostname = "supervisor"; port = 80; basePath = "/core"; token = process.env.SUPERVISOR_TOKEN;
+        hostname = "supervisor"; port = 80; basePath = "/core"; token = process.env.SUPERVISOR_TOKEN; lib = http;
       } else {
         const u = new URL(cfg.ha_url.replace(/\/$/, ""));
         hostname = u.hostname; port = parseInt(u.port) || (u.protocol === "https:" ? 443 : 80);
-        basePath = ""; token = cfg.ha_token;
+        basePath = ""; token = cfg.ha_token; lib = u.protocol === "https:" ? https : http;
       }
 
-      const apiPath_ = `${basePath}/api/config/automation/config/${autoId}`;
-      const haReq = (process.env.SUPERVISOR_TOKEN ? http : https).request({
-        hostname, port, method: "POST", path: apiPath_,
-        headers: {
-          "Authorization": `Bearer ${token}`,
-          "Content-Type": "application/json",
-          "Content-Length": Buffer.byteLength(haJson),
-        },
-      }, haRes => {
-        let d = "";
-        haRes.on("data", c => d += c);
-        haRes.on("end", () => {
-          console.log(`[OW-Auto] Push automation "${auto.name}" → HA ${haRes.statusCode}`);
-          if (haRes.statusCode >= 200 && haRes.statusCode < 300) {
-            // Also reload HA automations so it picks up the new one immediately
-            const reloadReq = (process.env.SUPERVISOR_TOKEN ? http : https).request({
-              hostname, port, method: "POST",
-              path: `${basePath}/api/services/automation/reload`,
-              headers: { "Authorization": `Bearer ${token}`, "Content-Length": "0" },
-            }, r => r.resume());
-            reloadReq.on("error", () => {});
-            reloadReq.end();
-            json(res, { ok: true, ha_status: haRes.statusCode });
-          } else {
-            console.warn(`[OW-Auto] HA rejected automation: ${haRes.statusCode} — ${d}`);
-            json(res, { ok: false, ha_status: haRes.statusCode, detail: d });
-          }
+      function automationConfigRequest(method, id, payload = null) {
+        const body = payload == null ? "" : JSON.stringify(payload);
+        return new Promise((resolve, reject) => {
+          const haReq = lib.request({
+            hostname, port, method, path: `${basePath}/api/config/automation/config/${id}`,
+            headers: {
+              "Authorization": `Bearer ${token}`,
+              "Content-Type": "application/json",
+              "Content-Length": Buffer.byteLength(body),
+            },
+          }, haRes => {
+            let d = "";
+            haRes.on("data", c => d += c);
+            haRes.on("end", () => resolve({ status: haRes.statusCode || 0, body: d }));
+          });
+          haReq.on("error", reject);
+          if (body) haReq.write(body);
+          haReq.end();
         });
-      });
-      haReq.on("error", e => { console.error("[OW-Auto] Push error:", e.message); err(res, e.message, 502); });
-      haReq.write(haJson);
-      haReq.end();
+      }
+      function reloadAutomations() {
+        return new Promise(resolve => {
+          const reloadReq = lib.request({
+            hostname, port, method: "POST",
+            path: `${basePath}/api/services/automation/reload`,
+            headers: { "Authorization": `Bearer ${token}`, "Content-Length": "0" },
+          }, r => { r.resume(); resolve(); });
+          reloadReq.on("error", () => resolve());
+          reloadReq.end();
+        });
+      }
+
+      const pushed = [];
+      for (const haAuto of haAutos) {
+        const result = await automationConfigRequest("POST", String(haAuto.id), haAuto);
+        pushed.push({ id: haAuto.id, status: result.status, detail: result.body });
+        if (result.status < 200 || result.status >= 300) {
+          console.warn(`[OW-Auto] HA rejected automation ${haAuto.id}: ${result.status} — ${result.body}`);
+          json(res, { ok: false, ha_status: result.status, pushed, detail: result.body });
+          return;
+        }
+      }
+
+      const deleted = [];
+      if (staleTurnOffId && !generatedIds.has(staleTurnOffId)) {
+        try {
+          const del = await automationConfigRequest("DELETE", staleTurnOffId, null);
+          deleted.push({ id: staleTurnOffId, status: del.status, missing: del.status === 404 || (del.status === 400 && /Resource not found/i.test(String(del.body || ""))) });
+        } catch (e) {
+          deleted.push({ id: staleTurnOffId, error: e.message });
+        }
+      }
+
+      await reloadAutomations();
+      console.log(`[OW-Auto] Push automation "${auto.name}" → HA ${pushed.map(p => `${p.id}:${p.status}`).join(', ')}`);
+      json(res, { ok: true, ha_status: pushed[0]?.status || 200, pushed, deleted });
     } catch(e) {
       console.error("[OW-Auto] Push-automation error:", e.message);
       err(res, e.message, 500);
@@ -1702,46 +1724,63 @@ if (pathname === "/ow/alarms/responses/sync" && req.method === "POST") {
     return;
   }
 
-  /* ── /ow/delete-automation — remove from HA ─────────────────── */
+  
+/* ── /ow/delete-automation — remove from HA ─────────────────── */
   if (pathname === "/ow/delete-automation" && req.method === "POST") {
     try {
       const { id } = await readBody(req);
       const cfg = getHAConfig(loadConfig());
       if (!cfg.ha_url && !process.env.SUPERVISOR_TOKEN) { json(res, { ok: true }); return; }
-      let hostname, port, basePath, token;
+      let hostname, port, basePath, token, lib;
       if (process.env.SUPERVISOR_TOKEN) {
-        hostname = "supervisor"; port = 80; basePath = "/core"; token = process.env.SUPERVISOR_TOKEN;
+        hostname = "supervisor"; port = 80; basePath = "/core"; token = process.env.SUPERVISOR_TOKEN; lib = http;
       } else {
         const u = new URL(cfg.ha_url.replace(/\/$/, ""));
         hostname = u.hostname; port = parseInt(u.port) || (u.protocol === "https:" ? 443 : 80);
-        basePath = ""; token = cfg.ha_token;
+        basePath = ""; token = cfg.ha_token; lib = u.protocol === "https:" ? https : http;
       }
-      const haReq = (process.env.SUPERVISOR_TOKEN ? http : https).request({
-        hostname, port, method: "DELETE",
-        path: `${basePath}/api/config/automation/config/${id}`,
-        headers: { "Authorization": `Bearer ${token}`, "Content-Length": "0" },
-      }, haRes => {
-        haRes.resume();
-        console.log(`[OW-Auto] Delete automation ${id} → HA ${haRes.statusCode}`);
-        // Reload HA automations so deletion takes effect immediately
-        const reloadReq = (process.env.SUPERVISOR_TOKEN ? http : https).request({
-          hostname, port, method: "POST",
-          path: `${basePath}/api/services/automation/reload`,
-          headers: { "Authorization": `Bearer ${token}`, "Content-Length": "0" },
-        }, r => r.resume());
-        reloadReq.on("error", () => {});
-        reloadReq.end();
-        json(res, { ok: true, ha_status: haRes.statusCode });
-      });
-      haReq.on("error", e => { json(res, { ok: false, detail: e.message }); });
-      haReq.end();
+
+      function deleteAutomationConfig(deleteId) {
+        return new Promise(resolve => {
+          const haReq = lib.request({
+            hostname, port, method: "DELETE",
+            path: `${basePath}/api/config/automation/config/${deleteId}`,
+            headers: { "Authorization": `Bearer ${token}`, "Content-Length": "0" },
+          }, haRes => {
+            let d = "";
+            haRes.on("data", c => d += c);
+            haRes.on("end", () => resolve({ id: deleteId, status: haRes.statusCode || 0, detail: d }));
+          });
+          haReq.on("error", e => resolve({ id: deleteId, error: e.message }));
+          haReq.end();
+        });
+      }
+      function reloadAutomations() {
+        return new Promise(resolve => {
+          const reloadReq = lib.request({
+            hostname, port, method: "POST",
+            path: `${basePath}/api/services/automation/reload`,
+            headers: { "Authorization": `Bearer ${token}`, "Content-Length": "0" },
+          }, r => { r.resume(); resolve(); });
+          reloadReq.on("error", () => resolve());
+          reloadReq.end();
+        });
+      }
+
+      const ids = [...new Set([String(id || ''), _automationTurnOffId(id)].filter(Boolean))];
+      const deleted = [];
+      for (const deleteId of ids) deleted.push(await deleteAutomationConfig(deleteId));
+      await reloadAutomations();
+      console.log(`[OW-Auto] Delete automation ${id} → HA ${deleted.map(d => `${d.id}:${d.status || d.error}`).join(', ')}`);
+      json(res, { ok: true, ha_status: deleted[0]?.status || 200, deleted });
     } catch(e) {
       err(res, e.message, 500);
     }
     return;
   }
 
-  /* ── /ow/floors — floor list r/w ───────────────────────────── */
+  
+/* ── /ow/floors — floor list r/w ───────────────────────────── */
   if (pathname === "/ow/floors" && req.method === "GET") {
     json(res, loadFloors());
     return;
@@ -3874,16 +3913,14 @@ function _pushDynamicTurnOff(seq, a, actionObj, sourceClearSources = []) {
   const offAction = _turnOffActionFor(actionObj);
   if (!offAction || clearMode === 'none') return;
   const clearFor = _autoDuration(a?.clear_for) || '00:00:00';
+
+  // 0.05.35.28: source_clear/condition cleanup is generated as a paired
+  // "Turn OFF" automation. Do not leave wait/delay/turn_off behind the ON
+  // automation because restart mode can cancel cleanup before turn_off runs.
+  if (clearMode === 'source_clears' || clearMode === 'conditions') return;
+
   if (clearMode === 'after_delay') {
     if (clearFor !== '00:00:00') seq.push({ delay: clearFor });
-    seq.push(_withContinueOnError(offAction));
-    return;
-  }
-  if (clearMode === 'source_clears' || clearMode === 'conditions') {
-    const tpl = clearMode === 'source_clears' ? _sourceClearTemplate(sourceClearSources) : _clearTemplateForAction(a, sourceClearSources);
-    seq.push({ wait_template: tpl, continue_on_timeout: false });
-    if (clearFor !== '00:00:00') seq.push({ delay: clearFor });
-    seq.push({ condition: 'template', value_template: tpl });
     seq.push(_withContinueOnError(offAction));
   }
 }
@@ -3931,6 +3968,154 @@ function _automationRunMode(auto) {
   const requested = String(auto?.run_mode || 'auto');
   if (['single','restart','queued','parallel'].includes(requested)) return requested;
   return (auto?.actions || []).some(a => String(a?.clear_mode || 'none') === 'source_clears') ? 'restart' : 'single';
+}
+
+function _automationTurnOffId(autoOrId) {
+  const id = typeof autoOrId === 'string' ? autoOrId : String(autoOrId?.id || '');
+  return id ? `${id}_turn_off` : '';
+}
+function _flattenEntityIds(value) {
+  if (!value) return [];
+  return [...new Set((Array.isArray(value) ? value : [value]).filter(Boolean).map(String))];
+}
+function _durationObject(value) {
+  const s = _autoDuration(value) || '00:00:00';
+  const [hours, minutes, seconds] = s.split(':').map(v => Math.max(0, parseInt(v, 10) || 0));
+  return { hours, minutes, seconds };
+}
+function _sourceClearSourcesFromTriggers(triggers = []) {
+  const out = [];
+  const seen = new Set();
+  (triggers || []).forEach(t => {
+    if (!t || (t.trigger || t.platform) !== 'state') return;
+    const activeState = String(t.to || 'on');
+    _flattenEntityIds(t.entity_id).forEach(entityId => {
+      const key = `${entityId}::${activeState}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push({ entity_id: entityId, active_state: activeState });
+    });
+  });
+  return out;
+}
+function _canUseSimpleStateClearTrigger(sourceClearSources = []) {
+  return sourceClearSources.length === 1 && String(sourceClearSources[0]?.active_state || 'on') === 'on';
+}
+function _clearTriggerIdForAction(a) {
+  return `clear_${a?.id || 'action'}`;
+}
+function _offTriggerForAction(a, sourceClearSources = []) {
+  const clearMode = String(a?.clear_mode || 'none');
+  if (clearMode !== 'source_clears' && clearMode !== 'conditions') return null;
+  const id = _clearTriggerIdForAction(a);
+  const clearFor = _durationObject(a?.clear_for);
+
+  if (clearMode === 'source_clears' && _canUseSimpleStateClearTrigger(sourceClearSources)) {
+    return {
+      trigger: 'state',
+      entity_id: [sourceClearSources[0].entity_id],
+      from: sourceClearSources[0].active_state,
+      to: 'off',
+      for: clearFor,
+      id,
+    };
+  }
+
+  return {
+    trigger: 'template',
+    value_template: clearMode === 'source_clears'
+      ? _sourceClearTemplate(sourceClearSources)
+      : _clearTemplateForAction(a, sourceClearSources),
+    for: clearFor,
+    id,
+  };
+}
+function _turnOffChooseBranchForAction(a, actionObj) {
+  const clearMode = String(a?.clear_mode || 'none');
+  if (clearMode !== 'source_clears' && clearMode !== 'conditions') return null;
+  const offAction = _turnOffActionFor(actionObj);
+  if (!offAction) return null;
+  const clearId = _clearTriggerIdForAction(a);
+  return {
+    triggerId: clearId,
+    branch: {
+      conditions: [{ condition: 'trigger', id: clearId }],
+      sequence: [_withContinueOnError(offAction)],
+    },
+  };
+}
+function buildHAAutomationTurnOff(auto, allZones, allGroups, mainAutomation = null) {
+  const main = mainAutomation || buildHAAutomation(auto, allZones, allGroups);
+  const sourceClearSources = _sourceClearSourcesFromTriggers(main.triggers || main.trigger || []);
+  if (!sourceClearSources.length) return null;
+
+  const zoneList  = allZones  || [];
+  const groupList = allGroups || [];
+  const floorList = loadFloors();
+  function uniq(ids) { return [...new Set((ids || []).filter(Boolean))]; }
+  function targetFor(ids) {
+    const u = uniq(ids);
+    return { entity_id: u };
+  }
+
+  const triggers = [];
+  const choices = [];
+  const seenTriggerIds = new Set();
+
+  function addTurnOff(a, actionObj) {
+    const trig = _offTriggerForAction(a, sourceClearSources);
+    const branchWrap = _turnOffChooseBranchForAction(a, actionObj);
+    if (!trig || !branchWrap) return;
+    if (!seenTriggerIds.has(trig.id)) {
+      seenTriggerIds.add(trig.id);
+      triggers.push(trig);
+    }
+    choices.push(branchWrap.branch);
+  }
+
+  for (const a of (auto.actions || [])) {
+    if (a.type === 'siren') {
+      const ids = uniq([..._resolveAutomationScopedEntityIds(a, 'sirens', zoneList, groupList, floorList), ...(a.entity_ids || []), ...(a.entity_ids_extra || [])]);
+      if (ids.length) addTurnOff(a, { action:`siren.${a.service || 'turn_on'}`, target: targetFor(ids) });
+    } else if (a.type === 'light') {
+      const ids = uniq([..._resolveAutomationScopedEntityIds(a, 'lights', zoneList, groupList, floorList), ...(a.entity_ids_zone || []), ...(a.entity_ids_other || []), ...(a.entity_ids || [])]);
+      if (ids.length) addTurnOff(a, { action:`light.${a.service || 'turn_on'}`, target: targetFor(ids) });
+    } else if (a.type === 'camera_view') {
+      const ids = uniq([..._resolveAutomationScopedEntityIds(a, 'cameras', zoneList, groupList, floorList), ...(a.entity_ids || [])]);
+      if (ids.length) addTurnOff(a, { action:`switch.${a.service || 'turn_on'}`, target: targetFor(ids) });
+    } else if (a.type === 'entity') {
+      if (a.entity_id) {
+        const domain = a.entity_id.split('.')[0];
+        addTurnOff(a, { action:`${domain}.${a.service || 'turn_on'}`, target:{ entity_id:[a.entity_id] } });
+      }
+    } else if (a.type === 'arm') {
+      const ids = uniq(a.entity_ids || []);
+      if (ids.length) addTurnOff(a, { action:`switch.${a.service || 'turn_on'}`, target: targetFor(ids) });
+    }
+  }
+
+  if (!triggers.length || !choices.length) return null;
+  return {
+    id: _automationTurnOffId(auto),
+    alias: `HA-Overwatch — ${auto.name} - Turn OFF`,
+    description: 'Created by HA-Overwatch',
+    variables: {
+      ow_id: _automationTurnOffId(auto),
+      ow_name: `${auto.name} - Turn OFF`,
+      ow_draft: auto,
+      ow_cleanup: true,
+      ow_parent_automation_id: auto.id,
+    },
+    mode: 'single',
+    triggers,
+    conditions: [],
+    actions: [{ choose: choices }],
+  };
+}
+function buildHAAutomationSet(auto, allZones, allGroups) {
+  const main = buildHAAutomation(auto, allZones, allGroups);
+  const turnOff = buildHAAutomationTurnOff(auto, allZones, allGroups, main);
+  return turnOff ? [main, turnOff] : [main];
 }
 
 /* ── Build HA automation config from OW draft ─────────────── */
@@ -3991,20 +4176,20 @@ function buildHAAutomation(auto, allZones, allGroups) {
       entityIds = _uniqList(entityIds);
       if (entityIds.length > 0) {
         _addSourceClearSources(entityIds, toState);
-        const trig = { trigger:"state", entity_id: entityIds.length===1?entityIds[0]:entityIds, to:toState };
+        const trig = { trigger:"state", entity_id: entityIds, to:toState };
         if (forDur) trig.for = forDur;
         triggers.push(trig);
       } else {
         const fallback = isArm ? "switch.overwatch_zone_master" : "binary_sensor.overwatch_zone_master_triggered";
         _addSourceClearSources(fallback, toState);
-        triggers.push({ trigger:"state", entity_id:fallback, to:toState });
+        triggers.push({ trigger:"state", entity_id:[fallback], to:toState });
       }
     } else if (t.type === 'person' || t.type === 'device') {
       if ((t.entity_ids||[]).length) {
         const entityIds = _uniqList(t.entity_ids);
         const toState = t.state || 'home';
         _addSourceClearSources(entityIds, toState);
-        const trig = { trigger:"state", entity_id:entityIds.length===1?entityIds[0]:entityIds, to:toState };
+        const trig = { trigger:"state", entity_id:entityIds, to:toState };
         if (forDur) trig.for = forDur;
         triggers.push(trig);
       }
@@ -4012,7 +4197,7 @@ function buildHAAutomation(auto, allZones, allGroups) {
       if (t.entity_id) {
         const toState = t.to || 'on';
         _addSourceClearSources(t.entity_id, toState);
-        const trig = { trigger:"state", entity_id:t.entity_id, to:toState };
+        const trig = { trigger:"state", entity_id:[t.entity_id], to:toState };
         if (forDur) trig.for = forDur;
         triggers.push(trig);
       }
@@ -4021,7 +4206,7 @@ function buildHAAutomation(auto, allZones, allGroups) {
         const entityIds = _uniqList(t.entity_ids);
         const toState = t.state || 'on';
         _addSourceClearSources(entityIds, toState);
-        const trig = { trigger:"state", entity_id:entityIds.length===1?entityIds[0]:entityIds, to:toState };
+        const trig = { trigger:"state", entity_id:entityIds, to:toState };
         if (forDur) trig.for = forDur;
         triggers.push(trig);
       }
