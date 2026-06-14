@@ -1,4 +1,4 @@
-// HA-Overwatch 0.05.35.39-turnoff-guard: Turn OFF enforcement only runs when parent conditions and action conditions are currently valid.
+// HA-Overwatch 0.05.35.40-event-lifecycle-turnoff: Turn OFF lifecycle starts only after parent action fires ha_overwatch_action_started event.
 /* ============================================================
  * HA-Overwatch — server.js
  *
@@ -3802,16 +3802,6 @@ function _withContinueOnError(actionObj) {
   if (actionObj && actionObj.action) actionObj.continue_on_error = true;
   return actionObj;
 }
-
-function _cloneHACondition(conditionObj) {
-  return conditionObj ? JSON.parse(JSON.stringify(conditionObj)) : null;
-}
-function _turnOffGuardConditions(a, parentConditions = []) {
-  return [
-    ...(parentConditions || []).map(_cloneHACondition).filter(Boolean),
-    ..._automationActionConditions(a).map(_cloneHACondition).filter(Boolean),
-  ];
-}
 function _pushDynamicTurnOff(seq, a, actionObj, sourceClearSources = []) {
   const clearMode = String(a?.clear_mode || 'none');
   const offAction = _turnOffActionFor(actionObj);
@@ -3823,13 +3813,12 @@ function _pushDynamicTurnOff(seq, a, actionObj, sourceClearSources = []) {
     seq.push(_withContinueOnError(offAction));
   }
 }
-function buildAutomationActionBranch(a, actionObj, sourceClearSources = []) {
+function buildAutomationActionBranch(a, actionObj, sourceClearSources = [], auto = null) {
   const seq = [];
   const startDelay = _autoDuration(a?.trigger_for);
   if (startDelay) seq.push({ delay: startDelay });
   seq.push(_withContinueOnError(actionObj));
-  const activeMaintain = _activeMaintainRepeat(a, actionObj, sourceClearSources);
-  if (activeMaintain) seq.push(activeMaintain);
+  if (_actionNeedsLifecycleEvent(a, actionObj)) seq.push(_actionLifecycleEventAction(auto, a));
   _pushDynamicTurnOff(seq, a, actionObj, sourceClearSources);
   const conditions = _automationActionConditions(a);
   if (conditions.length) return { choose: [{ conditions, sequence: seq }] };
@@ -3926,6 +3915,35 @@ function _maintainEnabledForAction(a) {
   const clearMode = String(a?.clear_mode || 'none');
   return (a?.maintain_state === true) || (a?.maintain_state === undefined && clearMode === 'source_clears');
 }
+function _actionLifecycleEventData(auto, a) {
+  return {
+    ow_id: String(auto?.id || ''),
+    action_id: String(a?.id || ''),
+  };
+}
+function _actionLifecycleEventTrigger(auto, a) {
+  return {
+    trigger: 'event',
+    event_type: 'ha_overwatch_action_started',
+    event_data: _actionLifecycleEventData(auto, a),
+    id: `action_started_${a?.id || 'action'}`,
+  };
+}
+function _actionLifecycleEventAction(auto, a) {
+  return {
+    event: 'ha_overwatch_action_started',
+    event_data: {
+      ..._actionLifecycleEventData(auto, a),
+      ow_name: String(auto?.name || ''),
+      action_type: String(a?.type || ''),
+      clear_mode: String(a?.clear_mode || 'none'),
+    },
+  };
+}
+function _actionNeedsLifecycleEvent(a, actionObj) {
+  const clearMode = String(a?.clear_mode || 'none');
+  return !!_turnOffActionFor(actionObj) && (clearMode === 'source_clears' || clearMode === 'conditions');
+}
 function _actionSupportsMaintain(actionObj) {
   const action = String(actionObj?.action || actionObj?.service || '');
   const [domain, service] = action.split('.');
@@ -3977,8 +3995,31 @@ function _durationObject(value) { const s = _autoDuration(value) || '00:00:00'; 
 function _sourceClearSourcesFromTriggers(triggers = []) { const out = [], seen = new Set(); (triggers || []).forEach(t => { if (!t || (t.trigger || t.platform) !== 'state') return; const activeState = String(t.to || 'on'); _flattenEntityIds(t.entity_id).forEach(entityId => { const key = `${entityId}::${activeState}`; if (seen.has(key)) return; seen.add(key); out.push({ entity_id: entityId, active_state: activeState }); }); }); return out; }
 function _canUseSimpleStateClearTrigger(sourceClearSources = []) { return sourceClearSources.length === 1 && String(sourceClearSources[0]?.active_state || 'on') === 'on'; }
 function _clearTriggerIdForAction(a) { return `clear_${a?.id || 'action'}`; }
-function _offTriggerForAction(a, sourceClearSources = []) { const clearMode = String(a?.clear_mode || 'none'); if (clearMode !== 'source_clears' && clearMode !== 'conditions') return null; const id = _clearTriggerIdForAction(a); const clearFor = _durationObject(a?.clear_for); if (clearMode === 'source_clears' && _canUseSimpleStateClearTrigger(sourceClearSources)) { const trig = { trigger:'state', entity_id:[sourceClearSources[0].entity_id], from:sourceClearSources[0].active_state, to:'off', id }; if (!_maintainEnabledForAction(a)) trig.for = clearFor; return trig; } { const trig = { trigger:'template', value_template: clearMode === 'source_clears' ? _sourceClearTemplate(sourceClearSources) : _clearTemplateForAction(a, sourceClearSources), id }; if (!_maintainEnabledForAction(a)) trig.for = clearFor; return trig; } }
-function _turnOffChooseBranchForAction(a, actionObj, sourceClearSources = [], parentConditions = []) { const clearMode = String(a?.clear_mode || 'none'); if (clearMode !== 'source_clears' && clearMode !== 'conditions') return null; const offAction = _turnOffActionFor(actionObj); if (!offAction) return null; const clearId = _clearTriggerIdForAction(a); return { branch:{ conditions:[{ condition:'trigger', id:clearId }, ..._turnOffGuardConditions(a, parentConditions)], sequence:[..._cooldownMaintainSequence(a, actionObj, sourceClearSources), { condition:'template', value_template:_clearTemplateForAction(a, sourceClearSources) }, ..._turnOffGuardConditions(a, parentConditions), _withContinueOnError(offAction)] } }; }
+function _offTriggerForAction(a, sourceClearSources = [], auto = null) {
+  const clearMode = String(a?.clear_mode || 'none');
+  if (clearMode !== 'source_clears' && clearMode !== 'conditions') return null;
+  return _actionLifecycleEventTrigger(auto, a);
+}
+function _turnOffChooseBranchForAction(a, actionObj, sourceClearSources = []) {
+  const clearMode = String(a?.clear_mode || 'none');
+  if (clearMode !== 'source_clears' && clearMode !== 'conditions') return null;
+  const offAction = _turnOffActionFor(actionObj);
+  if (!offAction) return null;
+  const triggerId = `action_started_${a?.id || 'action'}`;
+  const sequence = [];
+
+  if (_maintainEnabledForAction(a) && _actionSupportsMaintain(actionObj)) {
+    sequence.push(..._cooldownMaintainSequence(a, actionObj, sourceClearSources));
+  } else {
+    sequence.push({ wait_template: _clearTemplateForAction(a, sourceClearSources), continue_on_timeout: false });
+    const clearFor = _autoDuration(a?.clear_for);
+    if (clearFor) sequence.push({ delay: clearFor });
+  }
+
+  sequence.push({ condition:'template', value_template:_clearTemplateForAction(a, sourceClearSources) });
+  sequence.push(_withContinueOnError(offAction));
+  return { branch:{ conditions:[{ condition:'trigger', id:triggerId }], sequence } };
+}
 function _alarmByAutomationId(id) { const s = String(id || ''); return loadAlarms().find(a => String(a.id) === s || String(a.raw_id || '') === s || nameSlug(a.name) === s); }
 function _alarmSwitchForAutomationId(id) { const a = _alarmByAutomationId(id); return a ? alarmSwitchEntityIds(a)[0] : `switch.overwatch_alarm_${nameSlug(id)}`; }
 function _alarmTriggeredForAutomationId(id) { const a = _alarmByAutomationId(id); const slug = nameSlug(a?.name || id); return [`binary_sensor.overwatch_alarm_${slug}_triggered_armed`, `binary_sensor.overwatch_alarm_${slug}_triggered_disarmed`]; }
@@ -3990,7 +4031,7 @@ function _zoneIdsForAutoTriggerScope(t, zoneList, groupList, floorList) { const 
 function _filteredZoneSensorEntityIdsForTrigger(t, zoneList, groupList, floorList) { const enabled = new Set(_autoEnabledFilterTypes(t)); if (!enabled.size) return []; const out = new Set(); _zoneIdsForAutoTriggerScope(t, zoneList, groupList, floorList).forEach(zid => { const z = zoneList.find(x => x.id === zid); (z?.sensors || []).forEach(entityId => { if (!entityId || _serverEntityHidden(entityId)) return; const st = serverHaStates[entityId]; const type = classifyAlarmTriggerType(entityId, st); if (type && enabled.has(type)) out.add(entityId); }); }); return [...out]; }
 function _automationZoneArmEntities(c, zoneList, groupList, floorList) { const ids = []; const zoneById = id => zoneList.find(z => z.id === id); const zoneSlugByIdLocal = id => { const z = zoneById(id); return z ? (nameSlug(z.name) || z.id) : nameSlug(id); }; const groupSlugByIdLocal = id => { const g = groupList.find(g => g.id === id); return g ? (nameSlug(g.name) || g.id) : nameSlug(id); }; (c.floor_ids || []).forEach(fid => ids.push(`switch.overwatch_zone_floor_${fid}`)); (c.group_ids || []).forEach(gid => ids.push(`switch.overwatch_zone_group_${groupSlugByIdLocal(gid)}`)); (c.zone_ids || []).forEach(zid => ids.push(`switch.overwatch_zone_${zoneSlugByIdLocal(zid)}`)); return [...new Set(ids.filter(Boolean))]; }
 function _alarmConditionTemplate(alarmIds, state) { const ids = [...new Set((alarmIds || []).filter(Boolean))]; const trigIds = ids.flatMap(_alarmTriggeredForAutomationId); const switchIds = ids.map(_alarmSwitchForAutomationId); const j = v => String(v || '').replace(/'/g,"\\'"); if (state === 'enabled') return `{{ ${switchIds.map(e => `is_state('${j(e)}','on')`).join(' and ') || 'false'} }}`; if (state === 'disabled') return `{{ ${switchIds.map(e => `is_state('${j(e)}','off')`).join(' and ') || 'false'} }}`; if (state === 'triggered') return `{{ ${trigIds.map(e => `is_state('${j(e)}','on')`).join(' or ') || 'false'} }}`; return `{{ ${trigIds.map(e => `not is_state('${j(e)}','on')`).join(' and ') || 'false'} }}`; }
-function buildHAAutomationTurnOff(auto, allZones, allGroups, mainAutomation = null) { const main = mainAutomation || buildHAAutomation(auto, allZones, allGroups); const parentConditions = main.conditions || main.condition || []; const sourceClearSources = _sourceClearSourcesFromTriggers(main.triggers || main.trigger || []); if (!sourceClearSources.length) return null; const zoneList = allZones || [], groupList = allGroups || [], floorList = loadFloors(); const uniq = ids => [...new Set((ids || []).filter(Boolean))]; const targetFor = ids => ({ entity_id: uniq(ids) }); const triggers = [], choices = [], seenTriggerIds = new Set(); function addTurnOff(a, actionObj) { const trig = _offTriggerForAction(a, sourceClearSources); const branchWrap = _turnOffChooseBranchForAction(a, actionObj, sourceClearSources, parentConditions); if (!trig || !branchWrap) return; if (!seenTriggerIds.has(trig.id)) { seenTriggerIds.add(trig.id); triggers.push(trig); } choices.push(branchWrap.branch); } for (const a of (auto.actions || [])) { if (a.type === 'siren') { const ids = uniq([..._resolveAutomationScopedEntityIds(a,'sirens',zoneList,groupList,floorList), ..._pruneZoneStoredEntityIds(a,'sirens',zoneList,groupList,floorList), ...(a.entity_ids||[]), ...(a.entity_ids_extra||[])]); if (ids.length) addTurnOff(a,{action:`siren.${a.service||'turn_on'}`,target:targetFor(ids)}); } else if (a.type === 'light') { const ids = uniq([..._resolveAutomationScopedEntityIds(a,'lights',zoneList,groupList,floorList), ..._pruneZoneStoredEntityIds(a,'lights',zoneList,groupList,floorList), ...(a.entity_ids_other||[]), ...(a.entity_ids||[])]); if (ids.length) addTurnOff(a,{action:`light.${a.service||'turn_on'}`,target:targetFor(ids)}); } else if (a.type === 'camera_view') { const ids = uniq([..._resolveAutomationScopedEntityIds(a,'cameras',zoneList,groupList,floorList), ..._pruneZoneStoredEntityIds(a,'cameras',zoneList,groupList,floorList), ..._pruneKnownVisibleEntityIds(a.entity_ids)]); if (ids.length) addTurnOff(a,{action:`switch.${a.service||'turn_on'}`,target:targetFor(ids)}); } else if (a.type === 'entity' && a.entity_id) { const domain = a.entity_id.split('.')[0]; addTurnOff(a,{action:`${domain}.${a.service||'turn_on'}`,target:{entity_id:[a.entity_id]}}); } else if (a.type === 'arm') { const ids = uniq(a.entity_ids||[]); if (ids.length) addTurnOff(a,{action:`switch.${a.service||'turn_on'}`,target:targetFor(ids)}); } } if (!triggers.length || !choices.length) return null; return { id:_automationTurnOffId(auto), alias:`HA-Overwatch — ${auto.name} - Turn OFF`, description:'Created by HA-Overwatch', variables:{ ow_id:_automationTurnOffId(auto), ow_name:`${auto.name} - Turn OFF`, ow_draft:auto, ow_cleanup:true, ow_child_type:'turn_off', ow_parent_automation_id:auto.id }, mode:'restart', triggers, conditions:[], actions:[{choose:choices}] }; }
+function buildHAAutomationTurnOff(auto, allZones, allGroups, mainAutomation = null) { const main = mainAutomation || buildHAAutomation(auto, allZones, allGroups); const sourceClearSources = _sourceClearSourcesFromTriggers(main.triggers || main.trigger || []); if (!sourceClearSources.length) return null; const zoneList = allZones || [], groupList = allGroups || [], floorList = loadFloors(); const uniq = ids => [...new Set((ids || []).filter(Boolean))]; const targetFor = ids => ({ entity_id: uniq(ids) }); const triggers = [], choices = [], seenTriggerIds = new Set(); function addTurnOff(a, actionObj) { const trig = _offTriggerForAction(a, sourceClearSources, auto); const branchWrap = _turnOffChooseBranchForAction(a, actionObj, sourceClearSources); if (!trig || !branchWrap) return; if (!seenTriggerIds.has(trig.id)) { seenTriggerIds.add(trig.id); triggers.push(trig); } choices.push(branchWrap.branch); } for (const a of (auto.actions || [])) { if (a.type === 'siren') { const ids = uniq([..._resolveAutomationScopedEntityIds(a,'sirens',zoneList,groupList,floorList), ..._pruneZoneStoredEntityIds(a,'sirens',zoneList,groupList,floorList), ...(a.entity_ids||[]), ...(a.entity_ids_extra||[])]); if (ids.length) addTurnOff(a,{action:`siren.${a.service||'turn_on'}`,target:targetFor(ids)}); } else if (a.type === 'light') { const ids = uniq([..._resolveAutomationScopedEntityIds(a,'lights',zoneList,groupList,floorList), ..._pruneZoneStoredEntityIds(a,'lights',zoneList,groupList,floorList), ...(a.entity_ids_other||[]), ...(a.entity_ids||[])]); if (ids.length) addTurnOff(a,{action:`light.${a.service||'turn_on'}`,target:targetFor(ids)}); } else if (a.type === 'camera_view') { const ids = uniq([..._resolveAutomationScopedEntityIds(a,'cameras',zoneList,groupList,floorList), ..._pruneZoneStoredEntityIds(a,'cameras',zoneList,groupList,floorList), ..._pruneKnownVisibleEntityIds(a.entity_ids)]); if (ids.length) addTurnOff(a,{action:`switch.${a.service||'turn_on'}`,target:targetFor(ids)}); } else if (a.type === 'entity' && a.entity_id) { const domain = a.entity_id.split('.')[0]; addTurnOff(a,{action:`${domain}.${a.service||'turn_on'}`,target:{entity_id:[a.entity_id]}}); } else if (a.type === 'arm') { const ids = uniq(a.entity_ids||[]); if (ids.length) addTurnOff(a,{action:`switch.${a.service||'turn_on'}`,target:targetFor(ids)}); } } if (!triggers.length || !choices.length) return null; return { id:_automationTurnOffId(auto), alias:`HA-Overwatch — ${auto.name} - Turn OFF`, description:'Created by HA-Overwatch', variables:{ ow_id:_automationTurnOffId(auto), ow_name:`${auto.name} - Turn OFF`, ow_draft:auto, ow_cleanup:true, ow_child_type:'turn_off', ow_parent_automation_id:auto.id }, mode:'restart', triggers, conditions:[], actions:[{choose:choices}] }; }
 function buildHAAutomationSet(auto, allZones, allGroups) { const cleanAuto = _sanitizeManagedAutomationDraft(auto, allZones || [], allGroups || []); const main = buildHAAutomation(cleanAuto, allZones, allGroups); const turnOff = buildHAAutomationTurnOff(cleanAuto, allZones, allGroups, main); return turnOff ? [main, turnOff] : [main]; }
 
 /* ── Build HA automation config from OW draft ─────────────── */
@@ -4130,7 +4171,7 @@ function buildHAAutomation(auto, allZones, allGroups) {
     return { entity_id: u.length === 1 ? u[0] : u };
   }
   function addActionBranch(a, actionObj) {
-    actionBranches.push(buildAutomationActionBranch(a, actionObj, sourceClearSources));
+    actionBranches.push(buildAutomationActionBranch(a, actionObj, sourceClearSources, auto));
   }
 
   for (const a of (auto.actions || [])) {
