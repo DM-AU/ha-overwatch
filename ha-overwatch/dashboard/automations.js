@@ -1,5 +1,5 @@
 /* ================================================================
- * HA-Overwatch — automations.js  v0.05.35.37
+ * HA-Overwatch — automations.js  v0.05.35.42
  * Admin-only Automation Editor.
  * HA is source of truth — reads/writes directly via server proxy.
  * ================================================================ */
@@ -43,6 +43,9 @@ function ensureZoneTriggerFilters(t) { if (!t || t.type !== 'zone') return null;
 function triggerFiltersChangedFromDefault(t) { const f = ensureZoneTriggerFilters(t); return !!f && TRIGGER_FILTER_KEYS.some(k => f[k] !== true); }
 function triggerFiltersSummary(t) { const f = ensureZoneTriggerFilters(t); if (!f) return ''; const enabled = TRIGGER_FILTER_KEYS.filter(k => f[k]); if (!enabled.length) return 'No trigger filters enabled — this zone event will never trigger.'; if (enabled.length === TRIGGER_FILTER_KEYS.length) return 'All trigger types'; return enabled.map(k => TRIGGER_FILTER_LABELS[k] || k).join(', '); }
 function triggerFiltersHtml(t) { const f = ensureZoneTriggerFilters(t); const any = TRIGGER_FILTER_KEYS.some(k => f[k]); return `<div style="margin-bottom:10px;"><label style="${labelStyle}">Trigger Filters</label><div style="font-size:11px;color:#555;margin-bottom:6px;">Zone event will only trigger when the triggering entity type matches a checked filter. If none are selected, it will never trigger.</div><div id="trig-filters-${escH(t.id)}" style="display:flex;flex-wrap:wrap;gap:10px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.07);border-radius:8px;padding:8px 10px;">${TRIGGER_FILTER_KEYS.map(k => `<label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#ddd;"><input type="checkbox" data-trigger-filter="${escH(k)}" ${f[k] ? 'checked' : ''} style="accent-color:#0a84ff;">${escH(TRIGGER_FILTER_LABELS[k] || k)}</label>`).join('')}</div><div data-trigger-filter-warning="${escH(t.id)}" style="display:${any ? 'none' : ''};margin-top:7px;padding:7px 9px;border-radius:7px;background:rgba(255,59,48,0.10);border:1px solid rgba(255,59,48,0.22);color:#ff9d9a;font-size:11px;">⚠ No trigger filters are enabled. This zone event will never trigger until at least one filter is selected.</div></div>`; }
+
+function ensureActionTriggerFilters(a) { if (!a || typeof a !== 'object') return null; a.trigger_filters = normaliseTriggerFilters(a.trigger_filters || a.filters || null); return a.trigger_filters; }
+function actionTriggerFiltersHtml(a) { const f = ensureActionTriggerFilters(a); const any = TRIGGER_FILTER_KEYS.some(k => f[k]); return `<div style="margin-top:8px;margin-bottom:8px;border-top:1px solid rgba(255,255,255,0.06);padding-top:8px;"><label style="${labelStyle}">Only for trigger type</label><div style="font-size:11px;color:#555;margin-bottom:6px;">This action only runs when the entity that triggered the automation matches a checked type.</div><div id="act-trig-filters-${escH(a.id)}" style="display:flex;flex-wrap:wrap;gap:10px;background:rgba(255,255,255,0.025);border:1px solid rgba(255,255,255,0.07);border-radius:8px;padding:8px 10px;">${TRIGGER_FILTER_KEYS.map(k => `<label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#ddd;"><input type="checkbox" data-action-trigger-filter="${escH(k)}" ${f[k] ? 'checked' : ''} style="accent-color:#0a84ff;">${escH(TRIGGER_FILTER_LABELS[k] || k)}</label>`).join('')}</div><div data-action-trigger-filter-warning="${escH(a.id)}" style="display:${any ? 'none' : ''};margin-top:7px;padding:7px 9px;border-radius:7px;background:rgba(255,59,48,0.10);border:1px solid rgba(255,59,48,0.22);color:#ff9d9a;font-size:11px;">⚠ No trigger types are enabled. This action will never run.</div></div>`; }
 function alarmSlug(a) { return nameSlug(a?.name || a?.id || 'alarm'); }
 function alarmOptions() { return (_alarms || []).map(a => ({ entity_id:a.id, name:a.name || a.id, state:'' })).sort((a,b)=>(a.name||a.entity_id).localeCompare(b.name||b.entity_id,undefined,{sensitivity:'base',numeric:true})); }
 function conditionCanTurnOffAction(a) { if (!a) return false; if (['light','siren','camera_view'].includes(a.type)) return true; if (a.type === 'entity') { const domain = String(a.entity_id || '').split('.')[0]; return ['light','siren','switch'].includes(domain); } return false; }
@@ -55,10 +58,6 @@ function automationErrorsFor(auto) {
 function formatErrorTime(value) {
   if (!value) return '';
   try { return new Date(value).toLocaleString(); } catch { return String(value); }
-}
-
-function entityConditionOperator(c) {
-  return String(c?.operator || c?.match || 'is') === 'is_not' ? 'is_not' : 'is';
 }
 
 /* ── Zone / Group status from haStates ─────────────────────── */
@@ -360,6 +359,7 @@ function parseHAAutomation(ha) {
   if (ha?.variables?.ow_draft && typeof ha.variables.ow_draft === 'object') {
     const restored = JSON.parse(JSON.stringify(ha.variables.ow_draft));
     (restored.triggers || []).forEach(t => { if (t.type === 'zone') ensureZoneTriggerFilters(t); });
+    (restored.actions || []).forEach(a => ensureActionTriggerFilters(a));
     restored._ha_parse_warnings = [];
     return { draft: restored, warnings: [] };
   }
@@ -495,7 +495,7 @@ function addTrigger(type) {
 function addCondition(type) {
   const defaults = {
     time:   {time_mode:'manual',after:'00:00',before:'23:59',time_entity:''},
-    entity: {entity_id:'',state:'on',operator:'is'},
+    entity: {entity_id:'',state:'on'},
     zone_arm: {zone_ids:[],group_ids:[],state:'armed'},
     alarm: {alarm_ids:[],state:'triggered'},
     person: {entity_ids:[],state:'home'},
@@ -518,8 +518,10 @@ function normaliseActionControls(a) {
   if (!Array.isArray(a.floor_ids)) a.floor_ids = [];
   if (!Array.isArray(a.group_ids)) a.group_ids = [];
   if (!Array.isArray(a.zone_ids)) a.zone_ids = [];
+  if (!a.trigger_filters) a.trigger_filters = defaultTriggerFilters();
+  else a.trigger_filters = normaliseTriggerFilters(a.trigger_filters);
   delete a.maintain_on;
-  delete a.maintain_interval;
+  if (!a.maintain_interval) a.maintain_interval = '00:00:20';
   return a;
 }
 function actionEntityCount(a) {
@@ -572,6 +574,7 @@ function actionCommonControlsHtml(a) {
     <div id="act-cond-entity-${a.id}" style="display:${a.condition_mode==='entity'?'block':'none'};margin-bottom:8px;">
       <label style="${labelStyle}">Binary sensor</label>${entityAutocomplete(`act-cond-entity-ac-${a.id}`, a.condition_entity || '', 'binary_sensor.*', null, ['binary_sensor'])}
     </div>
+    ${actionTriggerFiltersHtml(a)}
   </div>`;
 }
 function actionTurnOffControlsHtml(a) {
@@ -825,6 +828,7 @@ function renderEditor() {
   const isNew = _editing === 'new';
   if (!_draft.run_mode) _draft.run_mode = 'auto';
   (_draft.triggers || []).forEach(t => { if (t.type === 'zone') ensureZoneTriggerFilters(t); });
+  (_draft.actions || []).forEach(a => ensureActionTriggerFilters(a));
   const col = _collapsed;
 
   _panelEl.innerHTML = `
@@ -1493,13 +1497,9 @@ function conditionCard(c) {
         ${entityAutocomplete(`cond-time-entity-ac-${c.id}`,c.time_entity||'','sensor.* / input_datetime.* / schedule.*',null,['sensor','input_datetime','schedule'])}`}`;
   }
   if (c.type === 'entity') {
-    const op = entityConditionOperator(c);
     inner = `
       <div style="margin-bottom:10px;"><label style="${labelStyle}">Entity</label>${entityAutocomplete(`cond-entity-ac-${c.id}`,c.entity_id||'','Search any entity…')}</div>
-      <div style="display:grid;grid-template-columns:160px 1fr;gap:8px;">
-        <div><label style="${labelStyle}">Condition</label><select id="cond-op-${c.id}" style="${selectStyle}"><option value="is" ${op==='is'?'selected':''}>Is</option><option value="is_not" ${op==='is_not'?'selected':''}>Is not</option></select></div>
-        <div><label style="${labelStyle}">State</label><input id="cond-state-${c.id}" type="text" value="${escH(c.state||'on')}" placeholder="on / off / home / …" style="${inputStyle}"/></div>
-      </div>`;
+      <div><label style="${labelStyle}">Must be in state</label><input id="cond-state-${c.id}" type="text" value="${escH(c.state||'on')}" placeholder="on / off / home / …" style="${inputStyle}"/></div>`;
   }
   if (c.type === 'person') {
     const persons = entitiesByDomain('person');
@@ -1894,7 +1894,7 @@ function wireConditionFields(c) {
     if (c.time_mode!=='entity') { wireInput(`cond-after-${c.id}`,v=>c.after=v); wireInput(`cond-before-${c.id}`,v=>c.before=v); }
     else wireAutocomplete(`cond-time-entity-ac-${c.id}`,v=>c.time_entity=v);
   }
-  if (c.type==='entity') { wireAutocomplete(`cond-entity-ac-${c.id}`,v=>c.entity_id=v); wireSelect(`cond-op-${c.id}`,v=>{ c.operator=v; c.match=v; }); wireInput(`cond-state-${c.id}`,v=>c.state=v); }
+  if (c.type==='entity') { wireAutocomplete(`cond-entity-ac-${c.id}`,v=>c.entity_id=v); wireInput(`cond-state-${c.id}`,v=>c.state=v); }
   if (c.type==='person') {
     wireSearchableCheckbox(`cond-person-${c.id}`,ids=>c.entity_ids=ids);
     wireAutocomplete(`cond-person-ac-${c.id}`,v=>c.entity_ids=v?[v]:[]);
@@ -2099,6 +2099,8 @@ function wireActionFields(a) {
 
 function wireCommonActionFields(a) {
   normaliseActionControls(a);
+  const actionFilterBox = _panelEl?.querySelector(`#act-trig-filters-${CSS.escape(a.id)}`);
+  if (actionFilterBox) actionFilterBox.querySelectorAll('[data-action-trigger-filter]').forEach(cb => cb.onchange = () => { ensureActionTriggerFilters(a)[cb.dataset.actionTriggerFilter] = !!cb.checked; const warn = _panelEl?.querySelector(`[data-action-trigger-filter-warning="${CSS.escape(a.id)}"]`); const any = TRIGGER_FILTER_KEYS.some(k => ensureActionTriggerFilters(a)[k]); if (warn) warn.style.display = any ? 'none' : ''; });
   wireInput(`act-for-${a.id}`, v=>a.trigger_for=v || '00:00:00');
   wireSelect(`act-cond-mode-${a.id}`, v=>{
     a.condition_mode=v || 'always';
