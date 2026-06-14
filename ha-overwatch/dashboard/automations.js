@@ -1,5 +1,5 @@
 /* ================================================================
- * HA-Overwatch — automations.js  v0.05.35.32
+ * HA-Overwatch — automations.js  v0.05.35.35
  * Admin-only Automation Editor.
  * HA is source of truth — reads/writes directly via server proxy.
  * ================================================================ */
@@ -12,12 +12,13 @@ let _open           = false;
 let _automations    = [];        // [{draft, warnings, ha_id}]
 let _doorPins       = [];        // [{id, zone_id, sensor_entity, name, ...}]
 let _alarms         = [];        // HA-O alarm profiles for alarm triggers/conditions
+let _automationErrors = [];      // runtime/trace errors from /ow/automation-errors
 let _editing        = null;      // automation id or 'new'
 let _draft          = null;
 let _haEntities     = [];
 let _haServices     = {};        // domain -> [{name, description}]
 let _listSearch     = '';
-let _collapsed      = { triggers:false, conditions:false, actions:false };
+let _collapsed      = { diagnostics:true, triggers:false, conditions:false, actions:false };
 let _collapsedSteps = {};
 let _parseErrors    = [];        // list of {id, name, warnings} for sidebar badge
 
@@ -43,10 +44,18 @@ function triggerFiltersChangedFromDefault(t) { const f = ensureZoneTriggerFilter
 function triggerFiltersSummary(t) { const f = ensureZoneTriggerFilters(t); if (!f) return ''; const enabled = TRIGGER_FILTER_KEYS.filter(k => f[k]); if (!enabled.length) return 'No trigger filters enabled — this zone event will never trigger.'; if (enabled.length === TRIGGER_FILTER_KEYS.length) return 'All trigger types'; return enabled.map(k => TRIGGER_FILTER_LABELS[k] || k).join(', '); }
 function triggerFiltersHtml(t) { const f = ensureZoneTriggerFilters(t); const any = TRIGGER_FILTER_KEYS.some(k => f[k]); return `<div style="margin-bottom:10px;"><label style="${labelStyle}">Trigger Filters</label><div style="font-size:11px;color:#555;margin-bottom:6px;">Zone event will only trigger when the triggering entity type matches a checked filter. If none are selected, it will never trigger.</div><div id="trig-filters-${escH(t.id)}" style="display:flex;flex-wrap:wrap;gap:10px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.07);border-radius:8px;padding:8px 10px;">${TRIGGER_FILTER_KEYS.map(k => `<label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#ddd;"><input type="checkbox" data-trigger-filter="${escH(k)}" ${f[k] ? 'checked' : ''} style="accent-color:#0a84ff;">${escH(TRIGGER_FILTER_LABELS[k] || k)}</label>`).join('')}</div><div data-trigger-filter-warning="${escH(t.id)}" style="display:${any ? 'none' : ''};margin-top:7px;padding:7px 9px;border-radius:7px;background:rgba(255,59,48,0.10);border:1px solid rgba(255,59,48,0.22);color:#ff9d9a;font-size:11px;">⚠ No trigger filters are enabled. This zone event will never trigger until at least one filter is selected.</div></div>`; }
 function alarmSlug(a) { return nameSlug(a?.name || a?.id || 'alarm'); }
-function alarmSwitchEntity(a) { return `switch.overwatch_alarm_${alarmSlug(a)}`; }
-function alarmTriggeredEntities(a) { const s = alarmSlug(a); return [`binary_sensor.overwatch_alarm_${s}_triggered_armed`, `binary_sensor.overwatch_alarm_${s}_triggered_disarmed`]; }
 function alarmOptions() { return (_alarms || []).map(a => ({ entity_id:a.id, name:a.name || a.id, state:'' })).sort((a,b)=>(a.name||a.entity_id).localeCompare(b.name||b.entity_id,undefined,{sensitivity:'base',numeric:true})); }
 function conditionCanTurnOffAction(a) { if (!a) return false; if (['light','siren','camera_view'].includes(a.type)) return true; if (a.type === 'entity') { const domain = String(a.entity_id || '').split('.')[0]; return ['light','siren','switch'].includes(domain); } return false; }
+function automationErrorsFor(auto) {
+  const id = String(auto?.id || '');
+  const name = String(auto?.name || '');
+  return (_automationErrors || []).filter(e => e.ow_id === id || e.ow_name === name || e.ha_entity_id === id || String(e.alias || '') === name)
+    .sort((a,b)=>String(b.time||'').localeCompare(String(a.time||'')));
+}
+function formatErrorTime(value) {
+  if (!value) return '';
+  try { return new Date(value).toLocaleString(); } catch { return String(value); }
+}
 
 /* ── Zone / Group status from haStates ─────────────────────── */
 function zoneTriggered(zone) {
@@ -76,6 +85,18 @@ function groupArmed(group) {
 
 /* ── HA Entity / Service Discovery ─────────────────────────── */
 
+async function loadAutomationErrors(limit = 500) {
+  try {
+    const r = await fetch(apiPath(`ow/automation-errors?limit=${limit}`) + '&v=' + Date.now(), { cache:'no-store' });
+    const data = r.ok ? await r.json() : {};
+    _automationErrors = Array.isArray(data.entries) ? data.entries : [];
+  } catch { _automationErrors = []; }
+}
+async function scanAutomationErrors() {
+  try { await fetch(apiPath('ow/automation-errors/scan'), { method:'POST' }); }
+  catch(e) { console.warn('[OW-Auto] automation error scan:', e); }
+  await loadAutomationErrors();
+}
 async function loadAutomationAlarms() {
   try {
     const r = await fetch(apiPath('ow/alarms') + '?v=' + Date.now(), { cache:'no-store' });
@@ -437,7 +458,7 @@ function updateSidebarBadge() {
   const btn = document.getElementById('automationsBtn');
   if (!btn) return;
   const existing = btn.querySelector('.ow-auto-error-dot');
-  if (_parseErrors.length > 0) {
+  if ((_parseErrors.length + (_automationErrors||[]).length) > 0) {
     if (!existing) {
       const dot = document.createElement('span');
       dot.className = 'ow-auto-error-dot';
@@ -609,7 +630,7 @@ async function open() {
   if (!isAdmin()) return;
   _open=true; mountPanel();
   // Load from HA as source of truth
-  await Promise.all([loadFromHA(), loadHAEntities(), loadDoorPins(), loadAutomationAlarms()]);
+  await Promise.all([loadFromHA(), loadHAEntities(), loadDoorPins(), loadAutomationAlarms(), loadAutomationErrors()]);
   // Pre-fetch camera services
   loadHAServices('camera');
   document.getElementById('automationsBtn')?.classList.add('active');
@@ -660,7 +681,7 @@ function renderList() {
   _panelEl.querySelector('#owAutoCloseBtn').onclick=close;
   _panelEl.querySelector('#owAutoRefreshBtn').onclick=async()=>{
     const btn=_panelEl.querySelector('#owAutoRefreshBtn'); if(btn)btn.textContent='↻…';
-    await loadFromHA(); await loadHAEntities(); renderList();
+    await loadFromHA(); await loadHAEntities(); await loadAutomationErrors(); renderList();
   };
   const searchEl=_panelEl.querySelector('#owAutoListSearch');
   searchEl.oninput=()=>{_listSearch=searchEl.value;renderList();};
@@ -753,8 +774,7 @@ function automationDiagnosticsHtml(auto) {
   const triggerIds = automationTriggerEntityPreview(auto);
   const branches = (auto?.actions || []).map(a => actionSummary(a));
   const warnings = [];
-  if ((auto?.actions || []).some(a => String(a?.clear_mode || 'none') === 'source_clears')) warnings.push('Source-clear cooldowns use a paired Turn OFF automation, when the action domain supports a turn_off service.');
-  (auto?.triggers || []).filter(t => t.type === 'zone' && triggerFiltersChangedFromDefault(t)).forEach(t => warnings.push(`Zone event filters: ${triggerFiltersSummary(t)}`));
+  if ((auto?.actions || []).some(a => String(a?.clear_mode || 'none') === 'source_clears')) warnings.push('Source-clear cooldowns use restart mode so new trigger events reset the timer. Source-clear templates still follow the current generator behaviour.');
   return `<div style="background:rgba(255,255,255,0.025);border:1px solid rgba(255,255,255,0.07);border-radius:9px;padding:10px;margin-top:10px;">
     <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;"><div style="font-size:12px;font-weight:700;color:#ddd;">Generated behaviour preview</div><span style="font-size:10px;color:${mode==='restart'?'#ff9500':'#777'};border:1px solid rgba(255,255,255,0.09);border-radius:10px;padding:2px 7px;">mode: ${escH(mode)}</span></div>
     <div style="font-size:11px;color:#888;line-height:1.45;margin-bottom:8px;">${escH(automationModeReason(auto))}</div>
@@ -769,6 +789,33 @@ function automationRunModeHtml(auto) {
   return `<div style="background:rgba(255,255,255,0.025);border:1px solid rgba(255,255,255,0.07);border-radius:9px;padding:10px;margin-top:10px;"><div style="display:grid;grid-template-columns:220px 1fr;gap:10px;align-items:end;"><div><label style="${labelStyle}">Run mode</label><select id="owAutoRunMode" style="${selectStyle}"><option value="auto" ${selected==='auto'?'selected':''}>Auto recommended</option><option value="single" ${selected==='single'?'selected':''}>Single</option><option value="restart" ${selected==='restart'?'selected':''}>Restart</option><option value="queued" ${selected==='queued'?'selected':''}>Queued</option><option value="parallel" ${selected==='parallel'?'selected':''}>Parallel</option></select></div><div style="font-size:11px;color:#999;line-height:1.4;padding-bottom:7px;">Effective mode: <b style="color:${effective==='restart'?'#ff9500':'#ccc'};">${escH(effective)}</b> — ${escH(automationModeReason(auto))}</div></div></div>`;
 }
 
+
+function automationDiagnosticsCardHtml(auto) {
+  const collapsed = _collapsed.diagnostics !== false;
+  const mode = automationEffectiveMode(auto);
+  const triggerIds = automationTriggerEntityPreview(auto);
+  const branches = (auto?.actions || []).map(a => actionSummary(a));
+  const errors = automationErrorsFor(auto);
+  const warnings = [];
+  if ((auto?.actions || []).some(a => String(a?.clear_mode || 'none') === 'source_clears')) warnings.push('Source-clear cooldowns use a paired Turn OFF automation, when the action domain supports a turn_off service.');
+  (auto?.triggers || []).filter(t => t.type === 'zone' && triggerFiltersChangedFromDefault(t)).forEach(t => warnings.push(`Zone event filters: ${triggerFiltersSummary(t)}`));
+  const border = errors.length ? 'rgba(255,149,0,0.35)' : 'rgba(255,255,255,0.07)';
+  const summary = `mode: ${mode} · ${triggerIds.length} trigger ${triggerIds.length===1?'entity':'entities'} · ${branches.length} action ${branches.length===1?'branch':'branches'} · ${errors.length} error${errors.length===1?'':'s'}`;
+  const latest = errors[0];
+  const errorHtml = errors.length ? `<div style="border:1px solid rgba(255,149,0,0.25);background:rgba(255,149,0,0.08);border-radius:8px;padding:8px 10px;color:#ffd49a;font-size:11px;line-height:1.45;"><b>Latest error:</b> ${escH(formatErrorTime(latest.time))}<br>${latest.service ? `<b>Service:</b> ${escH(latest.service)}<br>` : ''}${latest.entity_id ? `<b>Entity:</b> ${escH(latest.entity_id)}<br>` : ''}<b>Message:</b> ${escH(latest.message || latest.status || 'Automation trace reported a failed run.')}${errors.length>1 ? `<br><span style="color:#cc9b5c;">${errors.length-1} older error(s) hidden.</span>` : ''}</div>` : `<div style="font-size:11px;color:#666;">No recent runtime errors found.</div>`;
+  return `<div style="background:rgba(255,255,255,0.025);border:1px solid ${border};border-radius:9px;padding:10px;margin-top:10px;">
+    <button id="owDiagToggle" style="width:100%;display:flex;align-items:center;gap:8px;background:none;border:0;color:${errors.length?'#ffcc66':'#ddd'};cursor:pointer;padding:0;text-align:left;">
+      <span style="font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;">${collapsed?'▶':'▼'} Diagnostics</span>
+      <span style="font-size:10px;color:${errors.length?'#ffcc66':'#777'};margin-left:auto;">${escH(summary)}</span>
+    </button>
+    ${collapsed ? '' : `<div style="margin-top:10px;display:grid;gap:10px;">
+      <div style="display:grid;grid-template-columns:220px 1fr;gap:10px;align-items:end;"><div><label style="${labelStyle}">Run mode</label><select id="owAutoRunMode" style="${selectStyle}"><option value="auto" ${String(auto?.run_mode||'auto')==='auto'?'selected':''}>Auto recommended</option><option value="single" ${auto?.run_mode==='single'?'selected':''}>Single</option><option value="restart" ${auto?.run_mode==='restart'?'selected':''}>Restart</option><option value="queued" ${auto?.run_mode==='queued'?'selected':''}>Queued</option><option value="parallel" ${auto?.run_mode==='parallel'?'selected':''}>Parallel</option></select></div><div style="font-size:11px;color:#999;line-height:1.4;padding-bottom:7px;">Effective mode: <b style="color:${mode==='restart'?'#ff9500':'#ccc'};">${escH(mode)}</b> — ${escH(automationModeReason(auto))}</div></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;"><div><div style="${labelStyle}">Trigger entities</div><div style="font-size:11px;color:#aaa;line-height:1.45;">${triggerIds.length ? triggerIds.map(escH).join('<br>') : '<span style="color:#555;">None resolved yet</span>'}</div></div><div><div style="${labelStyle}">Action branches</div><div style="font-size:11px;color:#aaa;line-height:1.45;">${branches.length ? branches.map(escH).join('<br>') : '<span style="color:#555;">No actions yet</span>'}</div></div></div>
+      ${warnings.length ? `<div style="font-size:10px;color:#ffcc66;line-height:1.4;">${warnings.map(escH).join('<br>')}</div>` : ''}
+      <div><div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;"><div style="font-size:12px;font-weight:700;color:#ddd;">Runtime errors / trace failures</div><button id="owAutoScanErrorsBtn" style="${btnStyle('rgba(255,255,255,0.06)','rgba(255,255,255,0.04)',true)}padding:4px 9px;font-size:11px;margin-left:auto;">Scan traces now</button></div>${errorHtml}</div>
+    </div>`}
+  </div>`;
+}
 function renderEditor() {
   if (!_panelEl || !_draft) return;
   const isNew = _editing === 'new';
@@ -792,8 +839,7 @@ function renderEditor() {
         <input id="owAutoName" type="text" placeholder='e.g. "Alert on front door trigger"' value="${escH(_draft.name)}"
           style="${inputStyle}font-size:13px;padding:9px 12px;"/>
         <div style="font-size:11px;color:#444;margin-top:5px;">Saved as: <span style="color:#555;">HA-Overwatch — <span id="owAutoNamePreview">${escH(_draft.name||'…')}</span></span></div>
-        ${automationRunModeHtml(_draft)}
-        ${automationDiagnosticsHtml(_draft)}
+        ${automationDiagnosticsCardHtml(_draft)}
       </div>
       ${editorSection('⚡','Triggers','When this happens…','triggers',col.triggers,
         _draft.triggers.map(t=>triggerCard(t)).join('')||emptyStepMsg('No triggers yet.'),
@@ -830,6 +876,10 @@ function renderEditor() {
   const nameEl=_panelEl.querySelector('#owAutoName');
   const previewEl=_panelEl.querySelector('#owAutoNamePreview');
   nameEl.oninput=()=>{_draft.name=nameEl.value;if(previewEl)previewEl.textContent=nameEl.value||'…';};
+  const diagToggle=_panelEl.querySelector('#owDiagToggle');
+  if (diagToggle) diagToggle.onclick=()=>{ _collapsed.diagnostics = !(_collapsed.diagnostics !== false); renderEditorKeepScroll(); };
+  const scanErrorsBtn=_panelEl.querySelector('#owAutoScanErrorsBtn');
+  if (scanErrorsBtn) scanErrorsBtn.onclick=async()=>{ scanErrorsBtn.textContent='Scanning…'; scanErrorsBtn.disabled=true; await scanAutomationErrors(); renderEditorKeepScroll(); };
   const runModeEl=_panelEl.querySelector('#owAutoRunMode');
   if (runModeEl) runModeEl.onchange=()=>{ _draft.run_mode = runModeEl.value || 'auto'; renderEditorKeepScroll(); };
 
