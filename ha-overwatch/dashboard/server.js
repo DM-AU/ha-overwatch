@@ -1,4 +1,4 @@
-// HA-Overwatch 0.05.35.32-automation-alarm-zone-conditions: alarm triggers/conditions, zone arm conditions, trigger filter placement, and cleanup safeguards.
+// HA-Overwatch 0.05.35.33-classifier-priority: person/animal/vehicle semantic detection now overrides generic HA motion/presence device_class.
 /* ============================================================
  * HA-Overwatch — server.js
  *
@@ -474,21 +474,30 @@ function classifyAlarmTriggerType(entityId, st) {
   const dc = String(st?.attributes?.device_class || "").toLowerCase();
   const combined = `${id} ${friendly}`;
 
-  if (id.startsWith("person.")) return "person";
-  if (["door", "garage_door", "gate", "opening"].includes(dc)) return "door";
-  if (dc === "window") return "window";
-  if (dc === "smoke") return "smoke";
-  if (["gas", "carbon_monoxide", "co"].includes(dc)) return "gas";
-  if (["motion", "occupancy", "presence"].includes(dc)) return "motion";
+  const has = pattern => pattern.test(combined);
 
-  if (combined.includes("vehicle") || combined.includes("car")) return "vehicle";
-  if (combined.includes("person") || combined.includes("human")) return "person";
-  if (combined.includes("animal") || combined.includes("dog") || combined.includes("cat")) return "animal";
-  if (combined.includes("door")) return "door";
-  if (combined.includes("window")) return "window";
-  if (combined.includes("smoke")) return "smoke";
-  if (combined.includes("gas") || combined.includes("carbon monoxide") || combined.includes("co ")) return "gas";
-  if (combined.includes("motion") || combined.includes("occupancy") || combined.includes("presence")) return "motion";
+  // Security/object-detection entities are often exposed by HA as generic
+  // device_class: motion. Specific semantic names must win over that generic
+  // class so filters like Person=true + Motion=false still include
+  // binary_sensor.entryway_person_detected.
+  if (id.startsWith("person.")) return "person";
+
+  // Highest priority life-safety classes. Prefer explicit device_class where HA
+  // provides it, but also catch common entity/friendly-name variants.
+  if (dc === "smoke" || has(/(^|[._\s-])smoke([._\s-]|$)/)) return "smoke";
+  if (["gas", "carbon_monoxide", "co"].includes(dc) || has(/carbon[._\s-]*monoxide|(^|[._\s-])co([._\s-]|$)|(^|[._\s-])gas([._\s-]|$)/)) return "gas";
+
+  // Specific object-detection classes must beat generic motion/presence.
+  if (has(/(^|[._\s-])(person|people|human|humans|face|faces)([._\s-]|$)/)) return "person";
+  if (has(/(^|[._\s-])(animal|animals|pet|pets|dog|dogs|cat|cats|bird|birds)([._\s-]|$)/)) return "animal";
+  if (has(/(^|[._\s-])(vehicle|vehicles|car|cars|truck|trucks|van|vans|ute|utes|bus|buses|motorbike|motorcycle|bike)([._\s-]|$)/)) return "vehicle";
+
+  // Access/opening classes.
+  if (["door", "garage_door", "gate", "opening"].includes(dc) || has(/(^|[._\s-])(door|garage_door|garage door|gate|opening)([._\s-]|$)/)) return "door";
+  if (dc === "window" || has(/(^|[._\s-])window([._\s-]|$)/)) return "window";
+
+  // Generic activity classes come last so they do not mask object detection.
+  if (["motion", "occupancy", "presence"].includes(dc) || has(/(^|[._\s-])(motion|occupancy|presence|any_presence|any presence)([._\s-]|$)/)) return "motion";
 
   return null;
 }
