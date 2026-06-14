@@ -1,5 +1,5 @@
 /* ================================================================
- * HA-Overwatch — automations.js  v0.05.35.43
+ * HA-Overwatch — automations.js  v0.05.35.44
  * Admin-only Automation Editor.
  * HA is source of truth — reads/writes directly via server proxy.
  * ================================================================ */
@@ -52,7 +52,8 @@ function automationErrorsFor(auto) {
   return (_automationErrors || []).filter(e => e.ow_id === id || e.ow_name === name || e.ha_entity_id === id || String(e.alias || '') === name)
     .sort((a,b)=>String(b.time||'').localeCompare(String(a.time||'')));
 }
-function errorTimestampValue(e) { return e?.time || e?.timestamp || e?.created_at || e?.seen_at || e?.last_seen || e?.scan_time || ''; }
+function isGoodDateValue(v) { if (!v || String(v)==='Invalid Date') return false; const d = new Date(v); return !Number.isNaN(d.getTime()); }
+function errorTimestampValue(e) { const vals = [e?.time,e?.timestamp,e?.created_at,e?.seen_at,e?.last_seen,e?.scan_time]; return vals.find(isGoodDateValue) || vals.find(v => v && String(v)!=='Invalid Date') || ''; }
 function formatErrorTime(value) { if (!value) return 'Unknown time'; const d = new Date(value); if (!Number.isNaN(d.getTime())) return d.toLocaleString(); return String(value || 'Unknown time'); }
 function unackAutomationErrorsFor(auto) { return automationErrorsFor(auto).filter(e => e.acknowledged !== true); }
 async function acknowledgeAutomationErrors(payload) { try { await fetch(apiPath('ow/automation-errors/ack'), { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload || {}) }); } catch(e) { console.warn('[OW-Auto] acknowledge automation errors:', e); } await loadAutomationErrors(); }
@@ -706,14 +707,10 @@ function renderList() {
 }
 
 function autoCard(a, parseErr, runtimeErrors = []) {
-  const enabled=a.enabled!==false;
-  const runtimeCount=runtimeErrors.length;
-  const latest=runtimeErrors[0];
-  const hasIssue=!!parseErr||runtimeCount>0;
+  const enabled=a.enabled!==false, runtimeCount=runtimeErrors.length, latest=runtimeErrors[0], hasIssue=!!parseErr||runtimeCount>0;
   const parts=[a.triggers?.length&&`${a.triggers.length} trigger${a.triggers.length>1?'s':''}`,a.conditions?.length&&`${a.conditions.length} condition${a.conditions.length>1?'s':''}`,a.actions?.length&&`${a.actions.length} action${a.actions.length>1?'s':''}`].filter(Boolean);
   const sub=parseErr?`⚠ ${escH(parseErr.warnings[0]||'Parse error')}`:runtimeCount?`⚠ ${runtimeCount} runtime error${runtimeCount===1?'':'s'} · last ${escH(formatErrorTime(errorTimestampValue(latest)))} · ${escH(latest?.message||latest?.status||'Trace failure')}`:(parts.join(' · ')||'Empty');
-  const issueColor=parseErr?'#ff6b6b':runtimeCount?'#ffcc66':'#555';
-  return `<div data-auto-edit="${escH(a.id)}" style="background:rgba(255,255,255,0.03);border:1px solid ${hasIssue?'rgba(255,149,0,0.35)':`rgba(255,255,255,${enabled?'0.08':'0.04'})`};border-radius:10px;padding:13px 15px;margin-bottom:7px;cursor:pointer;display:flex;align-items:center;gap:12px;opacity:${enabled?1:0.5};transition:background 0.12s;" onmouseenter="this.style.background='rgba(255,255,255,0.055)'" onmouseleave="this.style.background='rgba(255,255,255,0.03)'"><div style="width:30px;height:30px;border-radius:7px;flex-shrink:0;background:${hasIssue?'rgba(255,149,0,0.16)':enabled?'rgba(0,100,210,0.2)':'rgba(255,255,255,0.05)'};display:flex;align-items:center;justify-content:center;">${hasIssue?'<span style="font-size:14px;">⚠</span>':`<svg width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" stroke="${enabled?'#4db8ff':'#555'}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/></svg>`}</div><div style="flex:1;min-width:0;"><div style="font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escH(a.name||'Unnamed')}</div><div style="font-size:11px;color:${issueColor};margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${sub}</div></div><div style="display:flex;gap:5px;flex-shrink:0;"><button data-auto-tog="${escH(a.id)}" title="${enabled?'Disable in HA':'Enable in HA'}" style="background:${enabled?'rgba(52,199,89,0.18)':'rgba(255,255,255,0.06)'};border:1px solid ${enabled?'rgba(52,199,89,0.45)':'rgba(255,255,255,0.12)'};color:${enabled?'#34c759':'#999'};border-radius:6px;padding:3px 9px;font-size:10px;font-weight:700;cursor:pointer;">${enabled?'ON':'OFF'}</button><button data-auto-del="${escH(a.id)}" style="background:rgba(255,59,48,0.12);border:1px solid rgba(255,59,48,0.25);color:#ff453a;border-radius:6px;padding:3px 7px;font-size:11px;cursor:pointer;">🗑</button></div></div>`;
+  return `<div data-auto-edit="${escH(a.id)}" style="background:rgba(255,255,255,0.03);border:1px solid ${hasIssue?'rgba(255,149,0,0.35)':`rgba(255,255,255,${enabled?'0.08':'0.04'})`};border-radius:10px;padding:13px 15px;margin-bottom:7px;cursor:pointer;display:flex;align-items:center;gap:12px;opacity:${enabled?1:0.5};transition:background 0.12s;" onmouseenter="this.style.background='rgba(255,255,255,0.055)'" onmouseleave="this.style.background='rgba(255,255,255,0.03)'"><div style="width:30px;height:30px;border-radius:7px;flex-shrink:0;background:${hasIssue?'rgba(255,149,0,0.16)':enabled?'rgba(0,100,210,0.2)':'rgba(255,255,255,0.05)'};display:flex;align-items:center;justify-content:center;">${hasIssue?'<span style="font-size:14px;">⚠</span>':`<svg width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" stroke="${enabled?'#4db8ff':'#555'}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/></svg>`}</div><div style="flex:1;min-width:0;"><div style="font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escH(a.name||'Unnamed')}</div><div style="font-size:11px;color:${parseErr?'#ff6b6b':runtimeCount?'#ffcc66':'#555'};margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${sub}</div></div><div style="display:flex;gap:5px;flex-shrink:0;"><button data-auto-tog="${escH(a.id)}" title="${enabled?'Disable in HA':'Enable in HA'}" style="background:${enabled?'rgba(52,199,89,0.18)':'rgba(255,255,255,0.06)'};border:1px solid ${enabled?'rgba(52,199,89,0.45)':'rgba(255,255,255,0.12)'};color:${enabled?'#34c759':'#999'};border-radius:6px;padding:3px 9px;font-size:10px;font-weight:700;cursor:pointer;">${enabled?'ON':'OFF'}</button><button data-auto-del="${escH(a.id)}" style="background:rgba(255,59,48,0.12);border:1px solid rgba(255,59,48,0.25);color:#ff453a;border-radius:6px;padding:3px 7px;font-size:11px;cursor:pointer;">🗑</button></div></div>`;
 }
 
 function emptyState() {
