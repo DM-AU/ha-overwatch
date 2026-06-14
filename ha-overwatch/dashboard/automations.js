@@ -1,5 +1,5 @@
 /* ================================================================
- * HA-Overwatch — automations.js  v0.05.35.44
+ * HA-Overwatch — automations.js  v0.05.35.45
  * Admin-only Automation Editor.
  * HA is source of truth — reads/writes directly via server proxy.
  * ================================================================ */
@@ -43,6 +43,9 @@ function ensureZoneTriggerFilters(t) { if (!t || t.type !== 'zone') return null;
 function triggerFiltersChangedFromDefault(t) { const f = ensureZoneTriggerFilters(t); return !!f && TRIGGER_FILTER_KEYS.some(k => f[k] !== true); }
 function triggerFiltersSummary(t) { const f = ensureZoneTriggerFilters(t); if (!f) return ''; const enabled = TRIGGER_FILTER_KEYS.filter(k => f[k]); if (!enabled.length) return 'No trigger filters enabled — this zone event will never trigger.'; if (enabled.length === TRIGGER_FILTER_KEYS.length) return 'All trigger types'; return enabled.map(k => TRIGGER_FILTER_LABELS[k] || k).join(', '); }
 function triggerFiltersHtml(t) { const f = ensureZoneTriggerFilters(t); const any = TRIGGER_FILTER_KEYS.some(k => f[k]); return `<div style="margin-bottom:10px;"><label style="${labelStyle}">Trigger Filters</label><div style="font-size:11px;color:#555;margin-bottom:6px;">Zone event will only trigger when the triggering entity type matches a checked filter. If none are selected, it will never trigger.</div><div id="trig-filters-${escH(t.id)}" style="display:flex;flex-wrap:wrap;gap:10px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.07);border-radius:8px;padding:8px 10px;">${TRIGGER_FILTER_KEYS.map(k => `<label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#ddd;"><input type="checkbox" data-trigger-filter="${escH(k)}" ${f[k] ? 'checked' : ''} style="accent-color:#0a84ff;">${escH(TRIGGER_FILTER_LABELS[k] || k)}</label>`).join('')}</div><div data-trigger-filter-warning="${escH(t.id)}" style="display:${any ? 'none' : ''};margin-top:7px;padding:7px 9px;border-radius:7px;background:rgba(255,59,48,0.10);border:1px solid rgba(255,59,48,0.22);color:#ff9d9a;font-size:11px;">⚠ No trigger filters are enabled. This zone event will never trigger until at least one filter is selected.</div></div>`; }
+
+function ensureActionTriggerFilters(a) { if (!a || typeof a !== 'object') return null; a.trigger_filters = normaliseTriggerFilters(a.trigger_filters || a.filters || null); return a.trigger_filters; }
+function actionTriggerFiltersHtml(a) { const f = ensureActionTriggerFilters(a); const any = TRIGGER_FILTER_KEYS.some(k => f[k]); return `<div style="margin-top:8px;margin-bottom:8px;border-top:1px solid rgba(255,255,255,0.06);padding-top:8px;"><label style="${labelStyle}">Only for trigger type</label><div style="font-size:11px;color:#555;margin-bottom:6px;">This action only runs when the entity that triggered the automation matches a checked type.</div><div id="act-trig-filters-${escH(a.id)}" style="display:flex;flex-wrap:wrap;gap:10px;background:rgba(255,255,255,0.025);border:1px solid rgba(255,255,255,0.07);border-radius:8px;padding:8px 10px;">${TRIGGER_FILTER_KEYS.map(k => `<label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#ddd;"><input type="checkbox" data-action-trigger-filter="${escH(k)}" ${f[k] ? 'checked' : ''} style="accent-color:#0a84ff;">${escH(TRIGGER_FILTER_LABELS[k] || k)}</label>`).join('')}</div><div data-action-trigger-filter-warning="${escH(a.id)}" style="display:${any ? 'none' : ''};margin-top:7px;padding:7px 9px;border-radius:7px;background:rgba(255,59,48,0.10);border:1px solid rgba(255,59,48,0.22);color:#ff9d9a;font-size:11px;">⚠ No trigger types are enabled. This action will never run.</div></div>`; }
 function alarmSlug(a) { return nameSlug(a?.name || a?.id || 'alarm'); }
 function alarmOptions() { return (_alarms || []).map(a => ({ entity_id:a.id, name:a.name || a.id, state:'' })).sort((a,b)=>(a.name||a.entity_id).localeCompare(b.name||b.entity_id,undefined,{sensitivity:'base',numeric:true})); }
 function conditionCanTurnOffAction(a) { if (!a) return false; if (['light','siren','camera_view'].includes(a.type)) return true; if (a.type === 'entity') { const domain = String(a.entity_id || '').split('.')[0]; return ['light','siren','switch'].includes(domain); } return false; }
@@ -358,6 +361,7 @@ function parseHAAutomation(ha) {
   if (ha?.variables?.ow_draft && typeof ha.variables.ow_draft === 'object') {
     const restored = JSON.parse(JSON.stringify(ha.variables.ow_draft));
     (restored.triggers || []).forEach(t => { if (t.type === 'zone') ensureZoneTriggerFilters(t); });
+    (restored.actions || []).forEach(a => ensureActionTriggerFilters(a));
     restored._ha_parse_warnings = [];
     return { draft: restored, warnings: [] };
   }
@@ -516,8 +520,11 @@ function normaliseActionControls(a) {
   if (!Array.isArray(a.floor_ids)) a.floor_ids = [];
   if (!Array.isArray(a.group_ids)) a.group_ids = [];
   if (!Array.isArray(a.zone_ids)) a.zone_ids = [];
+  if (!a.trigger_filters) a.trigger_filters = defaultTriggerFilters();
+  else a.trigger_filters = normaliseTriggerFilters(a.trigger_filters);
   delete a.maintain_on;
-  delete a.maintain_interval;
+  if (!a.maintain_interval) a.maintain_interval = '00:00:20';
+  if (typeof a.maintain_state !== 'boolean') a.maintain_state = true;
   return a;
 }
 function actionEntityCount(a) {
@@ -570,6 +577,7 @@ function actionCommonControlsHtml(a) {
     <div id="act-cond-entity-${a.id}" style="display:${a.condition_mode==='entity'?'block':'none'};margin-bottom:8px;">
       <label style="${labelStyle}">Binary sensor</label>${entityAutocomplete(`act-cond-entity-ac-${a.id}`, a.condition_entity || '', 'binary_sensor.*', null, ['binary_sensor'])}
     </div>
+    ${actionTriggerFiltersHtml(a)}
   </div>`;
 }
 function actionTurnOffControlsHtml(a) {
@@ -583,6 +591,7 @@ function actionTurnOffControlsHtml(a) {
       <div><label style="${labelStyle}">Turn OFF</label><select id="act-clear-mode-${a.id}" style="${selectStyle}"><option value="none" ${clear==='none'?'selected':''}>Never</option><option value="after_delay" ${clear==='after_delay'?'selected':''}>After fixed time</option><option value="source_clears" ${clear==='source_clears'?'selected':''}>When source clears</option><option value="conditions" ${clear==='conditions'?'selected':''}>When selected conditions are met</option></select></div>
       <div id="act-clear-for-wrap-${a.id}" style="display:${clearTimed?'':'none'}"><label style="${labelStyle}">For</label><input id="act-clear-for-${a.id}" type="text" value="${escH(a.clear_for || '00:00:00')}" placeholder="HH:MM:SS" pattern="\\d{2}:\\d{2}:\\d{2}" style="${inputStyle}"/></div>
     </div>
+    <label id="act-maintain-wrap-${a.id}" style="display:${clearTimed?'flex':'none'};gap:6px;align-items:center;font-size:11px;color:#bbb;margin:8px 0 0;"><input id="act-maintain-state-${a.id}" type="checkbox" ${a.maintain_state!==false?'checked':''} style="accent-color:#0a84ff;"> Keep forcing ON during active/cooldown lifecycle</label>
     <div id="act-clear-cond-wrap-${a.id}" style="display:${clear==='conditions'?'block':'none'};margin-top:8px;border:1px solid rgba(255,255,255,0.07);border-radius:8px;padding:8px;background:rgba(255,255,255,0.025);"><label style="${labelStyle}">Conditions</label><select id="act-clear-match-${a.id}" style="${selectStyle};margin-bottom:6px;"><option value="all" ${a.clear_match!=='any'?'selected':''}>ALL selected conditions</option><option value="any" ${a.clear_match==='any'?'selected':''}>ANY selected condition</option></select><label style="display:flex;gap:6px;align-items:center;font-size:11px;color:#bbb;margin:4px 0;"><input type="checkbox" data-clear-cond="source_clear" ${((a.clear_conditions||['source_clear']).includes('source_clear'))?'checked':''}> Source/trigger entity is OFF/clear</label><label style="display:flex;gap:6px;align-items:center;font-size:11px;color:#bbb;margin:4px 0;"><input type="checkbox" data-clear-cond="alarm_not_triggered" ${((a.clear_conditions||[]).includes('alarm_not_triggered'))?'checked':''}> Alarm triggered sensors are OFF</label></div>
   </div>`;
 }
@@ -808,6 +817,7 @@ function renderEditor() {
   const isNew = _editing === 'new';
   if (!_draft.run_mode) _draft.run_mode = 'auto';
   (_draft.triggers || []).forEach(t => { if (t.type === 'zone') ensureZoneTriggerFilters(t); });
+  (_draft.actions || []).forEach(a => ensureActionTriggerFilters(a));
   const col = _collapsed;
 
   _panelEl.innerHTML = `
@@ -2080,6 +2090,11 @@ function wireActionFields(a) {
 
 function wireCommonActionFields(a) {
   normaliseActionControls(a);
+  const actionFilterBox = _panelEl?.querySelector(`#act-trig-filters-${CSS.escape(a.id)}`);
+  if (actionFilterBox) actionFilterBox.querySelectorAll('[data-action-trigger-filter]').forEach(cb => cb.onchange = () => { ensureActionTriggerFilters(a)[cb.dataset.actionTriggerFilter] = !!cb.checked; const warn = _panelEl?.querySelector(`[data-action-trigger-filter-warning="${CSS.escape(a.id)}"]`); const any = TRIGGER_FILTER_KEYS.some(k => ensureActionTriggerFilters(a)[k]); if (warn) warn.style.display = any ? 'none' : ''; });
+  const maintainCb = _panelEl?.querySelector(`#act-maintain-state-${CSS.escape(a.id)}`);
+  if (maintainCb) maintainCb.onchange = () => { a.maintain_state = !!maintainCb.checked; };
+
   wireInput(`act-for-${a.id}`, v=>a.trigger_for=v || '00:00:00');
   wireSelect(`act-cond-mode-${a.id}`, v=>{
     a.condition_mode=v || 'always';
@@ -2095,7 +2110,7 @@ function wireCommonActionFields(a) {
     a.clear_mode=v || 'none';
     const wrap=_panelEl?.querySelector(`#act-clear-for-wrap-${a.id}`);
     const condWrap=_panelEl?.querySelector(`#act-clear-cond-wrap-${a.id}`);
-    if(wrap) wrap.style.display = ['after_delay','source_clears','conditions'].includes(a.clear_mode) ? '' : 'none';
+    if(wrap) wrap.style.display = ['after_delay','source_clears','conditions'].includes(a.clear_mode) ? '' : 'none'; const mw=_panelEl?.querySelector(`#act-maintain-wrap-${a.id}`); if(mw) mw.style.display = ['after_delay','source_clears','conditions'].includes(a.clear_mode) ? 'flex' : 'none';
     if(condWrap) condWrap.style.display = a.clear_mode === 'conditions' ? 'block' : 'none';
   });
   wireInput(`act-clear-for-${a.id}`, v=>a.clear_for=v || '00:00:00');
