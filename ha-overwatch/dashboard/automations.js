@@ -1,5 +1,5 @@
 /* ================================================================
- * HA-Overwatch — automations.js  v0.05.35.25
+ * HA-Overwatch — automations.js  v0.05.35.31
  * Admin-only Automation Editor.
  * HA is source of truth — reads/writes directly via server proxy.
  * ================================================================ */
@@ -32,6 +32,50 @@ function apiPath(p)  { return ow().apiPath ? ow().apiPath(p) : p; }
 function escH(s)     { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function uid()       { return 'auto_' + Math.random().toString(36).slice(2,9); }
 function nameSlug(s) { return (s||'').toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_|_$/g,''); }
+
+const TRIGGER_FILTER_KEYS = ['person','animal','motion','door','window','vehicle','smoke','gas'];
+const TRIGGER_FILTER_LABELS = { person:'Person', animal:'Animal', motion:'Motion', door:'Door', window:'Window', vehicle:'Vehicle', smoke:'Smoke', gas:'Gas / CO' };
+function defaultTriggerFilters() { const out = {}; TRIGGER_FILTER_KEYS.forEach(k => out[k] = true); return out; }
+function normaliseTriggerFilters(filters) {
+  const f = (filters && typeof filters === 'object') ? filters : {};
+  const out = {};
+  TRIGGER_FILTER_KEYS.forEach(k => {
+    if (typeof f[k] === 'boolean') out[k] = f[k];
+    else if (typeof f[k] === 'string') out[k] = ['true','1','on','yes'].includes(String(f[k]).toLowerCase());
+    else out[k] = true;
+  });
+  return out;
+}
+function ensureZoneTriggerFilters(t) {
+  if (!t || t.type !== 'zone') return null;
+  t.trigger_filters = normaliseTriggerFilters(t.trigger_filters || t.filters || null);
+  return t.trigger_filters;
+}
+function triggerFiltersChangedFromDefault(t) {
+  const f = ensureZoneTriggerFilters(t);
+  if (!f) return false;
+  return TRIGGER_FILTER_KEYS.some(k => f[k] !== true);
+}
+function triggerFiltersSummary(t) {
+  const f = ensureZoneTriggerFilters(t);
+  if (!f) return '';
+  const enabled = TRIGGER_FILTER_KEYS.filter(k => f[k]);
+  if (!enabled.length) return 'No trigger filters enabled — this zone event will never trigger.';
+  if (enabled.length === TRIGGER_FILTER_KEYS.length) return 'All trigger types';
+  return enabled.map(k => TRIGGER_FILTER_LABELS[k] || k).join(', ');
+}
+function triggerFiltersHtml(t) {
+  const f = ensureZoneTriggerFilters(t);
+  const any = TRIGGER_FILTER_KEYS.some(k => f[k]);
+  return `<div style="margin-top:10px;">
+    <label style="${labelStyle}">Trigger Filters</label>
+    <div style="font-size:11px;color:#555;margin-bottom:6px;">Zone event will only trigger when the triggering entity type matches a checked filter. If none are selected, it will never trigger.</div>
+    <div id="trig-filters-${escH(t.id)}" style="display:flex;flex-wrap:wrap;gap:10px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.07);border-radius:8px;padding:8px 10px;">
+      ${TRIGGER_FILTER_KEYS.map(k => `<label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#ddd;"><input type="checkbox" data-trigger-filter="${escH(k)}" ${f[k] ? 'checked' : ''} style="accent-color:#0a84ff;">${escH(TRIGGER_FILTER_LABELS[k] || k)}</label>`).join('')}
+    </div>
+    <div data-trigger-filter-warning="${escH(t.id)}" style="display:${any ? 'none' : ''};margin-top:7px;padding:7px 9px;border-radius:7px;background:rgba(255,59,48,0.10);border:1px solid rgba(255,59,48,0.22);color:#ff9d9a;font-size:11px;">⚠ No trigger filters are enabled. This zone event will never trigger until at least one filter is selected.</div>
+  </div>`;
+}
 
 /* ── Zone / Group status from haStates ─────────────────────── */
 function zoneTriggered(zone) {
@@ -311,6 +355,7 @@ function parseHAAutomation(ha) {
   const warnings = [];
   if (ha?.variables?.ow_draft && typeof ha.variables.ow_draft === 'object') {
     const restored = JSON.parse(JSON.stringify(ha.variables.ow_draft));
+    (restored.triggers || []).forEach(t => { if (t.type === 'zone') ensureZoneTriggerFilters(t); });
     restored._ha_parse_warnings = [];
     return { draft: restored, warnings: [] };
   }
@@ -431,7 +476,7 @@ function newDraft() { return {id:uid(),name:'',enabled:true,triggers:[],conditio
 
 function addTrigger(type) {
   const defaults = {
-    zone:     {zone_ids:[],group_ids:[],event:'triggered',for_duration:null},
+    zone:     {zone_ids:[],group_ids:[],event:'triggered',for_duration:null,trigger_filters:defaultTriggerFilters()},
     zone_arm: {zone_ids:[],group_ids:[],state:'armed',for_duration:null},
     person:   {entity_ids:[],state:'home',for_duration:null},
     device:   {entity_ids:[],state:'home',for_duration:null},
@@ -726,7 +771,8 @@ function automationDiagnosticsHtml(auto) {
   const triggerIds = automationTriggerEntityPreview(auto);
   const branches = (auto?.actions || []).map(a => actionSummary(a));
   const warnings = [];
-  if ((auto?.actions || []).some(a => String(a?.clear_mode || 'none') === 'source_clears')) warnings.push('Source-clear cooldowns use restart mode so new trigger events reset the timer. Source-clear templates still follow the current generator behaviour.');
+  if ((auto?.actions || []).some(a => String(a?.clear_mode || 'none') === 'source_clears')) warnings.push('Source-clear cooldowns use a paired Turn OFF automation.');
+  (auto?.triggers || []).filter(t => t.type === 'zone' && triggerFiltersChangedFromDefault(t)).forEach(t => warnings.push(`Zone event filters: ${triggerFiltersSummary(t)}`));
   return `<div style="background:rgba(255,255,255,0.025);border:1px solid rgba(255,255,255,0.07);border-radius:9px;padding:10px;margin-top:10px;">
     <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;"><div style="font-size:12px;font-weight:700;color:#ddd;">Generated behaviour preview</div><span style="font-size:10px;color:${mode==='restart'?'#ff9500':'#777'};border:1px solid rgba(255,255,255,0.09);border-radius:10px;padding:2px 7px;">mode: ${escH(mode)}</span></div>
     <div style="font-size:11px;color:#888;line-height:1.45;margin-bottom:8px;">${escH(automationModeReason(auto))}</div>
@@ -745,6 +791,7 @@ function renderEditor() {
   if (!_panelEl || !_draft) return;
   const isNew = _editing === 'new';
   if (!_draft.run_mode) _draft.run_mode = 'auto';
+  (_draft.triggers || []).forEach(t => { if (t.type === 'zone') ensureZoneTriggerFilters(t); });
   const col = _collapsed;
 
   _panelEl.innerHTML = `
@@ -925,6 +972,7 @@ function triggerCard(t) {
         <label style="${labelStyle}">Groups &amp; Zones</label>
         ${zoneGroupSelector(t, `trig-zg-${t.id}`)}
       </div>
+      ${!isArm ? triggerFiltersHtml(t) : ''}
       <div>
         <label style="${labelStyle}">${isArm?'State changes to':'Event'}</label>
         ${isArm ? `
@@ -1757,7 +1805,18 @@ function wireDeviceActionTree(selectedIds,onUpdate,baseId){
 function wireTriggerFields(t) {
   if (t.type==='zone'||t.type==='zone_arm') {
     wireZoneGroupSelector(t, `trig-zg-${t.id}`);
-    if (t.type==='zone') wireSelect(`trig-event-${t.id}`,v=>t.event=v);
+    if (t.type==='zone') {
+      ensureZoneTriggerFilters(t);
+      const filterBox = _panelEl?.querySelector(`#trig-filters-${CSS.escape(t.id)}`);
+      if (filterBox) filterBox.querySelectorAll('[data-trigger-filter]').forEach(cb => cb.onchange = () => {
+        const key = cb.dataset.triggerFilter;
+        ensureZoneTriggerFilters(t)[key] = !!cb.checked;
+        const warn = _panelEl?.querySelector(`[data-trigger-filter-warning="${CSS.escape(t.id)}"]`);
+        const any = TRIGGER_FILTER_KEYS.some(k => ensureZoneTriggerFilters(t)[k]);
+        if (warn) warn.style.display = any ? 'none' : '';
+      });
+      wireSelect(`trig-event-${t.id}`,v=>t.event=v);
+    }
     else wireSelect(`trig-armstate-${t.id}`,v=>t.state=v);
   }
   if (t.type==='sensor') { wireSensorHierarchicalSelector(`trig-sensor-${t.id}`,ids=>t.entity_ids=ids); wireSelect(`trig-sensorstate-${t.id}`,v=>t.state=v); }
