@@ -1,5 +1,5 @@
 /* ================================================================
- * HA-Overwatch — automations.js  v0.05.35.42
+ * HA-Overwatch — automations.js  v0.05.35.43
  * Admin-only Automation Editor.
  * HA is source of truth — reads/writes directly via server proxy.
  * ================================================================ */
@@ -43,9 +43,6 @@ function ensureZoneTriggerFilters(t) { if (!t || t.type !== 'zone') return null;
 function triggerFiltersChangedFromDefault(t) { const f = ensureZoneTriggerFilters(t); return !!f && TRIGGER_FILTER_KEYS.some(k => f[k] !== true); }
 function triggerFiltersSummary(t) { const f = ensureZoneTriggerFilters(t); if (!f) return ''; const enabled = TRIGGER_FILTER_KEYS.filter(k => f[k]); if (!enabled.length) return 'No trigger filters enabled — this zone event will never trigger.'; if (enabled.length === TRIGGER_FILTER_KEYS.length) return 'All trigger types'; return enabled.map(k => TRIGGER_FILTER_LABELS[k] || k).join(', '); }
 function triggerFiltersHtml(t) { const f = ensureZoneTriggerFilters(t); const any = TRIGGER_FILTER_KEYS.some(k => f[k]); return `<div style="margin-bottom:10px;"><label style="${labelStyle}">Trigger Filters</label><div style="font-size:11px;color:#555;margin-bottom:6px;">Zone event will only trigger when the triggering entity type matches a checked filter. If none are selected, it will never trigger.</div><div id="trig-filters-${escH(t.id)}" style="display:flex;flex-wrap:wrap;gap:10px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.07);border-radius:8px;padding:8px 10px;">${TRIGGER_FILTER_KEYS.map(k => `<label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#ddd;"><input type="checkbox" data-trigger-filter="${escH(k)}" ${f[k] ? 'checked' : ''} style="accent-color:#0a84ff;">${escH(TRIGGER_FILTER_LABELS[k] || k)}</label>`).join('')}</div><div data-trigger-filter-warning="${escH(t.id)}" style="display:${any ? 'none' : ''};margin-top:7px;padding:7px 9px;border-radius:7px;background:rgba(255,59,48,0.10);border:1px solid rgba(255,59,48,0.22);color:#ff9d9a;font-size:11px;">⚠ No trigger filters are enabled. This zone event will never trigger until at least one filter is selected.</div></div>`; }
-
-function ensureActionTriggerFilters(a) { if (!a || typeof a !== 'object') return null; a.trigger_filters = normaliseTriggerFilters(a.trigger_filters || a.filters || null); return a.trigger_filters; }
-function actionTriggerFiltersHtml(a) { const f = ensureActionTriggerFilters(a); const any = TRIGGER_FILTER_KEYS.some(k => f[k]); return `<div style="margin-top:8px;margin-bottom:8px;border-top:1px solid rgba(255,255,255,0.06);padding-top:8px;"><label style="${labelStyle}">Only for trigger type</label><div style="font-size:11px;color:#555;margin-bottom:6px;">This action only runs when the entity that triggered the automation matches a checked type.</div><div id="act-trig-filters-${escH(a.id)}" style="display:flex;flex-wrap:wrap;gap:10px;background:rgba(255,255,255,0.025);border:1px solid rgba(255,255,255,0.07);border-radius:8px;padding:8px 10px;">${TRIGGER_FILTER_KEYS.map(k => `<label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#ddd;"><input type="checkbox" data-action-trigger-filter="${escH(k)}" ${f[k] ? 'checked' : ''} style="accent-color:#0a84ff;">${escH(TRIGGER_FILTER_LABELS[k] || k)}</label>`).join('')}</div><div data-action-trigger-filter-warning="${escH(a.id)}" style="display:${any ? 'none' : ''};margin-top:7px;padding:7px 9px;border-radius:7px;background:rgba(255,59,48,0.10);border:1px solid rgba(255,59,48,0.22);color:#ff9d9a;font-size:11px;">⚠ No trigger types are enabled. This action will never run.</div></div>`; }
 function alarmSlug(a) { return nameSlug(a?.name || a?.id || 'alarm'); }
 function alarmOptions() { return (_alarms || []).map(a => ({ entity_id:a.id, name:a.name || a.id, state:'' })).sort((a,b)=>(a.name||a.entity_id).localeCompare(b.name||b.entity_id,undefined,{sensitivity:'base',numeric:true})); }
 function conditionCanTurnOffAction(a) { if (!a) return false; if (['light','siren','camera_view'].includes(a.type)) return true; if (a.type === 'entity') { const domain = String(a.entity_id || '').split('.')[0]; return ['light','siren','switch'].includes(domain); } return false; }
@@ -55,10 +52,11 @@ function automationErrorsFor(auto) {
   return (_automationErrors || []).filter(e => e.ow_id === id || e.ow_name === name || e.ha_entity_id === id || String(e.alias || '') === name)
     .sort((a,b)=>String(b.time||'').localeCompare(String(a.time||'')));
 }
-function formatErrorTime(value) {
-  if (!value) return '';
-  try { return new Date(value).toLocaleString(); } catch { return String(value); }
-}
+function errorTimestampValue(e) { return e?.time || e?.timestamp || e?.created_at || e?.seen_at || e?.last_seen || e?.scan_time || ''; }
+function formatErrorTime(value) { if (!value) return 'Unknown time'; const d = new Date(value); if (!Number.isNaN(d.getTime())) return d.toLocaleString(); return String(value || 'Unknown time'); }
+function unackAutomationErrorsFor(auto) { return automationErrorsFor(auto).filter(e => e.acknowledged !== true); }
+async function acknowledgeAutomationErrors(payload) { try { await fetch(apiPath('ow/automation-errors/ack'), { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload || {}) }); } catch(e) { console.warn('[OW-Auto] acknowledge automation errors:', e); } await loadAutomationErrors(); }
+async function setAutomationEnabled(auto, enabled) { const r = await fetch(apiPath('ow/set-automation-enabled'), { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ ow_id:auto.id, ow_name:auto.name, enabled }) }); const data = await r.json().catch(()=>({ok:false, detail:'Invalid response'})); if (!r.ok || data.ok === false) throw new Error(data.detail || data.reason || 'Failed to update HA automation state'); auto.enabled = enabled; return data; }
 
 /* ── Zone / Group status from haStates ─────────────────────── */
 function zoneTriggered(zone) {
@@ -359,7 +357,6 @@ function parseHAAutomation(ha) {
   if (ha?.variables?.ow_draft && typeof ha.variables.ow_draft === 'object') {
     const restored = JSON.parse(JSON.stringify(ha.variables.ow_draft));
     (restored.triggers || []).forEach(t => { if (t.type === 'zone') ensureZoneTriggerFilters(t); });
-    (restored.actions || []).forEach(a => ensureActionTriggerFilters(a));
     restored._ha_parse_warnings = [];
     return { draft: restored, warnings: [] };
   }
@@ -518,10 +515,8 @@ function normaliseActionControls(a) {
   if (!Array.isArray(a.floor_ids)) a.floor_ids = [];
   if (!Array.isArray(a.group_ids)) a.group_ids = [];
   if (!Array.isArray(a.zone_ids)) a.zone_ids = [];
-  if (!a.trigger_filters) a.trigger_filters = defaultTriggerFilters();
-  else a.trigger_filters = normaliseTriggerFilters(a.trigger_filters);
   delete a.maintain_on;
-  if (!a.maintain_interval) a.maintain_interval = '00:00:20';
+  delete a.maintain_interval;
   return a;
 }
 function actionEntityCount(a) {
@@ -574,7 +569,6 @@ function actionCommonControlsHtml(a) {
     <div id="act-cond-entity-${a.id}" style="display:${a.condition_mode==='entity'?'block':'none'};margin-bottom:8px;">
       <label style="${labelStyle}">Binary sensor</label>${entityAutocomplete(`act-cond-entity-ac-${a.id}`, a.condition_entity || '', 'binary_sensor.*', null, ['binary_sensor'])}
     </div>
-    ${actionTriggerFiltersHtml(a)}
   </div>`;
 }
 function actionTurnOffControlsHtml(a) {
@@ -681,7 +675,7 @@ function renderList() {
       </div>
     </div>
     <div style="flex:1;overflow-y:auto;padding:12px 20px 20px;">
-      ${filtered.length===0 ? (_listSearch?'<div style="color:#444;padding:20px;text-align:center;">No automations match.</div>':emptyState()) : filtered.map(a=>autoCard(a,_parseErrors.find(e=>e.id===a.id))).join('')}
+      ${filtered.length===0 ? (_listSearch?'<div style="color:#444;padding:20px;text-align:center;">No automations match.</div>':emptyState()) : filtered.map(a=>autoCard(a,_parseErrors.find(e=>e.id===a.id),unackAutomationErrorsFor(a))).join('')}
     </div>`;
 
   _panelEl.querySelector('#owAutoNewBtn').onclick=()=>{_editing='new';_draft=newDraft();_collapsedSteps={};renderEditor();};
@@ -711,26 +705,15 @@ function renderList() {
   });
 }
 
-function autoCard(a, parseErr) {
+function autoCard(a, parseErr, runtimeErrors = []) {
   const enabled=a.enabled!==false;
-  const parts=[
-    a.triggers?.length&&`${a.triggers.length} trigger${a.triggers.length>1?'s':''}`,
-    a.conditions?.length&&`${a.conditions.length} condition${a.conditions.length>1?'s':''}`,
-    a.actions?.length&&`${a.actions.length} action${a.actions.length>1?'s':''}`,
-  ].filter(Boolean);
-  return `<div data-auto-edit="${escH(a.id)}" style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,${enabled?'0.08':'0.04'});border-radius:10px;padding:13px 15px;margin-bottom:7px;cursor:pointer;display:flex;align-items:center;gap:12px;opacity:${enabled?1:0.5};transition:background 0.12s;" onmouseenter="this.style.background='rgba(255,255,255,0.055)'" onmouseleave="this.style.background='rgba(255,255,255,0.03)'">
-    <div style="width:30px;height:30px;border-radius:7px;flex-shrink:0;background:${parseErr?'rgba(255,59,48,0.15)':enabled?'rgba(0,100,210,0.2)':'rgba(255,255,255,0.05)'};display:flex;align-items:center;justify-content:center;">
-      ${parseErr?'<span style="font-size:14px;">⚠</span>':`<svg width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" stroke="${enabled?'#4db8ff':'#555'}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/></svg>`}
-    </div>
-    <div style="flex:1;min-width:0;">
-      <div style="font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escH(a.name||'Unnamed')}</div>
-      <div style="font-size:11px;color:${parseErr?'#ff6b6b':'#555'};margin-top:2px;">${parseErr?`⚠ ${escH(parseErr.warnings[0]||'Parse error')}`:parts.join(' · ')||'Empty'}</div>
-    </div>
-    <div style="display:flex;gap:5px;flex-shrink:0;">
-      <button data-auto-tog="${escH(a.id)}" style="background:${enabled?'rgba(52,199,89,0.15)':'rgba(255,255,255,0.06)'};border:1px solid ${enabled?'rgba(52,199,89,0.4)':'rgba(255,255,255,0.1)'};color:${enabled?'#34c759':'#555'};border-radius:6px;padding:3px 9px;cursor:pointer;font-size:11px;font-weight:600;">${enabled?'ON':'OFF'}</button>
-      <button data-auto-del="${escH(a.id)}" style="background:rgba(255,59,48,0.08);border:1px solid rgba(255,59,48,0.2);color:#ff453a;border-radius:6px;padding:3px 7px;cursor:pointer;font-size:12px;">🗑</button>
-    </div>
-  </div>`;
+  const runtimeCount=runtimeErrors.length;
+  const latest=runtimeErrors[0];
+  const hasIssue=!!parseErr||runtimeCount>0;
+  const parts=[a.triggers?.length&&`${a.triggers.length} trigger${a.triggers.length>1?'s':''}`,a.conditions?.length&&`${a.conditions.length} condition${a.conditions.length>1?'s':''}`,a.actions?.length&&`${a.actions.length} action${a.actions.length>1?'s':''}`].filter(Boolean);
+  const sub=parseErr?`⚠ ${escH(parseErr.warnings[0]||'Parse error')}`:runtimeCount?`⚠ ${runtimeCount} runtime error${runtimeCount===1?'':'s'} · last ${escH(formatErrorTime(errorTimestampValue(latest)))} · ${escH(latest?.message||latest?.status||'Trace failure')}`:(parts.join(' · ')||'Empty');
+  const issueColor=parseErr?'#ff6b6b':runtimeCount?'#ffcc66':'#555';
+  return `<div data-auto-edit="${escH(a.id)}" style="background:rgba(255,255,255,0.03);border:1px solid ${hasIssue?'rgba(255,149,0,0.35)':`rgba(255,255,255,${enabled?'0.08':'0.04'})`};border-radius:10px;padding:13px 15px;margin-bottom:7px;cursor:pointer;display:flex;align-items:center;gap:12px;opacity:${enabled?1:0.5};transition:background 0.12s;" onmouseenter="this.style.background='rgba(255,255,255,0.055)'" onmouseleave="this.style.background='rgba(255,255,255,0.03)'"><div style="width:30px;height:30px;border-radius:7px;flex-shrink:0;background:${hasIssue?'rgba(255,149,0,0.16)':enabled?'rgba(0,100,210,0.2)':'rgba(255,255,255,0.05)'};display:flex;align-items:center;justify-content:center;">${hasIssue?'<span style="font-size:14px;">⚠</span>':`<svg width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" stroke="${enabled?'#4db8ff':'#555'}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/></svg>`}</div><div style="flex:1;min-width:0;"><div style="font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escH(a.name||'Unnamed')}</div><div style="font-size:11px;color:${issueColor};margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${sub}</div></div><div style="display:flex;gap:5px;flex-shrink:0;"><button data-auto-tog="${escH(a.id)}" title="${enabled?'Disable in HA':'Enable in HA'}" style="background:${enabled?'rgba(52,199,89,0.18)':'rgba(255,255,255,0.06)'};border:1px solid ${enabled?'rgba(52,199,89,0.45)':'rgba(255,255,255,0.12)'};color:${enabled?'#34c759':'#999'};border-radius:6px;padding:3px 9px;font-size:10px;font-weight:700;cursor:pointer;">${enabled?'ON':'OFF'}</button><button data-auto-del="${escH(a.id)}" style="background:rgba(255,59,48,0.12);border:1px solid rgba(255,59,48,0.25);color:#ff453a;border-radius:6px;padding:3px 7px;font-size:11px;cursor:pointer;">🗑</button></div></div>`;
 }
 
 function emptyState() {
@@ -809,7 +792,7 @@ function automationDiagnosticsCardHtml(auto) {
   const border = errors.length ? 'rgba(255,149,0,0.35)' : 'rgba(255,255,255,0.07)';
   const summary = `mode: ${mode} · ${triggerIds.length} trigger ${triggerIds.length===1?'entity':'entities'} · ${branches.length} action ${branches.length===1?'branch':'branches'} · ${errors.length} error${errors.length===1?'':'s'}`;
   const latest = errors[0];
-  const errorHtml = errors.length ? `<div style="border:1px solid rgba(255,149,0,0.25);background:rgba(255,149,0,0.08);border-radius:8px;padding:8px 10px;color:#ffd49a;font-size:11px;line-height:1.45;"><b>Latest error:</b> ${escH(formatErrorTime(latest.time))}<br>${latest.service ? `<b>Service:</b> ${escH(latest.service)}<br>` : ''}${latest.entity_id ? `<b>Entity:</b> ${escH(latest.entity_id)}<br>` : ''}<b>Message:</b> ${escH(latest.message || latest.status || 'Automation trace reported a failed run.')}${errors.length>1 ? `<br><span style="color:#cc9b5c;">${errors.length-1} older error(s) hidden.</span>` : ''}</div>` : `<div style="font-size:11px;color:#666;">No recent runtime errors found.</div>`;
+  const errorHtml = errors.length ? `<div style="border:1px solid rgba(255,149,0,0.25);background:rgba(255,149,0,0.08);border-radius:8px;padding:8px 10px;color:#ffd49a;font-size:11px;line-height:1.45;"><b>Latest error:</b> ${escH(formatErrorTime(errorTimestampValue(latest)))}<br>${latest.service ? `<b>Service:</b> ${escH(latest.service)}<br>` : ''}${latest.entity_id ? `<b>Entity:</b> ${escH(latest.entity_id)}<br>` : ''}<b>Message:</b> ${escH(latest.message || latest.status || 'Automation trace reported a failed run.')}${errors.length>1 ? `<br><span style="color:#cc9b5c;">${errors.length-1} older error(s) hidden.</span>` : ''}</div>` : `<div style="font-size:11px;color:#666;">No recent runtime errors found.</div>`;
   return `<div style="background:rgba(255,255,255,0.025);border:1px solid ${border};border-radius:9px;padding:10px;margin-top:10px;">
     <button id="owDiagToggle" style="width:100%;display:flex;align-items:center;gap:8px;background:none;border:0;color:${errors.length?'#ffcc66':'#ddd'};cursor:pointer;padding:0;text-align:left;">
       <span style="font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;">${collapsed?'▶':'▼'} Diagnostics</span>
@@ -819,7 +802,7 @@ function automationDiagnosticsCardHtml(auto) {
       <div style="display:grid;grid-template-columns:220px 1fr;gap:10px;align-items:end;"><div><label style="${labelStyle}">Run mode</label><select id="owAutoRunMode" style="${selectStyle}"><option value="auto" ${String(auto?.run_mode||'auto')==='auto'?'selected':''}>Auto recommended</option><option value="single" ${auto?.run_mode==='single'?'selected':''}>Single</option><option value="restart" ${auto?.run_mode==='restart'?'selected':''}>Restart</option><option value="queued" ${auto?.run_mode==='queued'?'selected':''}>Queued</option><option value="parallel" ${auto?.run_mode==='parallel'?'selected':''}>Parallel</option></select></div><div style="font-size:11px;color:#999;line-height:1.4;padding-bottom:7px;">Effective mode: <b style="color:${mode==='restart'?'#ff9500':'#ccc'};">${escH(mode)}</b> — ${escH(automationModeReason(auto))}</div></div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;"><div><div style="${labelStyle}">Trigger entities</div><div style="font-size:11px;color:#aaa;line-height:1.45;">${triggerIds.length ? triggerIds.map(escH).join('<br>') : '<span style="color:#555;">None resolved yet</span>'}</div></div><div><div style="${labelStyle}">Action branches</div><div style="font-size:11px;color:#aaa;line-height:1.45;">${branches.length ? branches.map(escH).join('<br>') : '<span style="color:#555;">No actions yet</span>'}</div></div></div>
       ${warnings.length ? `<div style="font-size:10px;color:#ffcc66;line-height:1.4;">${warnings.map(escH).join('<br>')}</div>` : ''}
-      <div><div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;"><div style="font-size:12px;font-weight:700;color:#ddd;">Runtime errors / trace failures</div><button id="owAutoScanErrorsBtn" style="${btnStyle('rgba(255,255,255,0.06)','rgba(255,255,255,0.04)',true)}padding:4px 9px;font-size:11px;margin-left:auto;">Scan traces now</button></div>${errorHtml}</div>
+      <div><div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;"><div style="font-size:12px;font-weight:700;color:#ddd;">Runtime errors / trace failures</div>${errors.filter(e=>e.acknowledged!==true).length ? `<button id="owAutoAckAllErrorsBtn" style="${btnStyle('rgba(255,255,255,0.06)','rgba(255,255,255,0.04)',true)}padding:4px 9px;font-size:11px;margin-left:auto;">Acknowledge all</button>` : ''}<button id="owAutoScanErrorsBtn" style="${btnStyle('rgba(255,255,255,0.06)','rgba(255,255,255,0.04)',true)}padding:4px 9px;font-size:11px;margin-left:auto;">Scan traces now</button></div>${errorHtml}</div>
     </div>`}
   </div>`;
 }
@@ -828,7 +811,6 @@ function renderEditor() {
   const isNew = _editing === 'new';
   if (!_draft.run_mode) _draft.run_mode = 'auto';
   (_draft.triggers || []).forEach(t => { if (t.type === 'zone') ensureZoneTriggerFilters(t); });
-  (_draft.actions || []).forEach(a => ensureActionTriggerFilters(a));
   const col = _collapsed;
 
   _panelEl.innerHTML = `
@@ -888,6 +870,8 @@ function renderEditor() {
   if (diagToggle) diagToggle.onclick=()=>{ _collapsed.diagnostics = !(_collapsed.diagnostics !== false); renderEditorKeepScroll(); };
   const scanErrorsBtn=_panelEl.querySelector('#owAutoScanErrorsBtn');
   if (scanErrorsBtn) scanErrorsBtn.onclick=async()=>{ scanErrorsBtn.textContent='Scanning…'; scanErrorsBtn.disabled=true; await scanAutomationErrors(); renderEditorKeepScroll(); };
+  const ackAllBtn=_panelEl.querySelector('#owAutoAckAllErrorsBtn');
+  if (ackAllBtn) ackAllBtn.onclick=async()=>{ ackAllBtn.textContent='Acknowledging…'; ackAllBtn.disabled=true; await acknowledgeAutomationErrors({ow_id:_draft.id}); renderEditorKeepScroll(); };
   const runModeEl=_panelEl.querySelector('#owAutoRunMode');
   if (runModeEl) runModeEl.onchange=()=>{ _draft.run_mode = runModeEl.value || 'auto'; renderEditorKeepScroll(); };
 
@@ -2099,8 +2083,6 @@ function wireActionFields(a) {
 
 function wireCommonActionFields(a) {
   normaliseActionControls(a);
-  const actionFilterBox = _panelEl?.querySelector(`#act-trig-filters-${CSS.escape(a.id)}`);
-  if (actionFilterBox) actionFilterBox.querySelectorAll('[data-action-trigger-filter]').forEach(cb => cb.onchange = () => { ensureActionTriggerFilters(a)[cb.dataset.actionTriggerFilter] = !!cb.checked; const warn = _panelEl?.querySelector(`[data-action-trigger-filter-warning="${CSS.escape(a.id)}"]`); const any = TRIGGER_FILTER_KEYS.some(k => ensureActionTriggerFilters(a)[k]); if (warn) warn.style.display = any ? 'none' : ''; });
   wireInput(`act-for-${a.id}`, v=>a.trigger_for=v || '00:00:00');
   wireSelect(`act-cond-mode-${a.id}`, v=>{
     a.condition_mode=v || 'always';

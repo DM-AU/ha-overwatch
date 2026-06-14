@@ -1,4 +1,4 @@
-// HA-Overwatch 0.05.35.42-action-trigger-filter-routing: event lifecycle waits for source clear and action branches honour trigger type filters.
+// HA-Overwatch 0.05.35.43-automation-diagnostics-and-toggle
 /* ============================================================
  * HA-Overwatch — server.js
  *
@@ -1002,7 +1002,7 @@ function collectAutomationTraceErrors() {
     const key = [info.owId || info.entityId || info.alias || "unknown", info.runId || info.time || pathParts.join("/"), failures[0].step || failures[0].key || "failure"].join("::");
     if (seen.has(key) || existingKeys.has(key)) return;
     seen.add(key);
-    additions.push({ id:`autoerr_${Date.now()}_${Math.random().toString(36).slice(2,8)}`, key, time:info.time, level:"error", category:"automation", source:"ha_trace", ow_id:info.owId, ow_name:info.owName || info.alias, ha_entity_id:info.entityId, run_id:info.runId, status:info.scriptExecution || failures[0].key || "error", failed_step:failures[0].step || svc.step || "", service:svc.service, entity_id:svc.entityId, message:failures[0].message || "Automation trace indicates a failed run" });
+    additions.push({ id:`autoerr_${Date.now()}_${Math.random().toString(36).slice(2,8)}`, key, time:info.time, seen_at:new Date().toISOString(), acknowledged:false, level:"error", category:"automation", source:"ha_trace", ow_id:info.owId, ow_name:info.owName || info.alias, ha_entity_id:info.entityId, run_id:info.runId, status:info.scriptExecution || failures[0].key || "error", failed_step:failures[0].step || svc.step || "", service:svc.service, entity_id:svc.entityId, message:failures[0].message || "Automation trace indicates a failed run" });
   });
   if (additions.length) saveAutomationErrors(existing.concat(additions));
   state.seen = [...seen]; state.trace_file = traceFile; state.scanned = scanned; state.added_last_scan = additions.length; saveAutomationTraceScanState(state);
@@ -1015,6 +1015,9 @@ function startAutomationTraceMonitor() {
   automationTraceScanTimer = setInterval(() => { try { collectAutomationTraceErrors(); } catch (e) { console.warn(`[HA-Overwatch] automation trace scan failed: ${e.message}`); } }, AUTOMATION_TRACE_SCAN_INTERVAL_MS);
 }
 
+function _automationEntityCandidates(id, alias = "") { const out = new Set(); const add = v => { if (v) out.add(String(v)); }; const idSlug = nameSlug(id); const aliasSlug = nameSlug(alias); add(id ? `automation.${idSlug}` : ""); add(alias ? `automation.${aliasSlug}` : ""); for (const [entityId, st] of Object.entries(serverHaStates || {})) { if (!String(entityId).startsWith('automation.')) continue; const attrs = st?.attributes || {}; if (attrs.id === id || attrs.id === `${id}` || attrs.friendly_name === alias || entityId === `automation.${idSlug}` || entityId === `automation.${aliasSlug}`) add(entityId); } return [...out]; }
+function _automationEntityCandidatesForManaged(owId, owName = "") { const parentAlias = owName ? `HA-Overwatch — ${owName}` : ""; const offAlias = owName ? `HA-Overwatch — ${owName} - Turn OFF` : ""; return [...new Set([..._automationEntityCandidates(owId, parentAlias), ..._automationEntityCandidates(`${owId}_turn_off`, offAlias)])]; }
+async function setManagedAutomationEnabled(owId, owName, enabled) { const entityIds = _automationEntityCandidatesForManaged(owId, owName); if (!entityIds.length) return { ok:false, reason:'automation entity not found', entity_ids:[] }; const service = enabled ? 'turn_on' : 'turn_off'; const data = { entity_id: entityIds }; if (!enabled) data.stop_actions = false; const r = await _haApiRequest('POST', `/api/services/automation/${service}`, data); return { ok:r.status >= 200 && r.status < 300, status:r.status, detail:r.body, entity_ids:entityIds, enabled }; }
 /* ─── REQUEST HANDLER ─────────────────────────────────────── */
 const server = http.createServer(async (req, res) => {
   // CORS preflight
@@ -1218,6 +1221,11 @@ try { json(res, buildAlarmTriggeredState()); }
 catch (e) { err(res, e.message, 500); }
 return;
 }
+
+/* ── /ow/automation-errors/ack ───────────────────────────── */
+if (pathname === "/ow/automation-errors/ack" && req.method === "POST") { try { const body = await readBody(req); const now = new Date().toISOString(); const ids = new Set((body?.ids || []).map(String)); const owId = String(body?.ow_id || ""); const all = body?.all === true; const entries = loadAutomationErrors().map(e => { const match = all || ids.has(String(e.id || "")) || (owId && (e.ow_id === owId || e.ha_entity_id === owId || e.ow_name === owId)); return match ? { ...e, acknowledged:true, acknowledged_at:now } : e; }); saveAutomationErrors(entries); json(res, { ok:true, acknowledged: entries.filter(e => e.acknowledged === true).length }); } catch (e) { err(res, e.message); } return; }
+/* ── /ow/set-automation-enabled ───────────────────────────── */
+if (pathname === "/ow/set-automation-enabled" && req.method === "POST") { try { const body = await readBody(req); const owId = String(body?.ow_id || body?.id || ""); const owName = String(body?.ow_name || body?.name || ""); if (!owId) { err(res, "ow_id required", 400); return; } json(res, await setManagedAutomationEnabled(owId, owName, body?.enabled !== false)); } catch (e) { err(res, e.message, 500); } return; }
 
 if (pathname === "/ow/alarms/responses/sync" && req.method === "POST") {
   try { json(res, await syncAlarmResponseAutomations(loadAlarms())); }
@@ -3912,30 +3920,16 @@ function _maintainInterval(a) {
   const sec = Math.max(10, _durationToSeconds(a?.maintain_interval || '00:00:20', 20));
   return _secondsToDuration(sec);
 }
-function _maintainEnabledForAction(a) {
-  const clearMode = String(a?.clear_mode || 'none');
-  return (a?.maintain_state === true) || (a?.maintain_state === undefined && clearMode === 'source_clears');
-}
-function _actionLifecycleEventData(auto, a) { return { ow_id:String(auto?.id || ''), action_id:String(a?.id || '') }; }
-function _actionLifecycleEventTrigger(auto, a) { return { trigger:'event', event_type:'ha_overwatch_action_started', event_data:_actionLifecycleEventData(auto, a), id:`action_started_${a?.id || 'action'}` }; }
-function _actionLifecycleEventAction(auto, a) { return { event:'ha_overwatch_action_started', event_data:{ ..._actionLifecycleEventData(auto, a), ow_name:String(auto?.name || ''), action_type:String(a?.type || ''), clear_mode:String(a?.clear_mode || 'none') } }; }
-function _actionNeedsLifecycleEvent(a, actionObj) { const clearMode = String(a?.clear_mode || 'none'); return !!_turnOffActionFor(actionObj) && (clearMode === 'source_clears' || clearMode === 'conditions'); }
-function _actionTriggerFilters(a) { return normaliseAlarmTriggerFilters(a?.trigger_filters || a?.filters || null); }
-function _actionAllTriggerFiltersEnabled(a) { const f = _actionTriggerFilters(a); return ALARM_TRIGGER_FILTER_KEYS.every(k => f[k] === true); }
-function _actionEnabledTriggerTypes(a) { const f = _actionTriggerFilters(a); return new Set(ALARM_TRIGGER_FILTER_KEYS.filter(k => f[k])); }
-function _actionScopedSourceClearSources(a, sourceClearSources = []) {
-  if (_actionAllTriggerFiltersEnabled(a)) return sourceClearSources || [];
-  const enabled = _actionEnabledTriggerTypes(a);
-  if (!enabled.size) return [];
-  return (sourceClearSources || []).filter(src => { const entityId = String(src?.entity_id || ''); const type = classifyAlarmTriggerType(entityId, serverHaStates[entityId]); return type && enabled.has(type); });
-}
-function _actionTriggerFilterCondition(a, sourceClearSources = []) {
-  if (_actionAllTriggerFiltersEnabled(a)) return null;
-  const scoped = _actionScopedSourceClearSources(a, sourceClearSources).map(src => src.entity_id).filter(Boolean);
-  if (!scoped.length) return { condition:'template', value_template:'{{ false }}' };
-  const quoted = scoped.map(e => `'${_jinjaString(e)}'`).join(', ');
-  return { condition:'template', value_template:`{{ trigger.entity_id in [${quoted}] }}` };
-}
+function _maintainEnabledForAction(a){const clearMode=String(a?.clear_mode||'none');return(a?.maintain_state===true)||(a?.maintain_state===undefined&&clearMode==='source_clears');}
+function _actionLifecycleEventData(auto,a){return{ow_id:String(auto?.id||''),action_id:String(a?.id||'')};}
+function _actionLifecycleEventTrigger(auto,a){return{trigger:'event',event_type:'ha_overwatch_action_started',event_data:_actionLifecycleEventData(auto,a),id:`action_started_${a?.id||'action'}`};}
+function _actionLifecycleEventAction(auto,a){return{event:'ha_overwatch_action_started',event_data:{..._actionLifecycleEventData(auto,a),ow_name:String(auto?.name||''),action_type:String(a?.type||''),clear_mode:String(a?.clear_mode||'none')}};}
+function _actionNeedsLifecycleEvent(a,actionObj){const clearMode=String(a?.clear_mode||'none');return!!_turnOffActionFor(actionObj)&&(clearMode==='source_clears'||clearMode==='conditions');}
+function _actionTriggerFilters(a){return normaliseAlarmTriggerFilters(a?.trigger_filters||a?.filters||null);}
+function _actionAllTriggerFiltersEnabled(a){const f=_actionTriggerFilters(a);return ALARM_TRIGGER_FILTER_KEYS.every(k=>f[k]===true);}
+function _actionEnabledTriggerTypes(a){const f=_actionTriggerFilters(a);return new Set(ALARM_TRIGGER_FILTER_KEYS.filter(k=>f[k]));}
+function _actionScopedSourceClearSources(a,sourceClearSources=[]){if(_actionAllTriggerFiltersEnabled(a))return sourceClearSources||[];const enabled=_actionEnabledTriggerTypes(a);if(!enabled.size)return[];return(sourceClearSources||[]).filter(src=>{const entityId=String(src?.entity_id||'');const type=classifyAlarmTriggerType(entityId,serverHaStates[entityId]);return type&&enabled.has(type);});}
+function _actionTriggerFilterCondition(a,sourceClearSources=[]){if(_actionAllTriggerFiltersEnabled(a))return null;const scoped=_actionScopedSourceClearSources(a,sourceClearSources).map(src=>src.entity_id).filter(Boolean);if(!scoped.length)return{condition:'template',value_template:'{{ false }}'};const quoted=scoped.map(e=>`'${_jinjaString(e)}'`).join(', ');return{condition:'template',value_template:`{{ trigger.entity_id in [${quoted}] }}`};}
 function _actionSupportsMaintain(actionObj) {
   const action = String(actionObj?.action || actionObj?.service || '');
   const [domain, service] = action.split('.');
@@ -3999,10 +3993,7 @@ function _turnOffChooseBranchForAction(a, actionObj, sourceClearSources = []) {
   if (!offAction) return null;
   const triggerId = `action_started_${a?.id || 'action'}`;
   const sequence = [];
-  if (_maintainEnabledForAction(a) && _actionSupportsMaintain(actionObj)) {
-    const activeMaintain = _activeMaintainRepeat(a, actionObj, sourceClearSources);
-    if (activeMaintain) sequence.push(activeMaintain);
-  }
+  if (_maintainEnabledForAction(a) && _actionSupportsMaintain(actionObj)) { const activeMaintain = _activeMaintainRepeat(a, actionObj, sourceClearSources); if (activeMaintain) sequence.push(activeMaintain); }
   sequence.push({ wait_template: _clearTemplateForAction(a, sourceClearSources), continue_on_timeout: false });
   if (_maintainEnabledForAction(a) && _actionSupportsMaintain(actionObj)) sequence.push(..._cooldownMaintainSequence(a, actionObj, sourceClearSources));
   else { const clearFor = _autoDuration(a?.clear_for); if (clearFor) sequence.push({ delay: clearFor }); }
