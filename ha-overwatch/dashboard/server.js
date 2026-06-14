@@ -1,4 +1,4 @@
-// HA-Overwatch 0.05.35.40-event-lifecycle-turnoff: Turn OFF lifecycle starts only after parent action fires ha_overwatch_action_started event.
+// HA-Overwatch 0.05.35.41-event-lifecycle-wait-clear: Turn OFF lifecycle waits for source clear before cooldown; active maintain runs in sidecar only.
 /* ============================================================
  * HA-Overwatch — server.js
  *
@@ -3916,29 +3916,13 @@ function _maintainEnabledForAction(a) {
   return (a?.maintain_state === true) || (a?.maintain_state === undefined && clearMode === 'source_clears');
 }
 function _actionLifecycleEventData(auto, a) {
-  return {
-    ow_id: String(auto?.id || ''),
-    action_id: String(a?.id || ''),
-  };
+  return { ow_id: String(auto?.id || ''), action_id: String(a?.id || '') };
 }
 function _actionLifecycleEventTrigger(auto, a) {
-  return {
-    trigger: 'event',
-    event_type: 'ha_overwatch_action_started',
-    event_data: _actionLifecycleEventData(auto, a),
-    id: `action_started_${a?.id || 'action'}`,
-  };
+  return { trigger:'event', event_type:'ha_overwatch_action_started', event_data:_actionLifecycleEventData(auto, a), id:`action_started_${a?.id || 'action'}` };
 }
 function _actionLifecycleEventAction(auto, a) {
-  return {
-    event: 'ha_overwatch_action_started',
-    event_data: {
-      ..._actionLifecycleEventData(auto, a),
-      ow_name: String(auto?.name || ''),
-      action_type: String(a?.type || ''),
-      clear_mode: String(a?.clear_mode || 'none'),
-    },
-  };
+  return { event:'ha_overwatch_action_started', event_data:{ ..._actionLifecycleEventData(auto, a), ow_name:String(auto?.name || ''), action_type:String(a?.type || ''), clear_mode:String(a?.clear_mode || 'none') } };
 }
 function _actionNeedsLifecycleEvent(a, actionObj) {
   const clearMode = String(a?.clear_mode || 'none');
@@ -4008,10 +3992,21 @@ function _turnOffChooseBranchForAction(a, actionObj, sourceClearSources = []) {
   const triggerId = `action_started_${a?.id || 'action'}`;
   const sequence = [];
 
+  // The lifecycle event fires immediately after the parent action actually runs.
+  // Therefore the OFF sidecar must first keep the action asserted while the
+  // source remains active, then wait for the source-clear condition before
+  // starting the clear_for cooldown. Do not abort just because the source is
+  // still active at the moment the event is received.
+  if (_maintainEnabledForAction(a) && _actionSupportsMaintain(actionObj)) {
+    const activeMaintain = _activeMaintainRepeat(a, actionObj, sourceClearSources);
+    if (activeMaintain) sequence.push(activeMaintain);
+  }
+
+  sequence.push({ wait_template: _clearTemplateForAction(a, sourceClearSources), continue_on_timeout: false });
+
   if (_maintainEnabledForAction(a) && _actionSupportsMaintain(actionObj)) {
     sequence.push(..._cooldownMaintainSequence(a, actionObj, sourceClearSources));
   } else {
-    sequence.push({ wait_template: _clearTemplateForAction(a, sourceClearSources), continue_on_timeout: false });
     const clearFor = _autoDuration(a?.clear_for);
     if (clearFor) sequence.push({ delay: clearFor });
   }
