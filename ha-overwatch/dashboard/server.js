@@ -1,4 +1,4 @@
-// HA-Overwatch 0.05.35.28-turn-off-sidecar: source-clear cleanup generated as paired Turn OFF automation using trigger-level for/template triggers.
+// HA-Overwatch 0.05.35.30-turn-off-editor-filter-and-stale-zone-target-prune: paired Turn OFF automation hidden by metadata/id only; stale zone-scoped target entities pruned during generation.
 /* ============================================================
  * HA-Overwatch — server.js
  *
@@ -1511,11 +1511,15 @@ if (pathname === "/ow/alarms/responses/sync" && req.method === "POST") {
         }
       }
 
-      // Filter to HA-Overwatch automations only
+      // Filter to HA-Overwatch parent automations only.
+      // Generated child automations such as paired Turn OFF are managed by the parent
+      // and must not be shown as editable rows in the HA-O Automation Editor.
+      // Do not filter by alias text; users can legitimately name automations "- Turn OFF".
       const ours = allAutomations.filter(a =>
-        (a.alias || "").startsWith("HA-Overwatch") ||
+        ((a.alias || "").startsWith("HA-Overwatch") ||
         (a.description || "").includes("ow_meta:") ||
-        a.variables?.ow_id
+        a.variables?.ow_id) &&
+        !_isTurnOffAutomationConfig(a)
       );
 
       // For each found automation, fetch the full config from HA REST if we only have partial data
@@ -1554,8 +1558,9 @@ if (pathname === "/ow/alarms/responses/sync" && req.method === "POST") {
         } catch { return a; }
       }));
 
-      console.log(`[OW-Auto] ha-automations: found ${fullAutomations.length} OW automations (${readFromDisk?"disk":"REST"})`);
-      json(res, fullAutomations);
+      const visibleAutomations = fullAutomations.filter(a => !_isTurnOffAutomationConfig(a));
+      console.log(`[OW-Auto] ha-automations: found ${visibleAutomations.length} OW parent automations (${readFromDisk?"disk":"REST"}); hidden ${fullAutomations.length - visibleAutomations.length} generated child automations`);
+      json(res, visibleAutomations);
     } catch(e) {
       console.error("[OW-Auto] /ow/ha-automations error:", e.message);
       json(res, []);
@@ -3914,9 +3919,9 @@ function _pushDynamicTurnOff(seq, a, actionObj, sourceClearSources = []) {
   if (!offAction || clearMode === 'none') return;
   const clearFor = _autoDuration(a?.clear_for) || '00:00:00';
 
-  // 0.05.35.28: source_clear/condition cleanup is generated as a paired
-  // "Turn OFF" automation. Do not leave wait/delay/turn_off behind the ON
-  // automation because restart mode can cancel cleanup before turn_off runs.
+  // Source-clear/condition cleanup is generated as a paired "Turn OFF"
+  // automation. Do not leave wait/delay/turn_off behind the ON automation;
+  // restart mode can cancel cleanup before turn_off runs.
   if (clearMode === 'source_clears' || clearMode === 'conditions') return;
 
   if (clearMode === 'after_delay') {
@@ -3964,6 +3969,36 @@ function _resolveAutomationScopedEntityIds(a, key, zoneList, groupList, floorLis
   return [...out];
 }
 
+function _serverEntityKnown(entityId) {
+  const id = String(entityId || '').trim();
+  if (!id) return false;
+  if (serverHaStates[id]) return true;
+  try {
+    return (haRegistry.entities || []).some(e => e?.entity_id === id || e?.id === id);
+  } catch {
+    return false;
+  }
+}
+function _automationHasScopeSelection(a) {
+  return !!((a?.zone_ids || []).length || (a?.group_ids || []).length || (a?.floor_ids || []).length);
+}
+function _pruneZoneStoredEntityIds(a, key, zoneList, groupList, floorList) {
+  const stored = [...new Set([...(a?.entity_ids_zone || [])].filter(Boolean))];
+  if (!stored.length) return [];
+  const currentScoped = new Set(_resolveAutomationScopedEntityIds(a, key, zoneList, groupList, floorList));
+
+  // If the action has selected zones/groups/floors, entity_ids_zone is only a
+  // UI cache of zone-derived targets. Do not let removed/replaced zone devices
+  // remain in generated HA targets after zone membership changes.
+  if (_automationHasScopeSelection(a)) {
+    return stored.filter(entityId => currentScoped.has(entityId));
+  }
+
+  // If no scope is selected, retain standalone zone-list selections only while
+  // Home Assistant still knows the entity. This removes HA-deleted stale IDs.
+  return stored.filter(entityId => _serverEntityKnown(entityId) && !_serverEntityHidden(entityId));
+}
+
 function _automationRunMode(auto) {
   const requested = String(auto?.run_mode || 'auto');
   if (['single','restart','queued','parallel'].includes(requested)) return requested;
@@ -3973,6 +4008,12 @@ function _automationRunMode(auto) {
 function _automationTurnOffId(autoOrId) {
   const id = typeof autoOrId === 'string' ? autoOrId : String(autoOrId?.id || '');
   return id ? `${id}_turn_off` : '';
+}
+function _isTurnOffAutomationConfig(a) {
+  const id = String(a?.id || a?.variables?.ow_id || '');
+  // Do not hide by alias suffix. Users can legitimately create their own
+  // automations ending with "- Turn OFF".
+  return id.endsWith('_turn_off') || a?.variables?.ow_cleanup === true || a?.variables?.ow_child_type === 'turn_off';
 }
 function _flattenEntityIds(value) {
   if (!value) return [];
@@ -4036,13 +4077,7 @@ function _turnOffChooseBranchForAction(a, actionObj) {
   const offAction = _turnOffActionFor(actionObj);
   if (!offAction) return null;
   const clearId = _clearTriggerIdForAction(a);
-  return {
-    triggerId: clearId,
-    branch: {
-      conditions: [{ condition: 'trigger', id: clearId }],
-      sequence: [_withContinueOnError(offAction)],
-    },
-  };
+  return { triggerId: clearId, branch: { conditions: [{ condition: 'trigger', id: clearId }], sequence: [_withContinueOnError(offAction)] } };
 }
 function buildHAAutomationTurnOff(auto, allZones, allGroups, mainAutomation = null) {
   const main = mainAutomation || buildHAAutomation(auto, allZones, allGroups);
@@ -4053,41 +4088,32 @@ function buildHAAutomationTurnOff(auto, allZones, allGroups, mainAutomation = nu
   const groupList = allGroups || [];
   const floorList = loadFloors();
   function uniq(ids) { return [...new Set((ids || []).filter(Boolean))]; }
-  function targetFor(ids) {
-    const u = uniq(ids);
-    return { entity_id: u };
-  }
+  function targetFor(ids) { return { entity_id: uniq(ids) }; }
 
   const triggers = [];
   const choices = [];
   const seenTriggerIds = new Set();
-
   function addTurnOff(a, actionObj) {
     const trig = _offTriggerForAction(a, sourceClearSources);
     const branchWrap = _turnOffChooseBranchForAction(a, actionObj);
     if (!trig || !branchWrap) return;
-    if (!seenTriggerIds.has(trig.id)) {
-      seenTriggerIds.add(trig.id);
-      triggers.push(trig);
-    }
+    if (!seenTriggerIds.has(trig.id)) { seenTriggerIds.add(trig.id); triggers.push(trig); }
     choices.push(branchWrap.branch);
   }
 
   for (const a of (auto.actions || [])) {
     if (a.type === 'siren') {
-      const ids = uniq([..._resolveAutomationScopedEntityIds(a, 'sirens', zoneList, groupList, floorList), ...(a.entity_ids || []), ...(a.entity_ids_extra || [])]);
+      const ids = uniq([..._resolveAutomationScopedEntityIds(a, 'sirens', zoneList, groupList, floorList), ..._pruneZoneStoredEntityIds(a, 'sirens', zoneList, groupList, floorList), ...(a.entity_ids || []), ...(a.entity_ids_extra || [])]);
       if (ids.length) addTurnOff(a, { action:`siren.${a.service || 'turn_on'}`, target: targetFor(ids) });
     } else if (a.type === 'light') {
-      const ids = uniq([..._resolveAutomationScopedEntityIds(a, 'lights', zoneList, groupList, floorList), ...(a.entity_ids_zone || []), ...(a.entity_ids_other || []), ...(a.entity_ids || [])]);
+      const ids = uniq([..._resolveAutomationScopedEntityIds(a, 'lights', zoneList, groupList, floorList), ..._pruneZoneStoredEntityIds(a, 'lights', zoneList, groupList, floorList), ...(a.entity_ids_other || []), ...(a.entity_ids || [])]);
       if (ids.length) addTurnOff(a, { action:`light.${a.service || 'turn_on'}`, target: targetFor(ids) });
     } else if (a.type === 'camera_view') {
-      const ids = uniq([..._resolveAutomationScopedEntityIds(a, 'cameras', zoneList, groupList, floorList), ...(a.entity_ids || [])]);
+      const ids = uniq([..._resolveAutomationScopedEntityIds(a, 'cameras', zoneList, groupList, floorList), ..._pruneZoneStoredEntityIds(a, 'cameras', zoneList, groupList, floorList), ...(a.entity_ids || [])]);
       if (ids.length) addTurnOff(a, { action:`switch.${a.service || 'turn_on'}`, target: targetFor(ids) });
-    } else if (a.type === 'entity') {
-      if (a.entity_id) {
-        const domain = a.entity_id.split('.')[0];
-        addTurnOff(a, { action:`${domain}.${a.service || 'turn_on'}`, target:{ entity_id:[a.entity_id] } });
-      }
+    } else if (a.type === 'entity' && a.entity_id) {
+      const domain = a.entity_id.split('.')[0];
+      addTurnOff(a, { action:`${domain}.${a.service || 'turn_on'}`, target:{ entity_id:[a.entity_id] } });
     } else if (a.type === 'arm') {
       const ids = uniq(a.entity_ids || []);
       if (ids.length) addTurnOff(a, { action:`switch.${a.service || 'turn_on'}`, target: targetFor(ids) });
@@ -4099,13 +4125,7 @@ function buildHAAutomationTurnOff(auto, allZones, allGroups, mainAutomation = nu
     id: _automationTurnOffId(auto),
     alias: `HA-Overwatch — ${auto.name} - Turn OFF`,
     description: 'Created by HA-Overwatch',
-    variables: {
-      ow_id: _automationTurnOffId(auto),
-      ow_name: `${auto.name} - Turn OFF`,
-      ow_draft: auto,
-      ow_cleanup: true,
-      ow_parent_automation_id: auto.id,
-    },
+    variables: { ow_id: _automationTurnOffId(auto), ow_name: `${auto.name} - Turn OFF`, ow_draft: auto, ow_cleanup: true, ow_child_type: 'turn_off', ow_parent_automation_id: auto.id },
     mode: 'single',
     triggers,
     conditions: [],
@@ -4249,10 +4269,10 @@ function buildHAAutomation(auto, allZones, allGroups) {
 
   for (const a of (auto.actions || [])) {
     if (a.type === 'siren') {
-      const ids = uniq([..._resolveAutomationScopedEntityIds(a, 'sirens', zoneList, groupList, floorList), ...(a.entity_ids || []), ...(a.entity_ids_extra || [])]);
+      const ids = uniq([..._resolveAutomationScopedEntityIds(a, 'sirens', zoneList, groupList, floorList), ..._pruneZoneStoredEntityIds(a, 'sirens', zoneList, groupList, floorList), ...(a.entity_ids || []), ...(a.entity_ids_extra || [])]);
       if (ids.length) addActionBranch(a, { action:`siren.${a.service || 'turn_on'}`, target: targetFor(ids) });
     } else if (a.type === 'light') {
-      const ids = uniq([..._resolveAutomationScopedEntityIds(a, 'lights', zoneList, groupList, floorList), ...(a.entity_ids_zone || []), ...(a.entity_ids_other || []), ...(a.entity_ids || [])]);
+      const ids = uniq([..._resolveAutomationScopedEntityIds(a, 'lights', zoneList, groupList, floorList), ..._pruneZoneStoredEntityIds(a, 'lights', zoneList, groupList, floorList), ...(a.entity_ids_other || []), ...(a.entity_ids || [])]);
       if (ids.length) addActionBranch(a, { action:`light.${a.service || 'turn_on'}`, target: targetFor(ids) });
     } else if (a.type === 'notify') {
       const target = a.target || 'notify.notify';
@@ -4270,7 +4290,7 @@ function buildHAAutomation(auto, allZones, allGroups) {
         addActionBranch(a, act);
       }
     } else if (a.type === 'camera_view') {
-      const ids = uniq([..._resolveAutomationScopedEntityIds(a, 'cameras', zoneList, groupList, floorList), ...(a.entity_ids || [])]);
+      const ids = uniq([..._resolveAutomationScopedEntityIds(a, 'cameras', zoneList, groupList, floorList), ..._pruneZoneStoredEntityIds(a, 'cameras', zoneList, groupList, floorList), ...(a.entity_ids || [])]);
       if (ids.length) addActionBranch(a, { action:`switch.${a.service || 'turn_on'}`, target: targetFor(ids) });
     } else if (a.type === 'entity') {
       if (a.entity_id) {
