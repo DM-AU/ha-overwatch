@@ -1,5 +1,5 @@
 /* ================================================================
- * HA-Overwatch — automations.js  v0.05.35.35
+ * HA-Overwatch — automations.js  v0.05.35.37
  * Admin-only Automation Editor.
  * HA is source of truth — reads/writes directly via server proxy.
  * ================================================================ */
@@ -55,6 +55,10 @@ function automationErrorsFor(auto) {
 function formatErrorTime(value) {
   if (!value) return '';
   try { return new Date(value).toLocaleString(); } catch { return String(value); }
+}
+
+function entityConditionOperator(c) {
+  return String(c?.operator || c?.match || 'is') === 'is_not' ? 'is_not' : 'is';
 }
 
 /* ── Zone / Group status from haStates ─────────────────────── */
@@ -491,7 +495,7 @@ function addTrigger(type) {
 function addCondition(type) {
   const defaults = {
     time:   {time_mode:'manual',after:'00:00',before:'23:59',time_entity:''},
-    entity: {entity_id:'',state:'on'},
+    entity: {entity_id:'',state:'on',operator:'is'},
     zone_arm: {zone_ids:[],group_ids:[],state:'armed'},
     alarm: {alarm_ids:[],state:'triggered'},
     person: {entity_ids:[],state:'home'},
@@ -1489,9 +1493,13 @@ function conditionCard(c) {
         ${entityAutocomplete(`cond-time-entity-ac-${c.id}`,c.time_entity||'','sensor.* / input_datetime.* / schedule.*',null,['sensor','input_datetime','schedule'])}`}`;
   }
   if (c.type === 'entity') {
+    const op = entityConditionOperator(c);
     inner = `
       <div style="margin-bottom:10px;"><label style="${labelStyle}">Entity</label>${entityAutocomplete(`cond-entity-ac-${c.id}`,c.entity_id||'','Search any entity…')}</div>
-      <div><label style="${labelStyle}">Must be in state</label><input id="cond-state-${c.id}" type="text" value="${escH(c.state||'on')}" placeholder="on / off / home / …" style="${inputStyle}"/></div>`;
+      <div style="display:grid;grid-template-columns:160px 1fr;gap:8px;">
+        <div><label style="${labelStyle}">Condition</label><select id="cond-op-${c.id}" style="${selectStyle}"><option value="is" ${op==='is'?'selected':''}>Is</option><option value="is_not" ${op==='is_not'?'selected':''}>Is not</option></select></div>
+        <div><label style="${labelStyle}">State</label><input id="cond-state-${c.id}" type="text" value="${escH(c.state||'on')}" placeholder="on / off / home / …" style="${inputStyle}"/></div>
+      </div>`;
   }
   if (c.type === 'person') {
     const persons = entitiesByDomain('person');
@@ -1886,7 +1894,7 @@ function wireConditionFields(c) {
     if (c.time_mode!=='entity') { wireInput(`cond-after-${c.id}`,v=>c.after=v); wireInput(`cond-before-${c.id}`,v=>c.before=v); }
     else wireAutocomplete(`cond-time-entity-ac-${c.id}`,v=>c.time_entity=v);
   }
-  if (c.type==='entity') { wireAutocomplete(`cond-entity-ac-${c.id}`,v=>c.entity_id=v); wireInput(`cond-state-${c.id}`,v=>c.state=v); }
+  if (c.type==='entity') { wireAutocomplete(`cond-entity-ac-${c.id}`,v=>c.entity_id=v); wireSelect(`cond-op-${c.id}`,v=>{ c.operator=v; c.match=v; }); wireInput(`cond-state-${c.id}`,v=>c.state=v); }
   if (c.type==='person') {
     wireSearchableCheckbox(`cond-person-${c.id}`,ids=>c.entity_ids=ids);
     wireAutocomplete(`cond-person-ac-${c.id}`,v=>c.entity_ids=v?[v]:[]);

@@ -1,4 +1,4 @@
-// HA-Overwatch 0.05.35.36-action-state-enforcement: maintain desired state while source active and during clear cooldown; includes managed entity prune and classifier priority fixes.
+// HA-Overwatch 0.05.35.37-entity-condition-operators: maintain desired state while source active and during clear cooldown; includes managed entity prune and classifier priority fixes.
 /* ============================================================
  * HA-Overwatch — server.js
  *
@@ -4095,7 +4095,9 @@ function buildHAAutomation(auto, allZones, allGroups) {
     } else if (c.type === 'alarm') {
       conditions.push({ condition:'template', value_template:_alarmConditionTemplate(c.alarm_ids || [], c.state || 'triggered') });
     } else if (c.type === 'entity' && c.entity_id) {
-      conditions.push({ condition:"state", entity_id:c.entity_id, state:c.state||'on' });
+      const stateCond = { condition:"state", entity_id:c.entity_id, state:c.state||'on' };
+      if (String(c.operator || c.match || 'is') === 'is_not') conditions.push({ condition:'not', conditions:[stateCond] });
+      else conditions.push(stateCond);
     } else if (c.type === 'person' && (c.entity_ids||[]).length) {
       c.entity_ids.forEach(eid => {
         conditions.push({ condition:"state", entity_id:eid, state:c.state||'home' });
