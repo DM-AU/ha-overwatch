@@ -1,5 +1,5 @@
 /* ================================================================
- * HA-Overwatch — automations.js  v0.05.35.47
+ * HA-Overwatch — automations.js  v0.05.35.48
  * Admin-only Automation Editor.
  * HA is source of truth — reads/writes directly via server proxy.
  * ================================================================ */
@@ -733,7 +733,8 @@ ${failed.slice(0,10).join('\n')}`);
       const next = !(a.enabled !== false);
       try {
         if (btn) { btn.disabled = true; btn.textContent = next ? 'ON…' : 'OFF…'; }
-        await setAutomationEnabled(a, next);
+        const result = await setAutomationEnabled(a, next);
+        if (result?.entity_ids && !result.entity_ids.length) console.warn('[OW-Auto] Toggle updated config but no HA automation entity IDs were resolved.', result);
         await loadFromHA();
         await loadAutomationErrors();
         renderList();
