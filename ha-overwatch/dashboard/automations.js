@@ -1,5 +1,5 @@
 /* ================================================================
- * HA-Overwatch — automations.js  v0.05.35.45
+ * HA-Overwatch — automations.js  v0.05.35.46
  * Admin-only Automation Editor.
  * HA is source of truth — reads/writes directly via server proxy.
  * ================================================================ */
@@ -709,8 +709,20 @@ function renderList() {
       await saveLocalIndex();await deleteFromHA(a.id);renderList();
     });
     _panelEl.querySelector(`[data-auto-tog="${a.id}"]`)?.addEventListener('click',async e=>{
-      e.stopPropagation();a.enabled=!a.enabled;
-      await pushToHA(a);await loadFromHA();renderList();
+      e.stopPropagation();
+      const btn = e.currentTarget;
+      const next = !(a.enabled !== false);
+      try {
+        if (btn) { btn.disabled = true; btn.textContent = next ? 'ON…' : 'OFF…'; }
+        await setAutomationEnabled(a, next);
+        await loadFromHA();
+        await loadAutomationErrors();
+        renderList();
+      } catch(err) {
+        alert(`Failed to ${next ? 'enable' : 'disable'} automation in HA:
+${err.message}`);
+        renderList();
+      }
     });
   });
 }

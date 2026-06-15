@@ -1,4 +1,4 @@
-// HA-Overwatch 0.05.35.45-automation-toggle-and-lifecycle-maintain-option
+// HA-Overwatch 0.05.35.46-per-action-turnoff-and-config-toggle
 /* ============================================================
  * HA-Overwatch — server.js
  *
@@ -1015,11 +1015,43 @@ function startAutomationTraceMonitor() {
   automationTraceScanTimer = setInterval(() => { try { collectAutomationTraceErrors(); } catch (e) { console.warn(`[HA-Overwatch] automation trace scan failed: ${e.message}`); } }, AUTOMATION_TRACE_SCAN_INTERVAL_MS);
 }
 
-async function _getAutomationStatesForMatch() { const out = new Map(); for (const [eid, st] of Object.entries(serverHaStates || {})) if (String(eid).startsWith('automation.')) out.set(eid, st); try { const r = await _haApiRequest('GET', '/api/states', null); if (r.status >= 200 && r.status < 300) { const arr = JSON.parse(r.body || '[]'); if (Array.isArray(arr)) arr.forEach(st => { if (st?.entity_id?.startsWith('automation.')) { out.set(st.entity_id, st); serverHaStates[st.entity_id] = st; } }); } } catch(e) { console.warn('[OW-Auto] automation state lookup failed:', e.message); } return [...out.values()]; }
-async function _automationEntityCandidates(id, alias = "") { const out = new Set(); const add = v => { if (v) out.add(String(v)); }; const idSlug = nameSlug(id); const aliasSlug = nameSlug(alias); const bareAlias = String(alias || '').replace(/^HA-Overwatch\s*[—–-]\s*/,''); const bareAliasSlug = nameSlug(bareAlias); const states = await _getAutomationStatesForMatch(); for (const st of states) { const entityId = st.entity_id || ''; const attrs = st.attributes || {}; const fn = String(attrs.friendly_name || ''); const sid = String(attrs.id || ''); if (sid === id || entityId === `automation.${idSlug}` || entityId === `automation.${aliasSlug}` || entityId === `automation.${bareAliasSlug}` || fn === alias || fn === bareAlias || nameSlug(fn) === aliasSlug || nameSlug(fn) === bareAliasSlug) add(entityId); } return [...out]; }
-async function _automationEntityCandidatesForManaged(owId, owName = "") { const parentAlias = owName ? `HA-Overwatch — ${owName}` : ""; const offAlias = owName ? `HA-Overwatch — ${owName} - Turn OFF` : ""; return [...new Set([...(await _automationEntityCandidates(owId, parentAlias)), ...(await _automationEntityCandidates(`${owId}_turn_off`, offAlias))])]; }
-async function _setHAState(entityId, state) { try { const old = serverHaStates[entityId] || { entity_id:entityId, attributes:{} }; const r = await _haApiRequest('POST', `/api/states/${entityId}`, { state, attributes: old.attributes || {} }); if (r.status >= 200 && r.status < 300) serverHaStates[entityId] = { ...old, state }; return r; } catch(e) { return { status:0, body:e.message }; } }
-async function setManagedAutomationEnabled(owId, owName, enabled) { const entityIds = await _automationEntityCandidatesForManaged(owId, owName); if (!entityIds.length) return { ok:false, reason:'automation entity not found', entity_ids:[] }; const service = enabled ? 'turn_on' : 'turn_off'; const data = { entity_id: entityIds }; if (!enabled) data.stop_actions = false; const r = await _haApiRequest('POST', `/api/services/automation/${service}`, data); const desired = enabled ? 'on' : 'off'; const stateResults = []; for (const eid of entityIds) stateResults.push({ entity_id:eid, result: await _setHAState(eid, desired) }); entityIds.forEach(eid => { serverHaStates[eid] = { ...(serverHaStates[eid] || { entity_id:eid, attributes:{} }), state: desired }; }); return { ok:r.status >= 200 && r.status < 300, status:r.status, detail:r.body, entity_ids:entityIds, enabled, state_results:stateResults }; }
+async function _getAutomationConfigs() {
+  const r = await _haApiRequest('GET', '/api/config/automation/config', null);
+  if (r.status < 200 || r.status >= 300) return [];
+  try { const p = JSON.parse(r.body || '[]'); return Array.isArray(p) ? p : (Array.isArray(p?.automations) ? p.automations : []); } catch { return []; }
+}
+async function _managedAutomationConfigIds(owId, owName = '') {
+  const parentId = String(owId || '');
+  const ids = new Set(parentId ? [parentId] : []);
+  const configs = await _getAutomationConfigs();
+  for (const cfg of configs) {
+    const id = String(cfg?.id || '');
+    const vars = cfg?.variables || {};
+    if (!id) continue;
+    if (id === parentId || id === _automationTurnOffId(parentId) || id.startsWith(`${parentId}_turn_off_`)) ids.add(id);
+    if (vars.ow_parent_automation_id === parentId && (vars.ow_child_type === 'turn_off' || vars.ow_cleanup === true)) ids.add(id);
+  }
+  return [...ids];
+}
+async function _automationConfigGet(id) { return _haApiRequest('GET', `/api/config/automation/config/${encodeURIComponent(String(id))}`, null); }
+async function _automationConfigPost(id, cfg) { return _haApiRequest('POST', `/api/config/automation/config/${encodeURIComponent(String(id))}`, cfg); }
+async function setAutomationConfigDisabled(id, disabled) {
+  const get = await _automationConfigGet(id);
+  if (get.status < 200 || get.status >= 300) return { id, ok:false, status:get.status, detail:get.body };
+  let cfg; try { cfg = JSON.parse(get.body || '{}'); } catch { return { id, ok:false, status:get.status, detail:'Invalid config JSON' }; }
+  cfg.disabled = !!disabled;
+  const post = await _automationConfigPost(id, cfg);
+  return { id, ok:post.status >= 200 && post.status < 300, status:post.status, detail:post.body, disabled:!!disabled };
+}
+async function setManagedAutomationEnabled(owId, owName, enabled) {
+  const ids = await _managedAutomationConfigIds(owId, owName);
+  if (!ids.length) return { ok:false, reason:'automation config not found', ids:[] };
+  const results = [];
+  for (const id of ids) results.push(await setAutomationConfigDisabled(id, !enabled));
+  await _reloadHAAutomations();
+  return { ok:results.every(r => r.ok), enabled, ids, results };
+}
+
 /* ─── REQUEST HANDLER ─────────────────────────────────────── */
 const server = http.createServer(async (req, res) => {
   // CORS preflight
@@ -1658,8 +1690,24 @@ if (pathname === "/ow/alarms/responses/sync" && req.method === "POST") {
       const pushed=[];
       for (const haAuto of haAutos) { const result=await automationConfigRequest("POST",String(haAuto.id),haAuto); pushed.push({id:haAuto.id,status:result.status,detail:result.body}); if(result.status<200||result.status>=300){json(res,{ok:false,ha_status:result.status,pushed,detail:result.body});return;} }
       const deleted=[];
-      if (staleTurnOffId && !generatedIds.has(staleTurnOffId)) { try { const del=await automationConfigRequest("DELETE",staleTurnOffId,null); deleted.push({id:staleTurnOffId,status:del.status}); } catch(e) { deleted.push({id:staleTurnOffId,error:e.message}); } }
-      await reloadAutomations(); json(res,{ok:true,ha_status:pushed[0]?.status||200,pushed,deleted});
+    const staleIds = new Set([staleTurnOffId].filter(Boolean));
+    try {
+      const listRes = await _haApiRequest('GET', '/api/config/automation/config', null);
+      if (listRes.status >= 200 && listRes.status < 300) {
+        const parsed = JSON.parse(listRes.body || '[]');
+        const list = Array.isArray(parsed) ? parsed : (Array.isArray(parsed?.automations) ? parsed.automations : []);
+        for (const cfgAuto of list) {
+          const cid = String(cfgAuto?.id || '');
+          const vars = cfgAuto?.variables || {};
+          if ((cid === staleTurnOffId || cid.startsWith(`${auto.id}_turn_off_`) || (vars.ow_parent_automation_id === auto.id && vars.ow_child_type === 'turn_off')) && !generatedIds.has(cid)) staleIds.add(cid);
+        }
+      }
+    } catch(e) { console.warn('[OW-Auto] stale turn-off scan failed:', e.message); }
+    for (const staleId of [...staleIds]) {
+      if (generatedIds.has(staleId)) continue;
+      try { const del=await automationConfigRequest("DELETE",staleId,null); deleted.push({id:staleId,status:del.status}); } catch(e) { deleted.push({id:staleId,error:e.message}); }
+    }
+    await reloadAutomations(); json(res,{ok:true,ha_status:pushed[0]?.status||200,pushed,deleted});
     } catch(e) { err(res,e.message,500); }
     return;
   }
@@ -1675,7 +1723,9 @@ if (pathname === "/ow/alarms/responses/sync" && req.method === "POST") {
       if (process.env.SUPERVISOR_TOKEN) { hostname="supervisor"; port=80; basePath="/core"; token=process.env.SUPERVISOR_TOKEN; lib=http; }
       else { const u = new URL(cfg.ha_url.replace(/\/$/, "")); hostname=u.hostname; port=parseInt(u.port)||(u.protocol==="https:"?443:80); basePath=""; token=cfg.ha_token; lib=u.protocol==="https:"?https:http; }
       function deleteAutomationConfig(deleteId){ return new Promise(resolve=>{ const haReq=lib.request({hostname,port,method:"DELETE",path:`${basePath}/api/config/automation/config/${deleteId}`,headers:{"Authorization":`Bearer ${token}`,"Content-Length":"0"}},haRes=>{let d="";haRes.on("data",c=>d+=c);haRes.on("end",()=>resolve({id:deleteId,status:haRes.statusCode||0,detail:d}));}); haReq.on("error",e=>resolve({id:deleteId,error:e.message})); haReq.end(); }); }
-      const deleted=[]; for (const deleteId of [...new Set([String(id||''), _automationTurnOffId(id)].filter(Boolean))]) deleted.push(await deleteAutomationConfig(deleteId));
+      const idsToDelete = new Set([String(id||''), _automationTurnOffId(id)].filter(Boolean));
+      try { const listRes = await _haApiRequest('GET', '/api/config/automation/config', null); if (listRes.status >= 200 && listRes.status < 300) { const parsed = JSON.parse(listRes.body || '[]'); const list = Array.isArray(parsed) ? parsed : (Array.isArray(parsed?.automations) ? parsed.automations : []); for (const cfgAuto of list) { const cid = String(cfgAuto?.id || ''); const vars = cfgAuto?.variables || {}; if (cid.startsWith(`${id}_turn_off_`) || (vars.ow_parent_automation_id === id && vars.ow_child_type === 'turn_off')) idsToDelete.add(cid); } } } catch(e) { console.warn('[OW-Auto] delete child scan failed:', e.message); }
+      const deleted=[]; for (const deleteId of [...idsToDelete]) deleted.push(await deleteAutomationConfig(deleteId));
       json(res,{ok:true,ha_status:deleted[0]?.status||200,deleted});
     } catch(e) { err(res,e.message,500); }
     return;
@@ -3975,6 +4025,7 @@ function _automationRunMode(auto) {
 }
 
 function _automationTurnOffId(autoOrId) { const id = typeof autoOrId === 'string' ? autoOrId : String(autoOrId?.id || ''); return id ? `${id}_turn_off` : ''; }
+function _automationActionTurnOffId(autoOrId, actionOrId) { const autoId = typeof autoOrId === 'string' ? autoOrId : String(autoOrId?.id || ''); const actionId = typeof actionOrId === 'string' ? actionOrId : String(actionOrId?.id || ''); return autoId && actionId ? `${autoId}_turn_off_${actionId}` : ''; }
 function _isTurnOffAutomationConfig(a) { const id = String(a?.id || a?.variables?.ow_id || ''); return id.endsWith('_turn_off') || a?.variables?.ow_cleanup === true || a?.variables?.ow_child_type === 'turn_off'; }
 function _flattenEntityIds(value) { if (!value) return []; return [...new Set((Array.isArray(value) ? value : [value]).filter(Boolean).map(String))]; }
 function _durationObject(value) { const s = _autoDuration(value) || '00:00:00'; const [hours, minutes, seconds] = s.split(':').map(v => Math.max(0, parseInt(v, 10) || 0)); return { hours, minutes, seconds }; }
@@ -4012,8 +4063,35 @@ function _zoneIdsForAutoTriggerScope(t, zoneList, groupList, floorList) { const 
 function _filteredZoneSensorEntityIdsForTrigger(t, zoneList, groupList, floorList) { const enabled = new Set(_autoEnabledFilterTypes(t)); if (!enabled.size) return []; const out = new Set(); _zoneIdsForAutoTriggerScope(t, zoneList, groupList, floorList).forEach(zid => { const z = zoneList.find(x => x.id === zid); (z?.sensors || []).forEach(entityId => { if (!entityId || _serverEntityHidden(entityId)) return; const st = serverHaStates[entityId]; const type = classifyAlarmTriggerType(entityId, st); if (type && enabled.has(type)) out.add(entityId); }); }); return [...out]; }
 function _automationZoneArmEntities(c, zoneList, groupList, floorList) { const ids = []; const zoneById = id => zoneList.find(z => z.id === id); const zoneSlugByIdLocal = id => { const z = zoneById(id); return z ? (nameSlug(z.name) || z.id) : nameSlug(id); }; const groupSlugByIdLocal = id => { const g = groupList.find(g => g.id === id); return g ? (nameSlug(g.name) || g.id) : nameSlug(id); }; (c.floor_ids || []).forEach(fid => ids.push(`switch.overwatch_zone_floor_${fid}`)); (c.group_ids || []).forEach(gid => ids.push(`switch.overwatch_zone_group_${groupSlugByIdLocal(gid)}`)); (c.zone_ids || []).forEach(zid => ids.push(`switch.overwatch_zone_${zoneSlugByIdLocal(zid)}`)); return [...new Set(ids.filter(Boolean))]; }
 function _alarmConditionTemplate(alarmIds, state) { const ids = [...new Set((alarmIds || []).filter(Boolean))]; const trigIds = ids.flatMap(_alarmTriggeredForAutomationId); const switchIds = ids.map(_alarmSwitchForAutomationId); const j = v => String(v || '').replace(/'/g,"\\'"); if (state === 'enabled') return `{{ ${switchIds.map(e => `is_state('${j(e)}','on')`).join(' and ') || 'false'} }}`; if (state === 'disabled') return `{{ ${switchIds.map(e => `is_state('${j(e)}','off')`).join(' and ') || 'false'} }}`; if (state === 'triggered') return `{{ ${trigIds.map(e => `is_state('${j(e)}','on')`).join(' or ') || 'false'} }}`; return `{{ ${trigIds.map(e => `not is_state('${j(e)}','on')`).join(' and ') || 'false'} }}`; }
-function buildHAAutomationTurnOff(auto, allZones, allGroups, mainAutomation = null) { const main = mainAutomation || buildHAAutomation(auto, allZones, allGroups); const sourceClearSources = _sourceClearSourcesFromTriggers(main.triggers || main.trigger || []); if (!sourceClearSources.length) return null; const zoneList = allZones || [], groupList = allGroups || [], floorList = loadFloors(); const uniq = ids => [...new Set((ids || []).filter(Boolean))]; const targetFor = ids => ({ entity_id: uniq(ids) }); const triggers = [], choices = [], seenTriggerIds = new Set(); function addTurnOff(a, actionObj) { const scopedSources = _actionScopedSourceClearSources(a, sourceClearSources); const trig = _offTriggerForAction(a, scopedSources, auto); const branchWrap = _turnOffChooseBranchForAction(a, actionObj, scopedSources); if (!trig || !branchWrap || !scopedSources.length) return; if (!seenTriggerIds.has(trig.id)) { seenTriggerIds.add(trig.id); triggers.push(trig); } choices.push(branchWrap.branch); } for (const a of (auto.actions || [])) { if (a.type === 'siren') { const ids = uniq([..._resolveAutomationScopedEntityIds(a,'sirens',zoneList,groupList,floorList), ..._pruneZoneStoredEntityIds(a,'sirens',zoneList,groupList,floorList), ...(a.entity_ids||[]), ...(a.entity_ids_extra||[])]); if (ids.length) addTurnOff(a,{action:`siren.${a.service||'turn_on'}`,target:targetFor(ids)}); } else if (a.type === 'light') { const ids = uniq([..._resolveAutomationScopedEntityIds(a,'lights',zoneList,groupList,floorList), ..._pruneZoneStoredEntityIds(a,'lights',zoneList,groupList,floorList), ...(a.entity_ids_other||[]), ...(a.entity_ids||[])]); if (ids.length) addTurnOff(a,{action:`light.${a.service||'turn_on'}`,target:targetFor(ids)}); } else if (a.type === 'camera_view') { const ids = uniq([..._resolveAutomationScopedEntityIds(a,'cameras',zoneList,groupList,floorList), ..._pruneZoneStoredEntityIds(a,'cameras',zoneList,groupList,floorList), ..._pruneKnownVisibleEntityIds(a.entity_ids)]); if (ids.length) addTurnOff(a,{action:`switch.${a.service||'turn_on'}`,target:targetFor(ids)}); } else if (a.type === 'entity' && a.entity_id) { const domain = a.entity_id.split('.')[0]; addTurnOff(a,{action:`${domain}.${a.service||'turn_on'}`,target:{entity_id:[a.entity_id]}}); } else if (a.type === 'arm') { const ids = uniq(a.entity_ids||[]); if (ids.length) addTurnOff(a,{action:`switch.${a.service||'turn_on'}`,target:targetFor(ids)}); } } if (!triggers.length || !choices.length) return null; return { id:_automationTurnOffId(auto), alias:`HA-Overwatch — ${auto.name} - Turn OFF`, description:'Created by HA-Overwatch', variables:{ ow_id:_automationTurnOffId(auto), ow_name:`${auto.name} - Turn OFF`, ow_draft:auto, ow_cleanup:true, ow_child_type:'turn_off', ow_parent_automation_id:auto.id }, mode:'restart', triggers, conditions:[], actions:[{choose:choices}] }; }
-function buildHAAutomationSet(auto, allZones, allGroups) { const cleanAuto = _sanitizeManagedAutomationDraft(auto, allZones || [], allGroups || []); const main = buildHAAutomation(cleanAuto, allZones, allGroups); const turnOff = buildHAAutomationTurnOff(cleanAuto, allZones, allGroups, main); return turnOff ? [main, turnOff] : [main]; }
+function _turnOffAutomationForAction(auto, action, actionObj, sourceClearSources) {
+  const scopedSources = _actionScopedSourceClearSources(action, sourceClearSources);
+  const trig = _offTriggerForAction(action, scopedSources, auto);
+  const branchWrap = _turnOffChooseBranchForAction(action, actionObj, scopedSources);
+  if (!trig || !branchWrap || !scopedSources.length) return null;
+  const id = _automationActionTurnOffId(auto, action);
+  return { id, alias:`HA-Overwatch — ${auto.name} - Turn OFF - ${action.id}`, description:'Created by HA-Overwatch', variables:{ ow_id:id, ow_name:`${auto.name} - Turn OFF - ${action.id}`, ow_draft:auto, ow_cleanup:true, ow_child_type:'turn_off', ow_parent_automation_id:auto.id, ow_action_id:action.id }, mode:'restart', triggers:[trig], conditions:[], actions:branchWrap.branch.sequence };
+}
+function buildHAAutomationTurnOffSet(auto, allZones, allGroups, mainAutomation = null) {
+  const main = mainAutomation || buildHAAutomation(auto, allZones, allGroups);
+  const sourceClearSources = _sourceClearSourcesFromTriggers(main.triggers || main.trigger || []);
+  if (!sourceClearSources.length) return [];
+  const zoneList = allZones || [], groupList = allGroups || [], floorList = loadFloors();
+  const uniq = ids => [...new Set((ids || []).filter(Boolean))];
+  const targetFor = ids => ({ entity_id: uniq(ids) });
+  const out = [];
+  function addTurnOff(a, actionObj) { const child = _turnOffAutomationForAction(auto, a, actionObj, sourceClearSources); if (child) out.push(child); }
+  for (const a of (auto.actions || [])) {
+    if (a.type === 'siren') { const ids = uniq([..._resolveAutomationScopedEntityIds(a,'sirens',zoneList,groupList,floorList), ..._pruneZoneStoredEntityIds(a,'sirens',zoneList,groupList,floorList), ...(a.entity_ids||[]), ...(a.entity_ids_extra||[])]); if (ids.length) addTurnOff(a,{action:`siren.${a.service||'turn_on'}`,target:targetFor(ids)}); }
+    else if (a.type === 'light') { const ids = uniq([..._resolveAutomationScopedEntityIds(a,'lights',zoneList,groupList,floorList), ..._pruneZoneStoredEntityIds(a,'lights',zoneList,groupList,floorList), ...(a.entity_ids_other||[]), ...(a.entity_ids||[])]); if (ids.length) addTurnOff(a,{action:`light.${a.service||'turn_on'}`,target:targetFor(ids)}); }
+    else if (a.type === 'camera_view') { const ids = uniq([..._resolveAutomationScopedEntityIds(a,'cameras',zoneList,groupList,floorList), ..._pruneZoneStoredEntityIds(a,'cameras',zoneList,groupList,floorList), ..._pruneKnownVisibleEntityIds(a.entity_ids)]); if (ids.length) addTurnOff(a,{action:`switch.${a.service||'turn_on'}`,target:targetFor(ids)}); }
+    else if (a.type === 'entity' && a.entity_id) { const domain = a.entity_id.split('.')[0]; addTurnOff(a,{action:`${domain}.${a.service||'turn_on'}`,target:{entity_id:[a.entity_id]}}); }
+    else if (a.type === 'arm') { const ids = uniq(a.entity_ids||[]); if (ids.length) addTurnOff(a,{action:`switch.${a.service||'turn_on'}`,target:targetFor(ids)}); }
+  }
+  return out;
+}
+function buildHAAutomationTurnOff(auto, allZones, allGroups, mainAutomation = null) { return buildHAAutomationTurnOffSet(auto, allZones, allGroups, mainAutomation)[0] || null; }
+
+function buildHAAutomationSet(auto, allZones, allGroups) { const cleanAuto = _sanitizeManagedAutomationDraft(auto, allZones || [], allGroups || []); const main = buildHAAutomation(cleanAuto, allZones, allGroups); return [main, ...buildHAAutomationTurnOffSet(cleanAuto, allZones, allGroups, main)]; }
 
 /* ── Build HA automation config from OW draft ─────────────── */
 function buildHAAutomation(auto, allZones, allGroups) {
