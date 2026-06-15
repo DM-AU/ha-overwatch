@@ -1,5 +1,5 @@
 /* ================================================================
- * HA-Overwatch — automations.js  v0.05.35.46
+ * HA-Overwatch — automations.js  v0.05.35.47
  * Admin-only Automation Editor.
  * HA is source of truth — reads/writes directly via server proxy.
  * ================================================================ */
@@ -672,7 +672,8 @@ function renderList() {
         ${_parseErrors.length ? `<span style="font-size:10px;color:#ff3b30;background:rgba(255,59,48,0.1);border:1px solid rgba(255,59,48,0.25);border-radius:6px;padding:2px 7px;">⚠ ${_parseErrors.length} parse error${_parseErrors.length>1?'s':''}</span>` : ''}
       </div>
       <div style="display:flex;gap:8px;">
-        <button id="owAutoRefreshBtn" title="Reload from HA" style="${btnStyle('rgba(255,255,255,0.06)','rgba(255,255,255,0.04)',true)}">↻</button>
+        <button id="owAutoRefreshBtn" title="Import / reload all from HA" style="${btnStyle('rgba(255,255,255,0.06)','rgba(255,255,255,0.04)',true)}">↻ Import</button>
+        <button id="owAutoExportAllBtn" title="Export / re-save all HA-Overwatch automations to HA" style="${btnStyle('rgba(255,255,255,0.06)','rgba(255,255,255,0.04)',true)}">⇧ Export all</button>
         <button id="owAutoNewBtn" style="${btnStyle('#0064d2','rgba(0,100,210,0.18)')}">+ New</button>
         <button id="owAutoCloseBtn" style="${btnStyle('rgba(255,255,255,0.08)','rgba(255,255,255,0.05)',true)}">✕ Close</button>
       </div>
@@ -691,8 +692,26 @@ function renderList() {
   _panelEl.querySelector('#owAutoNewBtn').onclick=()=>{_editing='new';_draft=newDraft();_collapsedSteps={};renderEditor();};
   _panelEl.querySelector('#owAutoCloseBtn').onclick=close;
   _panelEl.querySelector('#owAutoRefreshBtn').onclick=async()=>{
-    const btn=_panelEl.querySelector('#owAutoRefreshBtn'); if(btn)btn.textContent='↻…';
+    const btn=_panelEl.querySelector('#owAutoRefreshBtn'); if(btn)btn.textContent='Importing…';
     await loadFromHA(); await loadHAEntities(); await loadAutomationErrors(); renderList();
+  };
+  _panelEl.querySelector('#owAutoExportAllBtn').onclick=async()=>{
+    if(!confirm(`Export / re-save all ${_automations.length} HA-Overwatch automation(s) back to Home Assistant?`)) return;
+    const btn=_panelEl.querySelector('#owAutoExportAllBtn');
+    if(btn){btn.disabled=true;btn.textContent='Exporting…';}
+    let ok=0, failed=[];
+    for (const item of _automations) {
+      const result = await pushToHA(item.draft);
+      if (result?.ok === false) failed.push(`${item.draft.name}: ${result.detail||'failed'}`);
+      else ok++;
+    }
+    await loadFromHA(); await loadAutomationErrors(); renderList();
+    if (failed.length) alert(`Export complete with errors.
+
+Succeeded: ${ok}
+Failed: ${failed.length}
+
+${failed.slice(0,10).join('\n')}`);
   };
   const searchEl=_panelEl.querySelector('#owAutoListSearch');
   searchEl.oninput=()=>{_listSearch=searchEl.value;renderList();};

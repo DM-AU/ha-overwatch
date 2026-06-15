@@ -1,4 +1,4 @@
-// HA-Overwatch 0.05.35.46-per-action-turnoff-and-config-toggle
+// HA-Overwatch 0.05.35.47-export-all-config-toggle-and-per-action-lifecycle
 /* ============================================================
  * HA-Overwatch — server.js
  *
@@ -1020,36 +1020,46 @@ async function _getAutomationConfigs() {
   if (r.status < 200 || r.status >= 300) return [];
   try { const p = JSON.parse(r.body || '[]'); return Array.isArray(p) ? p : (Array.isArray(p?.automations) ? p.automations : []); } catch { return []; }
 }
-async function _managedAutomationConfigIds(owId, owName = '') {
-  const parentId = String(owId || '');
-  const ids = new Set(parentId ? [parentId] : []);
-  const configs = await _getAutomationConfigs();
-  for (const cfg of configs) {
-    const id = String(cfg?.id || '');
-    const vars = cfg?.variables || {};
-    if (!id) continue;
-    if (id === parentId || id === _automationTurnOffId(parentId) || id.startsWith(`${parentId}_turn_off_`)) ids.add(id);
-    if (vars.ow_parent_automation_id === parentId && (vars.ow_child_type === 'turn_off' || vars.ow_cleanup === true)) ids.add(id);
-  }
-  return [...ids];
+function _isOwlifecycleChildFor(parentId, cfg) {
+  const id = String(cfg?.id || '');
+  const vars = cfg?.variables || {};
+  return id === _automationTurnOffId(parentId) || id.startsWith(`${parentId}_turn_off_`) || (vars.ow_parent_automation_id === parentId && (vars.ow_child_type === 'turn_off' || vars.ow_cleanup === true));
 }
-async function _automationConfigGet(id) { return _haApiRequest('GET', `/api/config/automation/config/${encodeURIComponent(String(id))}`, null); }
-async function _automationConfigPost(id, cfg) { return _haApiRequest('POST', `/api/config/automation/config/${encodeURIComponent(String(id))}`, cfg); }
-async function setAutomationConfigDisabled(id, disabled) {
-  const get = await _automationConfigGet(id);
-  if (get.status < 200 || get.status >= 300) return { id, ok:false, status:get.status, detail:get.body };
-  let cfg; try { cfg = JSON.parse(get.body || '{}'); } catch { return { id, ok:false, status:get.status, detail:'Invalid config JSON' }; }
-  cfg.disabled = !!disabled;
-  const post = await _automationConfigPost(id, cfg);
-  return { id, ok:post.status >= 200 && post.status < 300, status:post.status, detail:post.body, disabled:!!disabled };
+async function _pushAutomationConfigById(id, cfg) { return _haApiRequest('POST', `/api/config/automation/config/${encodeURIComponent(String(id))}`, cfg); }
+async function _deleteAutomationConfigById(id) { return _haApiRequest('DELETE', `/api/config/automation/config/${encodeURIComponent(String(id))}`, null); }
+async function _findManagedAutomationDraft(owId) {
+  const parentId = String(owId || '');
+  const configs = await _getAutomationConfigs();
+  const parent = configs.find(c => String(c?.id || '') === parentId || c?.variables?.ow_id === parentId);
+  if (parent?.variables?.ow_draft) return JSON.parse(JSON.stringify(parent.variables.ow_draft));
+  return null;
 }
 async function setManagedAutomationEnabled(owId, owName, enabled) {
-  const ids = await _managedAutomationConfigIds(owId, owName);
-  if (!ids.length) return { ok:false, reason:'automation config not found', ids:[] };
-  const results = [];
-  for (const id of ids) results.push(await setAutomationConfigDisabled(id, !enabled));
+  const parentId = String(owId || '');
+  const draft = await _findManagedAutomationDraft(parentId);
+  if (!draft) return { ok:false, reason:'managed automation draft not found in HA config', ids:[parentId] };
+  draft.enabled = enabled !== false;
+  const haAutos = buildHAAutomationSet(draft, loadZones(), loadGroups());
+  const generatedIds = new Set(haAutos.map(a => String(a.id)));
+  const pushed = [];
+  for (const cfg of haAutos) {
+    const r = await _pushAutomationConfigById(cfg.id, cfg);
+    pushed.push({ id:cfg.id, status:r.status, detail:r.body });
+    if (r.status < 200 || r.status >= 300) return { ok:false, reason:'Failed to update HA automation config', enabled:draft.enabled, pushed };
+  }
+  const deleted = [];
+  try {
+    const configs = await _getAutomationConfigs();
+    for (const cfg of configs) {
+      const cid = String(cfg?.id || '');
+      if (_isOwlifecycleChildFor(parentId, cfg) && !generatedIds.has(cid)) {
+        const r = await _deleteAutomationConfigById(cid);
+        deleted.push({ id:cid, status:r.status, detail:r.body });
+      }
+    }
+  } catch(e) { deleted.push({ error:e.message }); }
   await _reloadHAAutomations();
-  return { ok:results.every(r => r.ok), enabled, ids, results };
+  return { ok:true, enabled:draft.enabled, ids:[...generatedIds], pushed, deleted };
 }
 
 /* ─── REQUEST HANDLER ─────────────────────────────────────── */
@@ -4069,7 +4079,7 @@ function _turnOffAutomationForAction(auto, action, actionObj, sourceClearSources
   const branchWrap = _turnOffChooseBranchForAction(action, actionObj, scopedSources);
   if (!trig || !branchWrap || !scopedSources.length) return null;
   const id = _automationActionTurnOffId(auto, action);
-  return { id, alias:`HA-Overwatch — ${auto.name} - Turn OFF - ${action.id}`, description:'Created by HA-Overwatch', variables:{ ow_id:id, ow_name:`${auto.name} - Turn OFF - ${action.id}`, ow_draft:auto, ow_cleanup:true, ow_child_type:'turn_off', ow_parent_automation_id:auto.id, ow_action_id:action.id }, mode:'restart', triggers:[trig], conditions:[], actions:branchWrap.branch.sequence };
+  return { id, alias:`HA-Overwatch — ${auto.name} - Turn OFF - ${action.id}`, description:'Created by HA-Overwatch', disabled:auto.enabled === false, variables:{ ow_id:id, ow_name:`${auto.name} - Turn OFF - ${action.id}`, ow_draft:auto, ow_cleanup:true, ow_child_type:'turn_off', ow_parent_automation_id:auto.id, ow_action_id:action.id }, mode:'restart', triggers:[trig], conditions:[], actions:branchWrap.branch.sequence };
 }
 function buildHAAutomationTurnOffSet(auto, allZones, allGroups, mainAutomation = null) {
   const main = mainAutomation || buildHAAutomation(auto, allZones, allGroups);
@@ -4273,6 +4283,7 @@ function buildHAAutomation(auto, allZones, allGroups) {
     id:          auto.id,
     alias:       `HA-Overwatch — ${auto.name}`,
     description: 'Created by HA-Overwatch',
+    disabled:    auto.enabled === false,
     variables:   owMeta,
     // Source-clears actions need restart mode so new trigger events reset the clear/cooldown timer.
     // Keep all other automations as single to preserve existing behaviour.
