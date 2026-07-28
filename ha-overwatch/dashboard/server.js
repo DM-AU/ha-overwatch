@@ -1,4 +1,4 @@
-// HA-Overwatch 0.05.35.48-export-all-service-toggle-and-per-action-lifecycle
+// HA-Overwatch 0.05.35.49-zone-sensor-membership-parser-fix
 /* ============================================================
  * HA-Overwatch — server.js
  *
@@ -139,45 +139,109 @@ function loadZones() {
 }
 
 function parseZoneYaml(text) {
-  const z = { enabled: true, sensors: [], cameras: [], lights: [], sirens: [], ha_excluded_entities: [] };
+  const z = {
+    enabled: true,
+    sensors: [],
+    cameras: [],
+    lights: [],
+    sirens: [],
+    ha_excluded_entities: [],
+  };
+
+  // Zone files have existed across several dashboard versions. Accept both the
+  // original scalar-list format and the object/inline-list forms produced by
+  // newer or manually edited files. In particular, do not silently discard a
+  // second sensor stored as "- entity_id: binary_sensor...".
+  const sectionAliases = {
+    sensors: "sensors",
+    sensor_ids: "sensors",
+    binary_sensors: "sensors",
+    doors: "sensors",
+    windows: "sensors",
+    cameras: "cameras",
+    camera_ids: "cameras",
+    lights: "lights",
+    light_ids: "lights",
+    sirens: "sirens",
+    siren_ids: "sirens",
+    ha_excluded_entities: "ha_excluded_entities",
+  };
+  const listSections = new Set(Object.keys(sectionAliases));
   let section = "";
-  for (const raw of text.split("\n")) {
-    const line = raw.trim();
+
+  function cleanScalar(value) {
+    let v = String(value == null ? "" : value).trim();
+    // Strip an unquoted YAML comment and surrounding quotes/comma.
+    if (!/^['"]/.test(v)) v = v.replace(/\s+#.*$/, "").trim();
+    v = v.replace(/,$/, "").trim();
+    if ((v.startsWith('"') && v.endsWith('"')) ||
+        (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1);
+    return v.trim();
+  }
+
+  function add(sectionName, value) {
+    const target = sectionAliases[sectionName] || sectionName;
+    if (!Array.isArray(z[target])) return;
+    const entityId = cleanScalar(value);
+    if (!entityId || !entityId.includes(".")) return;
+    if (!z[target].includes(entityId)) z[target].push(entityId);
+  }
+
+  function addInlineList(sectionName, rawValue) {
+    const raw = String(rawValue || "").trim();
+    if (!raw.startsWith("[") || !raw.endsWith("]")) return false;
+    const inner = raw.slice(1, -1);
+    // Entity IDs cannot contain commas, so a small CSV-style split is safe here.
+    inner.split(",").forEach(item => add(sectionName, item));
+    return true;
+  }
+
+  for (const rawLine of String(text || "").split(/\r?\n/)) {
+    const line = rawLine.trim();
     if (!line || line.startsWith("#")) continue;
-    // List section headers
-    if (line === "sensors:") { section = "sensors"; continue; }
-    if (line === "cameras:") { section = "cameras"; continue; }
-    if (line === "lights:")  { section = "lights";  continue; }
-    if (line === "sirens:")  { section = "sirens";  continue; }
-    if (line === "ha_excluded_entities:") { section = "ha_excluded_entities"; continue; }
-    if (line === "points:")  { section = "points";  continue; }
-    // List items
-    if (line.startsWith("- ") && section) {
-      const val = line.slice(2).trim();
-      if (section === "sensors") z.sensors.push(val);
-      else if (section === "cameras") z.cameras.push(val);
-      else if (section === "lights")  z.lights.push(val);
-      else if (section === "sirens")  z.sirens.push(val);
-      else if (section === "ha_excluded_entities") z.ha_excluded_entities.push(val);
+
+    const header = line.match(/^([A-Za-z0-9_]+):\s*(.*)$/);
+    if (header && listSections.has(header[1])) {
+      section = header[1];
+      if (header[2]) addInlineList(section, header[2]);
       continue;
     }
-    // Key: value pairs reset the section
-    if (!line.includes(":")) continue;
+    if (line === "points:") { section = "points"; continue; }
+
+    if (line.startsWith("- ") && section && section !== "points") {
+      const item = line.slice(2).trim();
+      // Support object list items used by some zone writers:
+      //   - entity_id: binary_sensor.shed_door
+      //   - id: binary_sensor.shed_door
+      const objectItem = item.match(/^(?:entity_id|entity|id|value):\s*(.+)$/i);
+      add(section, objectItem ? objectItem[1] : item);
+      continue;
+    }
+
+    // Support an indented object property following a bare dash.
+    if (section && section !== "points") {
+      const objectProperty = line.match(/^(?:entity_id|entity|id|value):\s*(.+)$/i);
+      if (objectProperty) {
+        add(section, objectProperty[1]);
+        continue;
+      }
+    }
+
+    if (!header) continue;
     section = "";
-    const colonIdx = line.indexOf(":");
-    const key = line.slice(0, colonIdx).trim();
-    const val = line.slice(colonIdx + 1).trim()
-                    .replace(/^"(.*)"$/, "$1").replace(/^'(.*)'$/, "$1");
+    const key = header[1];
+    const val = cleanScalar(header[2]);
     if      (key === "id")       z.id       = val;
     else if (key === "name")     z.name     = val;
-    else if (key === "enabled")  z.enabled  = val !== "false";
+    else if (key === "enabled")  z.enabled  = val.toLowerCase() !== "false";
     else if (key === "floor_id") z.floor_id = val;
   }
+
   const excluded = new Set((z.ha_excluded_entities || []).map(String));
-  z.sensors = (z.sensors || []).filter(entityId => !excluded.has(String(entityId)));
-  z.cameras = (z.cameras || []).filter(entityId => !excluded.has(String(entityId)));
-  z.lights  = (z.lights  || []).filter(entityId => !excluded.has(String(entityId)));
-  z.sirens  = (z.sirens  || []).filter(entityId => !excluded.has(String(entityId)));
+  for (const key of ["sensors", "cameras", "lights", "sirens"]) {
+    z[key] = [...new Set((z[key] || []).map(String))]
+      .filter(entityId => entityId && !excluded.has(entityId));
+  }
   return z;
 }
 
