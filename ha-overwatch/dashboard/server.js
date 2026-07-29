@@ -1,4 +1,4 @@
-// HA-Overwatch 0.05.35.49-zone-sensor-membership-parser-fix
+// HA-Overwatch 0.05.35.50-server-zone-linked-door-trigger-fix
 /* ============================================================
  * HA-Overwatch — server.js
  *
@@ -320,11 +320,51 @@ function isTriggeredStateValue(state) {
   return ["on", "open", "opening", "detected", "home", "triggered", "motion", "unlocked"].includes(String(state || "").toLowerCase());
 }
 
+// Door pins are stored separately in config/door_pins.json. The dashboard has
+// always included linked door pins when drawing a zone, but /ow/triggered only
+// evaluated zone.sensors. That split allowed the map to flash while the HA zone
+// and group binary sensors remained off.
+function doorPinLinkedZoneIds(pin) {
+  const raw = pin?.linked_zone_ids ?? pin?.linked_zones ?? pin?.zone_ids ?? pin?.zones ?? pin?.zone_id ?? pin?.linked_zone_id ?? [];
+  const values = Array.isArray(raw) ? raw : [raw];
+  return [...new Set(values.map(v => {
+    if (v && typeof v === "object") return v.id || v.zone_id || v.value || "";
+    return v;
+  }).map(v => String(v || "").trim()).filter(Boolean))];
+}
+
+function doorPinTriggerEntityIds(pin) {
+  const out = [];
+  const add = value => {
+    const id = String(value || "").trim();
+    if (id && !out.includes(id)) out.push(id);
+  };
+  // The sensor entity is always the position/contact source.
+  add(pin?.sensor_entity || pin?.sensor_entity_id || pin?.entity_id);
+  // Match the dashboard's optional "Count control entity as triggered" setting.
+  if (pin?.count_control_entity_as_triggered === true ||
+      pin?.control_counts_as_triggered === true ||
+      pin?.count_control_as_triggered === true) {
+    add(pin?.control_entity || pin?.control_entity_id);
+  }
+  return out;
+}
+
+function zoneTriggerSourceIds(zone, doorPins = loadPins("door_pins")) {
+  const out = new Set((zone?.sensors || []).map(String).filter(Boolean));
+  for (const pin of (Array.isArray(doorPins) ? doorPins : [])) {
+    if (!doorPinLinkedZoneIds(pin).includes(String(zone?.id || ""))) continue;
+    doorPinTriggerEntityIds(pin).forEach(entityId => out.add(entityId));
+  }
+  return [...out];
+}
+
 function buildTriggeredSnapshot() {
   const out = {};
+  const doorPins = loadPins("door_pins");
   for (const zone of loadZones()) {
     const slug = nameSlug(zone.name) || zone.id;
-    out[slug] = (zone.sensors || []).some(entityId => {
+    out[slug] = zoneTriggerSourceIds(zone, doorPins).some(entityId => {
       const st = serverHaStates[entityId];
       return st ? isTriggeredStateValue(st.state) : false;
     });
@@ -334,12 +374,21 @@ function buildTriggeredSnapshot() {
 
 function buildTriggeredDetailSnapshot() {
   const out = {};
+  const doorPins = loadPins("door_pins");
   for (const zone of loadZones()) {
     const slug = nameSlug(zone.name) || zone.id;
-    const sensors = (zone.sensors || []).map(entityId => {
+    const zoneSensorIds = new Set((zone.sensors || []).map(String));
+    const linkedDoorIds = new Set();
+    for (const pin of doorPins) {
+      if (doorPinLinkedZoneIds(pin).includes(String(zone.id))) {
+        doorPinTriggerEntityIds(pin).forEach(entityId => linkedDoorIds.add(entityId));
+      }
+    }
+    const sensors = zoneTriggerSourceIds(zone, doorPins).map(entityId => {
       const st = serverHaStates[entityId];
       return {
         entity_id: entityId,
+        source: linkedDoorIds.has(entityId) && !zoneSensorIds.has(entityId) ? "linked_door_pin" : "zone_sensor",
         state: st ? st.state : "unknown",
         triggered: st ? isTriggeredStateValue(st.state) : false,
         last_changed: st ? st.last_changed : null,
