@@ -748,6 +748,11 @@ const haRegistry = { floors: [], areas: [], devices: [], entities: [], loaded: f
 const haRegistryCallbacks = {}; // msgId -> type being fetched
 let haMsgId = 1; // module-scoped so IDs are unique across restarts
 let haListenerSend = null; // set by startHAListener once connected — used to trigger re-fetches
+let haListenerConnected = false;
+let haListenerLastMessageAt = 0;
+let haListenerLastEventAt = 0;
+let haListenerLastFullStateAt = 0;
+let haListenerReconnectCount = 0;
 
 // Trigger a fresh fetch of all registry data from HA
 function refetchHARegistry() {
@@ -804,7 +809,7 @@ const serverHaStates = {};
  * Shared across all browser clients — 5 browsers requesting the same
  * camera snapshot within the TTL window get one upstream HA request.
  * ────────────────────────────────────────────────────────────── */
-const SNAPSHOT_CACHE_TTL_MS   = 1000;   // snapshot-grid-v1.3: per-camera upstream min interval
+const SNAPSHOT_CACHE_TTL_MS   = Math.max(1000, parseInt(process.env.OW_SNAPSHOT_CACHE_TTL_MS || "2000", 10));   // per-camera upstream min interval
 const SNAPSHOT_STALE_TTL_MS   = 45000;  // v1.3: longer stale fallback for slow 180 cameras
 const CAMERA_429_BACKOFF_MS   = 8000;   // v1.3: short 429 backoff; stale served during backoff
 const CAMERA_ERROR_BACKOFF_MS = 3000;   // v1.3: transient error backoff
@@ -814,7 +819,7 @@ const cameraSnapshotInflight = new Map(); // entityId → Promise<void>
 const cameraBackoff         = new Map(); // entityId → { until, reason, lastStatus }
 
 const SNAPSHOT_MAX_BYTES = 12 * 1024 * 1024; // v1.3: Reolink 180 snapshots can be >5MB
-const SNAPSHOT_GLOBAL_CONCURRENCY = 3;
+const SNAPSHOT_GLOBAL_CONCURRENCY = Math.max(1, parseInt(process.env.OW_SNAPSHOT_CONCURRENCY || "6", 10));
 let snapshotActiveFetches = 0;
 const snapshotQueue = [];
 
@@ -871,7 +876,50 @@ function scheduleSnapshotJob(fn) {
   });
 }
 
+
+function isCameraEntityId(value) {
+  return /^camera\.[a-zA-Z0-9_]+$/.test(String(value || "").trim());
+}
+
+function normaliseCameraLookupText(value) {
+  return String(value || "").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function resolveCameraEntityIdFromSnapshotKey(rawKey) {
+  let key = String(rawKey || "").trim();
+  if (!key) return null;
+  try { key = decodeURIComponent(key); } catch {}
+  key = key.trim();
+
+  if (isCameraEntityId(key)) return { entityId: key, label: key, source: "entity_id" };
+
+  const target = normaliseCameraLookupText(key);
+  const cameraStates = Object.values(serverHaStates || {}).filter(st => st && isCameraEntityId(st.entity_id));
+
+  const friendlyMatches = cameraStates.filter(st => normaliseCameraLookupText(st.attributes?.friendly_name) === target);
+  if (friendlyMatches.length === 1) {
+    return { entityId: friendlyMatches[0].entity_id, label: friendlyMatches[0].attributes?.friendly_name || key, source: "friendly_name" };
+  }
+
+  const slug = target.replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  if (slug) {
+    const slugMatches = cameraStates.filter(st => {
+      const eidSlug = String(st.entity_id || "").replace(/^camera\./, "").toLowerCase();
+      const friendlySlug = normaliseCameraLookupText(st.attributes?.friendly_name).replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+      return eidSlug === slug || friendlySlug === slug;
+    });
+    if (slugMatches.length === 1) {
+      return { entityId: slugMatches[0].entity_id, label: slugMatches[0].attributes?.friendly_name || key, source: "slug_alias" };
+    }
+  }
+
+  return null;
+}
+
 function fetchSnapshotFromHA(entity) {
+  const resolvedCamera = resolveCameraEntityIdFromSnapshotKey(entity);
+  if (!resolvedCamera) return Promise.reject(new Error(`invalid camera entity: ${entity}`));
+  entity = resolvedCamera.entityId;
   const cfg = getHAConfig(loadConfig());
   if (!cfg.ha_url || !cfg.ha_token) return Promise.reject(new Error("HA not configured"));
   const userCfg = loadConfig();
@@ -882,7 +930,7 @@ function fetchSnapshotFromHA(entity) {
   try { parsed = new URL(proxyHaUrl); } catch { return Promise.reject(new Error("Invalid HA URL")); }
   const isHttps = parsed.protocol === "https:";
   const lib = isHttps ? https : http;
-  const endpoint = `/api/camera_proxy/${entity}`;
+  const endpoint = `/api/camera_proxy/${encodeURIComponent(entity)}`;
   return scheduleSnapshotJob(() => new Promise((resolve, reject) => {
     const haReq = lib.request({
       hostname: parsed.hostname,
@@ -2058,8 +2106,23 @@ if (pathname === "/ow/alarms/responses/sync" && req.method === "POST") {
 
   /* ── Snapshot-grid-v1.3 camera cache ─────────────────────── */
   if (pathname.startsWith("/ow/snap-cache/")) {
-    const entity = decodeURIComponent(pathname.slice("/ow/snap-cache/".length).split("?")[0] || "");
-    if (!entity) { sendSnapshotPlaceholder(res, "camera", 400, "missing_entity"); return; }
+    let requestedCamera = pathname.slice("/ow/snap-cache/".length).split("?")[0] || "";
+    try { requestedCamera = decodeURIComponent(requestedCamera); } catch {}
+    requestedCamera = String(requestedCamera || "").trim();
+    if (!requestedCamera) { sendSnapshotPlaceholder(res, "camera", 400, "missing_entity"); return; }
+
+    const resolvedCamera = resolveCameraEntityIdFromSnapshotKey(requestedCamera);
+    if (!resolvedCamera) {
+      console.warn(`[SNAP CACHE] rejected non-camera snapshot key: ${requestedCamera}`);
+      sendSnapshotPlaceholder(res, requestedCamera, 200, "invalid_camera_entity");
+      return;
+    }
+
+    const entity = resolvedCamera.entityId;
+    if (resolvedCamera.source !== "entity_id") {
+      console.log(`[SNAP CACHE] resolved ${resolvedCamera.source}: ${requestedCamera} -> ${entity}`);
+    }
+
     const now = Date.now();
     const cached = cameraSnapshotCache.get(entity);
     const backoff = cameraBackoff.get(entity);
@@ -3090,6 +3153,22 @@ function startHAListener() {
       reconnectDelay = 5000;
       let buf = Buffer.alloc(0);
       let connected = true;
+      let authenticated = false;
+      haListenerConnected = true;
+      haListenerLastMessageAt = Date.now();
+
+      function closeAndReconnect(reason) {
+        if (!connected) return;
+        connected = false;
+        haListenerConnected = false;
+        haListenerSend = null;
+        clearInterval(pingTimer);
+        clearInterval(watchdogTimer);
+        buf = null;
+        try { sock.destroy(); } catch {}
+        console.warn(`[HA-Overwatch] HA listener reconnecting: ${reason}`);
+        scheduleReconnect();
+      }
 
       function send(obj) {
         const id = haMsgId++;
@@ -3107,7 +3186,17 @@ function startHAListener() {
         } catch { clearInterval(pingTimer); }
       }, 30000);
 
+      const watchdogTimer = setInterval(() => {
+        if (!connected) { clearInterval(watchdogTimer); return; }
+        if (!authenticated) return;
+        const lastActivity = Math.max(haListenerLastMessageAt || 0, haListenerLastEventAt || 0, haListenerLastFullStateAt || 0);
+        if (lastActivity && Date.now() - lastActivity > 90000) {
+          closeAndReconnect(`no HA websocket activity for ${Date.now() - lastActivity} ms`);
+        }
+      }, 30000);
+
       sock.on("data", chunk => {
+        haListenerLastMessageAt = Date.now();
         if (!connected || buf === null) return;
         buf = Buffer.concat([buf, chunk]);
         while (buf.length >= 2) {
@@ -3124,22 +3213,10 @@ function startHAListener() {
       });
 
       sock.on("close", () => {
-        if (!connected) return;
-        connected = false;
-        haListenerSend = null;
-        clearInterval(pingTimer);
-        buf = null; // release buffer memory
-        console.log("[HA-Overwatch] HA listener disconnected");
-        scheduleReconnect();
+        closeAndReconnect("socket closed");
       });
       sock.on("error", e => {
-        if (!connected) return;
-        connected = false;
-        haListenerSend = null;
-        clearInterval(pingTimer);
-        buf = null; // release buffer memory
-        console.error("[HA-Overwatch] HA listener error:", e.message);
-        scheduleReconnect();
+        closeAndReconnect(e && e.message ? `socket error: ${e.message}` : "socket error");
       });
     });
 
@@ -3177,6 +3254,12 @@ function startHAListener() {
       return;
     }
     if (msg.type === "auth_ok") {
+      authenticated = true;
+      haListenerConnected = true;
+      haListenerReconnectCount++;
+      haListenerLastMessageAt = Date.now();
+      Object.keys(serverHaStates).forEach(k => delete serverHaStates[k]);
+      cameraBackoff.clear();
       refreshZoneCache();
       if (zoneCacheTimer) clearInterval(zoneCacheTimer);
       zoneCacheTimer = setInterval(refreshZoneCache, 60000); // keep cache fresh
@@ -3205,8 +3288,10 @@ function startHAListener() {
         }
         return;
       }
+      Object.keys(serverHaStates).forEach(k => delete serverHaStates[k]);
       msg.result.forEach(st => { if (st.entity_id) serverHaStates[st.entity_id] = st; });
-      console.log(`[HA-Overwatch] State cache populated: ${Object.keys(serverHaStates).length} entities`);
+      haListenerLastFullStateAt = Date.now();
+      console.log(`[HA-Overwatch] State cache rebuilt: ${Object.keys(serverHaStates).length} entities`);
       // Seed triggered zone state from current HA states — catches sensors already on at startup
       // Without this, zones stay un-triggered until the next state_changed event
       let seeded = 0;
@@ -3222,6 +3307,7 @@ function startHAListener() {
       return;
     }
     if (msg.type === "event" && msg.event?.event_type === "state_changed") {
+      haListenerLastEventAt = Date.now();
       const { entity_id, new_state } = msg.event.data || {};
       if (!entity_id || !new_state) return;
       // Keep full state cache up to date
