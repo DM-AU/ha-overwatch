@@ -382,6 +382,21 @@ function canArmDisarm() {
 let haReconnectTimer = null;
 let haReconnectDelay = 1000;   // exponential backoff: 1s→2s→4s→8s→30s max
 let haSubscribedEntities = new Set();
+let haRealtimeSessionId = 0;
+let haLastRealtimeEventAt = 0;
+let haLastFullStateFetchAt = 0;
+
+function resetHARealtimeState(reason = "") {
+  haSubscribedEntities.clear();
+  haPendingCmds = {};
+  haStates = {};
+  haStatesLoaded = false;
+  haRealtimeSessionId++;
+  haLastRealtimeEventAt = 0;
+  haLastFullStateFetchAt = 0;
+  if (reason) console.log(`[HA-Overwatch] Reset HA realtime state: ${reason}`);
+}
+
 
 /* ─── MODULE LOADER ───────────────────────────────────────── */
 async function loadModule(targetId, file) {
@@ -2857,6 +2872,22 @@ function apiPath(rel) {
 }
 
 /* ─── SERVER HEALTH AND HA STATUS HELPERS moved to modules/ow-log.js ───────────────────────── */
+
+function startHARealtimeWatchdog() {
+  if (window.__owHaRealtimeWatchdog) clearInterval(window.__owHaRealtimeWatchdog);
+  window.__owHaRealtimeWatchdog = setInterval(() => {
+    if (!haConnected || !haSocket || haSocket.readyState !== WebSocket.OPEN) return;
+    const now = Date.now();
+    const lastLive = Math.max(haLastRealtimeEventAt || 0, haLastFullStateFetchAt || 0);
+    if (lastLive && now - lastLive > 90000) {
+      logEvent("warn", "HA realtime stale; forcing websocket reconnect.", "ha");
+      resetHARealtimeState("realtime watchdog");
+      try { haSocket.close(); } catch {}
+      scheduleReconnect();
+    }
+  }, 30000);
+}
+
 function connectHA() {
   if (haSocket && (haSocket.readyState === WebSocket.OPEN || haSocket.readyState === WebSocket.CONNECTING)) return;
   if (haReconnectTimer) clearTimeout(haReconnectTimer);
@@ -2920,9 +2951,11 @@ function connectHA() {
       haConnected = true;
       haEverConnected = true;
       haReconnectDelay = 1000;     // reset exponential backoff
+      resetHARealtimeState("auth_ok reconnect");
       showReconnectBanner(false);
       setHAStatus("connected");
       logEvent("ok", "Connected to Home Assistant (" + (msg.ha_version || "?") + ")", "ha");
+      startHARealtimeWatchdog();
       fetchAllStates();
       subscribeHAEntities();
       // Clear camera failure state on reconnect so cameras auto-recover
@@ -2942,9 +2975,11 @@ function connectHA() {
     }
 
     if (msg.type === "result" && msg.success && Array.isArray(msg.result)) {
+      haStates = {};
       for (const st of msg.result) {
         haStates[st.entity_id] = st;
       }
+      haLastFullStateFetchAt = Date.now();
       haStatesLoaded = true; // mark states as fully loaded — safe to show fault state now
       logEvent("info", `Fetched ${msg.result.length} entity states from HA.`, "ha");
 
@@ -2973,6 +3008,7 @@ function connectHA() {
     }
 
     if (msg.type === "event" && msg.event?.event_type === "state_changed") {
+      haLastRealtimeEventAt = Date.now();
       const data = msg.event.data;
       if (data?.new_state) {
         const prev = haStates[data.entity_id];
@@ -3134,7 +3170,7 @@ function connectHA() {
 
   haSocket.onclose = (ev) => {
     haConnected = false;
-    haStatesLoaded = false; // reset so fault check pauses until states reload
+    resetHARealtimeState("socket closed");
     setHAStatus("disconnected");
     showReconnectBanner(true);
     const reason = ev.reason ? ` (${ev.reason})` : "";
@@ -3147,14 +3183,20 @@ function connectHA() {
     if (ev.code === 1006 && haReconnectDelay < 5000) {
       haReconnectDelay = 5000;
     }
+    haSocket = null;
     scheduleReconnect();
   };
 
   haSocket.onerror = () => {
+    haConnected = false;
+    resetHARealtimeState("socket error");
     setHAStatus("error");
+    showReconnectBanner(true);
     if (haEverConnected) {
       logEvent("error", "HA WebSocket error. Is the HA URL correct and reachable?", "ha");
     }
+    try { haSocket.close(); } catch {}
+    scheduleReconnect();
   };
 }
 
@@ -3185,9 +3227,11 @@ function startDirectModePoller() {
           // Cache not ready yet — retry quickly
           nextPoll = 500;
         } else {
+          haStates = {};
           Object.values(states).forEach(st => {
             if (st.entity_id) haStates[st.entity_id] = st;
           });
+          haLastFullStateFetchAt = Date.now();
 
           if (!haConnected) {
             haConnected = true;
@@ -3256,6 +3300,7 @@ function sendHA(payload) {
 }
 
 function fetchAllStates() {
+  haLastFullStateFetchAt = Date.now();
   sendHA({ type: "get_states" });
 }
 
