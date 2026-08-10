@@ -805,6 +805,104 @@ function waitForHARegistryRefresh(refreshId, timeoutMs = 5000) {
 // Keyed by entity_id, value is the full HA state object {entity_id, state, attributes, ...}
 const serverHaStates = {};
 
+// Direct-mode wall tablets depend entirely on /ow/states. If the HA websocket
+// listener silently stalls during a Home Assistant reboot, the cache may still
+// be non-empty but stale. These helpers let /ow/states self-heal by doing a
+// throttled REST refresh from HA Core instead of serving old cache forever.
+const HA_STATES_REST_REFRESH_MIN_MS = Math.max(500, parseInt(process.env.OW_STATES_REST_REFRESH_MIN_MS || "1500", 10));
+const HA_STATES_STALE_MS = Math.max(2000, parseInt(process.env.OW_STATES_STALE_MS || "10000", 10));
+let haStatesRestRefreshInFlight = null;
+let haStatesLastRestRefreshAt = 0;
+let haStatesLastRestRefreshError = "";
+
+function replaceServerHaStatesFromArray(states, source = "unknown") {
+  if (!Array.isArray(states)) return 0;
+  Object.keys(serverHaStates).forEach(k => delete serverHaStates[k]);
+  states.forEach(st => { if (st && st.entity_id) serverHaStates[st.entity_id] = st; });
+  haListenerLastFullStateAt = Date.now();
+  haStatesLastRestRefreshError = "";
+  console.log(`[HA-Overwatch] State cache rebuilt from ${source}: ${Object.keys(serverHaStates).length} entities`);
+  return Object.keys(serverHaStates).length;
+}
+
+function latestHAStateActivityAt() {
+  return Math.max(haListenerLastEventAt || 0, haListenerLastFullStateAt || 0, haStatesLastRestRefreshAt || 0);
+}
+
+function serverHaStatesNeedRefresh(force = false) {
+  if (force) return true;
+  if (Object.keys(serverHaStates).length === 0) return true;
+  const last = latestHAStateActivityAt();
+  if (!last) return true;
+  return Date.now() - last > HA_STATES_STALE_MS;
+}
+
+function refreshServerHaStatesFromSupervisor(reason = "manual", opts = {}) {
+  if (!process.env.SUPERVISOR_TOKEN) return Promise.resolve(false);
+  const force = opts.force === true;
+  const now = Date.now();
+  if (!force && !serverHaStatesNeedRefresh(false)) return Promise.resolve(true);
+  if (!force && now - haStatesLastRestRefreshAt < HA_STATES_REST_REFRESH_MIN_MS && Object.keys(serverHaStates).length > 0) {
+    return Promise.resolve(true);
+  }
+  if (haStatesRestRefreshInFlight) return haStatesRestRefreshInFlight;
+
+  haStatesRestRefreshInFlight = new Promise(resolve => {
+    let settled = false;
+    const finish = ok => {
+      if (settled) return;
+      settled = true;
+      haStatesRestRefreshInFlight = null;
+      resolve(ok);
+    };
+
+    const haReq = http.request({
+      hostname: "supervisor",
+      port: 80,
+      path: "/core/api/states",
+      method: "GET",
+      headers: {
+        "Authorization": `Bearer ${process.env.SUPERVISOR_TOKEN}`,
+        "Accept": "application/json",
+      },
+    }, haRes => {
+      let body = "";
+      haRes.on("data", c => body += c);
+      haRes.on("end", () => {
+        haStatesLastRestRefreshAt = Date.now();
+        if ((haRes.statusCode || 0) < 200 || (haRes.statusCode || 0) >= 300) {
+          haStatesLastRestRefreshError = `HA REST states returned ${haRes.statusCode || 0}`;
+          console.warn(`[HA-Overwatch] /ow/states REST refresh failed (${reason}): ${haStatesLastRestRefreshError}`);
+          finish(false);
+          return;
+        }
+        try {
+          const states = JSON.parse(body);
+          if (Array.isArray(states)) {
+            replaceServerHaStatesFromArray(states, `REST ${reason}`);
+            finish(true);
+            return;
+          }
+          haStatesLastRestRefreshError = "HA REST states response was not an array";
+        } catch (e) {
+          haStatesLastRestRefreshError = e.message || String(e);
+        }
+        console.warn(`[HA-Overwatch] /ow/states REST refresh failed (${reason}): ${haStatesLastRestRefreshError}`);
+        finish(false);
+      });
+    });
+    haReq.setTimeout(5000, () => haReq.destroy(new Error("HA REST states timeout")));
+    haReq.on("error", e => {
+      haStatesLastRestRefreshAt = Date.now();
+      haStatesLastRestRefreshError = e.message || String(e);
+      console.warn(`[HA-Overwatch] /ow/states REST refresh error (${reason}): ${haStatesLastRestRefreshError}`);
+      finish(false);
+    });
+    haReq.end();
+  });
+  return haStatesRestRefreshInFlight;
+}
+
 /* ── Camera snapshot cache ───────────────────────────────────────
  * Shared across all browser clients — 5 browsers requesting the same
  * camera snapshot within the TTL window get one upstream HA request.
@@ -1285,6 +1383,20 @@ const server = http.createServer(async (req, res) => {
       isAddon,
       appDir:  APP_DIR,
       dataDir: DATA_DIR,
+      haListenerConnected,
+      haListenerReconnectCount,
+      haStateCount: Object.keys(serverHaStates).length,
+      haLastMessageAt: haListenerLastMessageAt ? new Date(haListenerLastMessageAt).toISOString() : null,
+      haLastEventAt: haListenerLastEventAt ? new Date(haListenerLastEventAt).toISOString() : null,
+      haLastFullStateAt: haListenerLastFullStateAt ? new Date(haListenerLastFullStateAt).toISOString() : null,
+      haStateCacheAgeMs: latestHAStateActivityAt() ? Date.now() - latestHAStateActivityAt() : null,
+      haStatesRestRefresh: {
+        lastAt: haStatesLastRestRefreshAt ? new Date(haStatesLastRestRefreshAt).toISOString() : null,
+        lastError: haStatesLastRestRefreshError || "",
+        minMs: HA_STATES_REST_REFRESH_MIN_MS,
+        staleMs: HA_STATES_STALE_MS,
+        inFlight: !!haStatesRestRefreshInFlight,
+      },
     });
     return;
   }
@@ -1553,34 +1665,10 @@ if (pathname === "/ow/alarms/responses/sync" && req.method === "POST") {
 
   /* ── /ow/states — direct mode frontend polls for full HA entity states ── */
   if (pathname === "/ow/states" && req.method === "GET") {
-    // If the HA listener hasn't populated the cache yet, do a one-shot REST fetch
-    if (Object.keys(serverHaStates).length === 0 && process.env.SUPERVISOR_TOKEN) {
-      const haReq = http.request({
-        hostname: "supervisor",
-        port:     80,
-        path:     "/core/api/states",
-        method:   "GET",
-        headers: {
-          "Authorization": `Bearer ${process.env.SUPERVISOR_TOKEN}`,
-          "Content-Type":  "application/json",
-        },
-      }, haRes => {
-        let body = "";
-        haRes.on("data", c => body += c);
-        haRes.on("end", () => {
-          try {
-            const states = JSON.parse(body);
-            if (Array.isArray(states)) {
-              states.forEach(st => { if (st.entity_id) serverHaStates[st.entity_id] = st; });
-              console.log(`[HA-Overwatch] /ow/states eager fetch: ${states.length} entities`);
-            }
-          } catch {}
-          json(res, serverHaStates);
-        });
-      });
-      haReq.on("error", () => json(res, serverHaStates));
-      haReq.end();
-      return;
+    const url = new URL(req.url, `http://localhost:${PORT}`);
+    const force = url.searchParams.get("force") === "1" || url.searchParams.get("refresh") === "1";
+    if (process.env.SUPERVISOR_TOKEN && serverHaStatesNeedRefresh(force)) {
+      await refreshServerHaStatesFromSupervisor(force ? "forced /ow/states" : "stale /ow/states", { force });
     }
     json(res, serverHaStates);
     return;
@@ -3288,10 +3376,7 @@ function startHAListener() {
         }
         return;
       }
-      Object.keys(serverHaStates).forEach(k => delete serverHaStates[k]);
-      msg.result.forEach(st => { if (st.entity_id) serverHaStates[st.entity_id] = st; });
-      haListenerLastFullStateAt = Date.now();
-      console.log(`[HA-Overwatch] State cache rebuilt: ${Object.keys(serverHaStates).length} entities`);
+      replaceServerHaStatesFromArray(msg.result, "websocket get_states");
       // Seed triggered zone state from current HA states — catches sensors already on at startup
       // Without this, zones stay un-triggered until the next state_changed event
       let seeded = 0;
